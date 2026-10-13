@@ -1,0 +1,9 @@
+.env
+*.db
+*.sqlite
+data/
+receipts/
+storage/
+models/
+.venv/
+node_modules/
