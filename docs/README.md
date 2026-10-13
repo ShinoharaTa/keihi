@@ -38,7 +38,7 @@ architecture.md は法令調査より前に書いたため、以下は本節を�
 - 会計サービス: **現在は MF を使用中、freee への移行も検討**。→ 送信先は Provider で抽象化する（architecture.md Q9 は「抽象化を残す」で決定）。移行する場合も、MF 側に保存した過去分の証憑は保存期間中アカウントを残して保持する（legal.md §0-6）。移行するなら年の区切りで行う想定
 - OCR: **Gemini 3.8 Flash（有料 tier）**。料金は 2026-12-31 まで入力 $0.75 / 出力 $3.75 per 1M、2027-01-01 から倍（classification-ocr.md §B-1）。月 100 枚なら数十〜百円程度の見込み（推定）
 - 実行形態: **サーバー（Tailscale 内のみ）+ PWA**。ネイティブアプリは作らない
-- 確認 UI: **Gemini と必要に応じて対話でき、科目などは画面上で選べる。A2UI の概念を取り込む** → 設計は a2ui-review-ui.md（推薦は「概念だけ借りる」B 案。U1 で承認待ち）
+- 確認 UI: **Gemini と必要に応じて対話でき、科目などは画面上で選べる。A2UI の概念を取り込む** → 設計は a2ui-review-ui.md（**B 案で決定**。U2 自由文での AI 相談は MVP に入れない。U6 AI ログ・応答原文の保存は 7 年）
 - スマホ: **iOS / Android の両方に対応**。PWA のカメラ撮影は両 OS で動く。共有シートは Android が Web Share Target、iOS がショートカットで POST（architecture.md §3.1）
 
 ## 3. ユーザーに決めてほしいこと（優先順）
