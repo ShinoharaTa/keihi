@@ -10,3 +10,4 @@ node_modules/
 *.env
 !deploy/*.example.env
 poc/
+!src/storage/
