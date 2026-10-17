@@ -2,7 +2,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rankCandidates } from '../../src/review/card.ts';
-import { amountWarnings, diffSources, missingForApprove, validateValues } from '../../src/review/confirm.ts';
+import { alignTaxRows, amountWarnings, diffSources, missingForApprove, sendableErrors, validateValues } from '../../src/review/confirm.ts';
 import { FIELDS, fromStoredTaxRows, paymentChipOptions, toStoredTaxRows, type Sources, type Values } from '../../src/review/fields.ts';
 import { businessDaysLeft } from '../../src/review/list.ts';
 
@@ -82,6 +82,28 @@ describe('missingForApprove・amountWarnings', () => {
     assert.deepEqual(amountWarnings(base()), []);
     assert.deepEqual(amountWarnings(base({ amount: 1000 })), ['amount_mismatch']);
     assert.deepEqual(amountWarnings(base({ tax_by_rate: [] })), []);
+  });
+});
+
+describe('sendableErrors・alignTaxRows（取引ビルダと揃える）', () => {
+  test('内訳 0 円・内訳の和 ≠ 合計・按分の範囲外を拒否する。内訳が空なら合計だけで可', () => {
+    assert.deepEqual(sendableErrors(base()), []);
+    assert.deepEqual(sendableErrors(base({ tax_by_rate: [] })), []);
+    assert.equal(sendableErrors(base({ amount: 1000 })).length, 1);
+    assert.equal(sendableErrors(base({ amount: 1100, tax_by_rate: [{ category: 'taxable_10', amount_incl_tax: 1100, tax: 100 }, { category: 'non_taxable', amount_incl_tax: 0, tax: 0 }] })).length, 1);
+    assert.equal(sendableErrors(base({ proration_pct: 101 })).length, 1);
+    assert.equal(sendableErrors(base({ proration_pct: 50.5 })).length, 1);
+  });
+  test('tax_id を変えたら 1 行の内訳はその区分に揃える。複数行は内訳も送っていなければエラー', () => {
+    const v = base({ tax_id: 'taxable_8_reduced' });
+    assert.deepEqual(alignTaxRows(base(), v, new Set(['tax_id'])), []);
+    assert.equal(v.tax_by_rate[0].category, 'taxable_8_reduced');
+    const same = base();
+    assert.deepEqual(alignTaxRows(base(), same, new Set(['tax_id'])), []);
+    const rows = [{ category: 'taxable_10' as const, amount_incl_tax: 600, tax: 54 }, { category: 'taxable_8_reduced' as const, amount_incl_tax: 500, tax: 37 }];
+    const multi = base({ tax_id: 'non_taxable', tax_by_rate: rows });
+    assert.equal(alignTaxRows(base({ tax_by_rate: rows }), multi, new Set(['tax_id'])).length, 1);
+    assert.deepEqual(alignTaxRows(base({ tax_by_rate: rows }), multi, new Set(['tax_id', 'tax_by_rate'])), []);
   });
 });
 

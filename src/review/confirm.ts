@@ -3,6 +3,8 @@
 // - reviews に新しい版を追記し、各項目の出所を field_sources_json に入れる（カードの値のままなら カードの出所、変えたら human）。
 // - audit に人の確定として残す（変更なしは user.confirmed、変えた項目があれば user.overrode。changed に項目名）。
 // - documents.status を approved / personal / duplicate / rejected にする。needs_attention のときは残す（要対応を消さない）。
+// - approve では、取引ビルダ（src/deals/builder.ts）が拒否する入力を 422 not_sendable で止める（messages に人が直せる文）。
+//   税率の区分（tax_id）を変えて内訳が 1 行なら、内訳の区分もそれに揃える（複数行なら内訳を直してもらう）。
 // - approve のときだけ jobs に update_receipt_meta と send_deal を積む（ハンドラは別担当）。
 // - approve と personal は取引先の辞書を学習する（src/review/learn.ts）。
 import { appendAudit } from '../audit.ts';
@@ -161,7 +163,32 @@ export function missingForApprove(v: Values): Field[] {
   return REQUIRED_FOR_APPROVE.filter((f) => v[f] === null);
 }
 
-// 合計と税率別の内訳の和（内訳があるときだけ）。食い違いは警告（拒否はしない）。
+// 税率の区分を変えたら、内訳が 1 行のときはその区分に揃える。複数行で内訳を送っていなければ直してもらう（approve だけ）。
+export function alignTaxRows(card: Values, v: Values, given: ReadonlySet<Field>): string[] {
+  if (!given.has('tax_id') || v.tax_id === null || v.tax_id === card.tax_id || v.tax_by_rate.length === 0) return [];
+  if (v.tax_by_rate.length === 1) {
+    v.tax_by_rate = [{ ...v.tax_by_rate[0], category: v.tax_id }];
+    return [];
+  }
+  if (given.has('tax_by_rate')) return [];
+  return ['税率の区分を変えましたが、税率別の内訳が複数行あります。内訳を直してください。'];
+}
+
+// 取引ビルダが拒否する入力（approve だけ。内訳が空なら合計だけで送れる）。
+export function sendableErrors(v: Values): string[] {
+  const out: string[] = [];
+  v.tax_by_rate.forEach((r, i) => {
+    if (r.amount_incl_tax <= 0) out.push(`税率別の内訳 ${i + 1} 行目の金額が 0 円です。金額を入れるか、その行を消してください。`);
+  });
+  if (v.amount !== null && v.tax_by_rate.length) {
+    const sum = v.tax_by_rate.reduce((a, r) => a + r.amount_incl_tax, 0);
+    if (sum !== v.amount) out.push(`税率別の内訳の合計（${sum} 円）が支払金額（${v.amount} 円）と合いません。どちらかを直してください。`);
+  }
+  if (!Number.isSafeInteger(v.proration_pct) || v.proration_pct < 0 || v.proration_pct > 100) out.push('按分は 0〜100 の整数（%）で入れてください。');
+  return out;
+}
+
+// 合計と税率別の内訳の和（内訳があるときだけ）。食い違いは警告（approve 以外は拒否しない）。
 export function amountWarnings(v: Values): string[] {
   if (v.amount === null || v.tax_by_rate.length === 0) return [];
   const sum = v.tax_by_rate.reduce((a, r) => a + r.amount_incl_tax, 0);
@@ -220,7 +247,7 @@ export function decide(db: Db, input: DecideInput): DecideResult {
   const { accounts } = enabledAccounts(db, PROVIDER, input.accountMap ?? loadAccountMap());
   const ctx: ValidateContext = { accountIds: new Set(accounts.map((a) => a.id)), paymentIds: new Set(paymentOptions(db).map((p) => p.id)) };
   const cardValues = stored.card.dataModel.values;
-  const { values, errors } = validateValues(body.values, cardValues, ctx);
+  const { values, given, errors } = validateValues(body.values, cardValues, ctx);
   if (errors.length) throw new ReviewError(422, 'invalid_values', { errors });
 
   // 私用は事業主貸（税は対象外）。対応表に事業主貸が無ければ科目は空のまま。
@@ -232,6 +259,8 @@ export function decide(db: Db, input: DecideInput): DecideResult {
   if (input.decision === 'approve') {
     const missing = missingForApprove(values);
     if (missing.length) throw new ReviewError(422, 'missing_required', { fields: missing });
+    const messages = [...alignTaxRows(cardValues, values, given), ...sendableErrors(values)];
+    if (messages.length) throw new ReviewError(422, 'not_sendable', { messages });
   }
   const warnings = amountWarnings(values);
   const { changed, sources } = diffSources(cardValues, stored.card.dataModel.sources, values);

@@ -81,5 +81,6 @@ describe('入力と表示', () => {
     assert.equal(errorText(422, { reason: 'missing_required', fields: ['txn_date', 'payment'] }), '未入力: 日付・支払手段');
     assert.match(errorText(409, {}), /読み直しました/);
     assert.match(errorText(0, null), /通信できません/);
+    assert.equal(errorText(422, { reason: 'not_sendable', messages: ['内訳を直してください。', '按分を直してください。'] }), '内訳を直してください。 按分を直してください。');
   });
 });
