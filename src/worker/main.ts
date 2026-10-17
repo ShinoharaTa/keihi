@@ -95,7 +95,10 @@ export const HANDLERS: Handlers = {
   }),
   update_receipt_meta: createUpdateReceiptMetaHandler(() => ({ provider: runtime().provider() })),
   send_deal: createSendDealHandler(() => ({ provider: runtime().provider() })),
-  reconcile_deals: createReconcileHandler(() => ({ provider: runtime().provider() })),
+  reconcile_deals: createReconcileHandler(() => {
+    const rt = runtime();
+    return { provider: rt.provider(), verifiedLookbackDays: rt.cfg.reconcile.verifiedLookbackDays, maxListPages: rt.cfg.reconcile.maxListPages };
+  }),
   daily: createDailyHandler(() => {
     const rt = runtime();
     return {

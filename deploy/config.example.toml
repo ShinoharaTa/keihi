@@ -52,6 +52,11 @@ paid_tier_confirmed = false
 # drill_dir = "/home/<user>/.local/share/keihi/drill"   # 既定 <data_dir>/drill。リストア訓練の復元先
 # remote_verify_mode = "download_only"   # "download_only" / "sha256"（F6 の確認後）
 
+[reconcile]
+# 日次照合（freee の取引と送った内容を比べる）
+# verified_lookback_days = 35   # verified の取引を照合し直す範囲（発生日が直近この日数）
+# max_list_pages = 20           # listDeals を取るページ数の上限（1 ページ 100 件）。超えた分は翌日に回す
+
 [retention]
 # docs/ops/retention.md の案。税理士確認 #8 で確定する
 # years = 7                     # 法定の期間（一律）

@@ -159,6 +159,14 @@ describe('[worker]', () => {
   });
 });
 
+describe('[reconcile]', () => {
+  test('verified_lookback_days の既定は 35、max_list_pages の既定は 20。0・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).reconcile, { verifiedLookbackDays: 35, maxListPages: 20 });
+    assert.deepEqual(loadConfig({ configDir: dir2('[reconcile]\nverified_lookback_days = 60\nmax_list_pages = 5\n'), dataDir: '/data/keihi' }).reconcile, { verifiedLookbackDays: 60, maxListPages: 5 });
+    for (const bad of ['[reconcile]\nverified_lookback_days = 0', '[reconcile]\nmax_list_pages = 0', '[reconcile]\nmax_pages = 1']) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  });
+});
+
 describe('[backup] / [retention]', () => {
   test('既定値（drill_dir は <data_dir>/drill）', () => {
     const c = loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' });

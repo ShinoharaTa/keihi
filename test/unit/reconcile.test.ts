@@ -246,6 +246,20 @@ describe('reconcile_deals', () => {
     assert.deepEqual(fake.calls.map((c) => c.method), ['listDeals', 'listDeals', 'listDeals', 'getDeal']);
     assert.equal(row(docs[0]).attention_reason, 'deal_missing');
   });
+
+  test('ハンドラは [reconcile] の max_list_pages（deps）を照合に渡す', async () => {
+    const docs: string[] = [];
+    for (let i = 0; i < 2; i++) docs.push(await sentDocument());
+    clock = at(60);
+    for (let i = 0; i < 200; i++) await fake.createExpenseDeal({ issueDate: '2026-10-15', refNumber: `other-${i}`, details: [{ accountItemId: 101, taxCode: 1, amount: 1 }] });
+    await fake.deleteDeal(Number(row(docs[0]).remote_deal_id));
+    fake.calls.length = 0;
+    const h = createReconcileHandler(() => ({ provider: fake, maxListPages: 1, verifiedLookbackDays: 35 }));
+    await h({} as Parameters<typeof h>[0], { db, now: () => clock });
+    assert.deepEqual(fake.calls.map((c) => c.method), ['listDeals']);
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'deals.reconciled' ORDER BY seq DESC LIMIT 1`).get() as { payload_json: string };
+    assert.equal(JSON.parse(a.payload_json).deferred, 1);
+  });
 });
 
 describe('compareDeal', () => {

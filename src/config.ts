@@ -32,6 +32,9 @@ export const DEFAULT_REMOTE_VERIFY_MODE: RemoteVerifyMode = 'download_only';
 export const DEFAULT_WORKER_LINGER_MS = 1500;
 // 再認可待ち（invalid_grant）のアップロードを待つ上限の日数。過ぎたら needs_attention にしてジョブを終える。
 export const DEFAULT_REAUTH_WAIT_DAYS = 7;
+// [reconcile]（src/deals/reconcile.ts）。verified を照合し直す発生日の日数と、listDeals を取るページ数の上限。
+export const DEFAULT_VERIFIED_LOOKBACK_DAYS = 35;
+export const DEFAULT_MAX_LIST_PAGES = 20;
 // [retention]（docs/ops/retention.md の案。税理士確認 #8 で確定する）。
 export const DEFAULT_RETENTION_YEARS = 7;
 export const DEFAULT_RETENTION_EXTRA_YEARS = 1;
@@ -90,6 +93,8 @@ export type Config = {
   // lingerMs: キューが空と判断した後に待ってもう一度 claim する時間（start --no-block が動作中の oneshot に畳まれる対策）。
   // reauthWaitDays: 再認可待ちのアップロードを待つ上限の日数（src/worker/handlers/uploadReceipt.ts）。
   worker: { lingerMs: number; reauthWaitDays: number };
+  // 日次照合（src/worker/handlers/reconcile.ts → src/deals/reconcile.ts）。
+  reconcile: { verifiedLookbackDays: number; maxListPages: number };
   secrets: Secrets;
 };
 
@@ -132,6 +137,7 @@ const KNOWN: Record<string, string[]> = {
   backup: ['repository', 'keep_snapshots', 'check_interval_days', 'read_data_subset', 'drill_dir', 'remote_verify_mode'],
   retention: ['years', 'extra_years', 'start'],
   worker: ['linger_ms', 'reauth_wait_days'],
+  reconcile: ['verified_lookback_days', 'max_list_pages'],
 };
 
 function readConfigToml(file: string): Table {
@@ -298,6 +304,10 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     worker: {
       lingerMs: optNonNegativeInt(t, 'worker', 'linger_ms') ?? DEFAULT_WORKER_LINGER_MS,
       reauthWaitDays: optPositiveInt(t, 'worker', 'reauth_wait_days') ?? DEFAULT_REAUTH_WAIT_DAYS,
+    },
+    reconcile: {
+      verifiedLookbackDays: optPositiveInt(t, 'reconcile', 'verified_lookback_days') ?? DEFAULT_VERIFIED_LOOKBACK_DAYS,
+      maxListPages: optPositiveInt(t, 'reconcile', 'max_list_pages') ?? DEFAULT_MAX_LIST_PAGES,
     },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
