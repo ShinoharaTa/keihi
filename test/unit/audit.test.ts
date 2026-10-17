@@ -73,7 +73,7 @@ describe('verify', () => {
     for (let i = 0; i < 10; i++) appendAudit(db, { actor: 'worker', action: 'x', entity: 'e', payload: { i } });
     db.exec('DROP TRIGGER audit_log_no_update');
     db.exec('DROP TRIGGER audit_log_no_delete');
-    db.exec(`UPDATE audit_log SET hash = 'f' || substr(hash, 2) WHERE seq = 3`);
+    db.exec(`UPDATE audit_log SET hash = (CASE WHEN substr(hash, 1, 1) = 'f' THEN 'e' ELSE 'f' END) || substr(hash, 2) WHERE seq = 3`);
     const r = verifyAudit(db);
     assert.equal(r.ok, false);
     assert.equal(!r.ok && r.seq, 3);
