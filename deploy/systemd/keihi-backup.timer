@@ -1,0 +1,12 @@
+# keihi-backup.service を毎日起動する（docs/mvp-plan-v0.1.md T5-2・T5-4）。
+# 時刻は JST（本機のタイムゾーンは UTC なので明示する）。Persistent=true: 止まっていた間の分は、次に起動したときに 1 回実行する。
+[Unit]
+Description=keihi daily backup timer
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Tokyo
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

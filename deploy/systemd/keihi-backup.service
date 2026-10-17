@@ -1,0 +1,20 @@
+# keihi の日次バックアップ（docs/mvp-plan-v0.1.md T5-2・T5-4、docs/ops/backup.md）。systemctl --user 用。
+# keihi-backup.timer から毎日起動する。スナップショット → restic backup → 週 1 回 restic check。prune はしない。
+# restic は ~/.local/bin/restic（tools/backup/run.ts が探す）。シークレットは tools/backup/run.ts が secrets.env から
+# restic 用の値だけを読む（EnvironmentFile にしない: Gemini・freee のキーを restic の環境に載せないため）。
+# 失敗は audit に記録し、終了コード非 0（systemctl --user status / journalctl --user -u keihi-backup で見える）。
+# インストール例（手作業）: ln -s ~/workspace/keihi/deploy/systemd/keihi-backup.{service,timer} ~/.config/systemd/user/
+[Unit]
+Description=keihi daily backup (restic)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/keihi
+ExecStart=%h/.nvm/versions/node/v24.20.0/bin/node %h/workspace/keihi/tools/backup/run.ts
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+UMask=0077
+TimeoutStartSec=6h
