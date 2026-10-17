@@ -12,7 +12,7 @@ const H = 32;
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
 // 左半分が黒、右半分が白の横長画像。回転の向きを画素で確かめるため。
-function landscape(): sharp.Sharp {
+function landscape(): ReturnType<typeof sharp> {
   const raw = Buffer.alloc(W * H * 3);
   for (let y = 0; y < H; y++) for (let x = W / 2; x < W; x++) raw.fill(255, (y * W + x) * 3, (y * W + x) * 3 + 3);
   return sharp(raw, { raw: { width: W, height: H, channels: 3 } });
