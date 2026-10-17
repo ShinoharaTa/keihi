@@ -92,11 +92,11 @@ describe('worker', () => {
     db.close();
   });
 
-  test('空実装のハンドラは完了にしない（未実装として失敗）', async () => {
+  test('実行環境なしで HANDLERS を動かしても完了にしない（失敗として再試行に回す）', async () => {
     const a = enqueue(db, 'upload_receipt', 'D1', { now: T0 });
     const b = enqueue(db, 'extract', 'D1', { now: T0 });
     assert.deepEqual(await runUntilEmpty(db, HANDLERS, { now: () => T0 }), { done: 0, failed: 2 });
-    assert.match(getJob(db, a)!.last_error!, /未実装/);
+    assert.match(getJob(db, a)!.last_error!, /実行環境が未設定/);
     assert.equal(getJob(db, b)!.state, 'queued');
     db.close();
   });

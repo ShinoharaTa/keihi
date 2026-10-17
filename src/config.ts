@@ -12,6 +12,9 @@ import { parse as parseToml } from 'smol-toml';
 export const DEFAULT_CONFIG_DIR = path.join(homedir(), '.config', 'keihi');
 export const DEFAULT_DATA_DIR = path.join(homedir(), '.local', 'share', 'keihi');
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+// U7 の暫定（mvp-plan.md §3.2）。T0-3r の結果で変える。
+export const DEFAULT_THINKING_LEVEL = 'low';
+export const DEFAULT_MEDIA_RESOLUTION = 'medium';
 // T1-6: 取り込みのサイズ上限の初期値（freee は 64MB。mvp-plan.md T1-6 の変更）。
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 // T1-14（D4）: web は 127.0.0.1 の固定ポート。バインド先は設定にしない（0.0.0.0 にできないようにする）。
@@ -23,6 +26,12 @@ export const DEFAULT_MCP_PORT = 8796;
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
 export type FreeeTarget = 'poc' | 'prod';
+// 予算（T1-15）の日の区切り。F16 が分かるまで JST の暦日だけ。
+export type DayBoundary = 'jst';
+export type ProviderKind = 'freee' | 'fake';
+export type ThinkingLevel = 'low' | 'medium' | 'high';
+export type MediaResolution = 'low' | 'medium' | 'high';
+const LEVELS = ['low', 'medium', 'high'] as const;
 
 export type Secrets = {
   geminiApiKey: string | null;
@@ -36,8 +45,11 @@ export type Config = {
   dbPath: string;
   objectsDir: string;
   freeeTokenPath: string;
-  gemini: { model: string; paidTierConfirmed: boolean };
-  freee: { pocCompanyId: number | null; prodCompanyId: number | null };
+  gemini: { model: string; paidTierConfirmed: boolean; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution };
+  // target は worker が使う事業所（既定 poc。G1 で prod に変える）。
+  freee: { pocCompanyId: number | null; prodCompanyId: number | null; target: FreeeTarget; dayBoundary: DayBoundary };
+  // fake は開発用（プロセス内のメモリだけ。freee を呼ばない）。
+  provider: { kind: ProviderKind };
   ingest: { maxBytes: number };
   // R6。deadline_mode の既定は短い方（早期入力方式）。年末年始（12/29〜1/3）は既定で休業日に含めない（短い方に倒す）。
   calendar: { deadlineMode: DeadlineMode; yearEndHolidays: boolean };
@@ -78,8 +90,9 @@ type Table = Record<string, unknown>;
 
 const KNOWN: Record<string, string[]> = {
   paths: ['data_dir'],
-  gemini: ['model', 'paid_tier_confirmed'],
-  freee: ['poc_company_id', 'prod_company_id'],
+  gemini: ['model', 'paid_tier_confirmed', 'thinking_level', 'media_resolution'],
+  freee: ['poc_company_id', 'prod_company_id', 'target', 'day_boundary'],
+  provider: ['kind'],
   ingest: ['max_upload_bytes'],
   calendar: ['deadline_mode', 'year_end_holidays'],
   deadline: ['count_from'],
@@ -119,6 +132,13 @@ function optString(t: Table, sec: string, key: string): string | null {
   if (v === undefined) return null;
   if (typeof v !== 'string' || !v) throw new ConfigError(`config.toml の ${sec}.${key} は空でない文字列で指定する`);
   return v;
+}
+
+function optEnum<T extends string>(t: Table, sec: string, key: string, values: readonly T[]): T | null {
+  const v = optString(t, sec, key);
+  if (v === null) return null;
+  if (!(values as readonly string[]).includes(v)) throw new ConfigError(`config.toml の ${sec}.${key} は ${values.map((x) => `"${x}"`).join(' / ')} のどれか`);
+  return v as T;
 }
 
 function optBool(t: Table, sec: string, key: string): boolean | null {
@@ -199,8 +219,16 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     gemini: {
       model: optString(t, 'gemini', 'model') ?? DEFAULT_GEMINI_MODEL,
       paidTierConfirmed: optBool(t, 'gemini', 'paid_tier_confirmed') ?? false,
+      thinkingLevel: optEnum(t, 'gemini', 'thinking_level', LEVELS) ?? DEFAULT_THINKING_LEVEL,
+      mediaResolution: optEnum(t, 'gemini', 'media_resolution', LEVELS) ?? DEFAULT_MEDIA_RESOLUTION,
     },
-    freee: { pocCompanyId, prodCompanyId },
+    freee: {
+      pocCompanyId,
+      prodCompanyId,
+      target: optEnum(t, 'freee', 'target', ['poc', 'prod'] as const) ?? 'poc',
+      dayBoundary: optEnum(t, 'freee', 'day_boundary', ['jst'] as const) ?? 'jst',
+    },
+    provider: { kind: optEnum(t, 'provider', 'kind', ['freee', 'fake'] as const) ?? 'freee' },
     ingest: { maxBytes: optPositiveInt(t, 'ingest', 'max_upload_bytes') ?? DEFAULT_MAX_UPLOAD_BYTES },
     calendar: { deadlineMode: mode, yearEndHolidays: optBool(t, 'calendar', 'year_end_holidays') ?? false },
     deadline: { countFrom },

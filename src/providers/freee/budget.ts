@@ -65,6 +65,12 @@ export function decide(purpose: Purpose, used: Used, limits: BudgetLimits = DEFA
   return { ok: true };
 }
 
+// config.toml の [freee] day_boundary を resetHourJst に直す。今は "jst"（JST の 0 時）だけ（F16 が分かったら足す）。
+export function resetHourJstFor(dayBoundary: 'jst'): number {
+  if (dayBoundary === 'jst') return 0;
+  throw new Error(`知らない day_boundary: ${String(dayBoundary)}`);
+}
+
 // 予算の日（JST の暦日。resetHourJst 時に切り替わる）。
 export function budgetDay(now: Date, resetHourJst = 0): string {
   return todayInTokyo(new Date(now.getTime() - resetHourJst * 3600_000));

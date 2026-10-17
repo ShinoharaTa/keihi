@@ -6,7 +6,7 @@
 // - 成功したら provider_uploads を state=uploaded・remote_receipt_id にし、監査ログに残す（同じトランザクション）。
 // - 失敗したら例外を投げて再試行に回す（jobs のバックオフ）。その際、次のどれかなら documents.status を needs_attention にする:
 //   期限（deadline_on）の 2 営業日前を過ぎた / 自動では直らない失敗（再認可が要る・4xx・大きすぎる）/ 最後の試行。
-// - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts での配線は未実装。
+// - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts が設定から組み立てて渡す。
 import { appendAudit } from '../../audit.ts';
 import { addDays, subtractBusinessDays, todayInTokyo, type CalendarOptions } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
@@ -155,9 +155,3 @@ export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Ha
     }
   };
 }
-
-// worker/main.ts の HANDLERS が使う既定のハンドラ。freee の Provider の配線（どの事業所・設定で作るか）は未実装なので、
-// 送ったことにせず失敗させる（再試行に回る）。
-export const uploadReceipt: Handler = createUploadReceiptHandler(() => {
-  throw new Error('upload_receipt の Provider の配線が未実装（worker/main.ts で createUploadReceiptHandler に freee の Provider を渡す）');
-});

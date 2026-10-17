@@ -7,11 +7,21 @@
 # model = "gemini-3.8-flash"
 # Cloud Billing を有効にした keihi 専用プロジェクトのキーであることを確かめてから true にする。
 paid_tier_confirmed = false
+# U7 の暫定値（T0-3r の結果で変える）。"low" / "medium" / "high"
+# thinking_level = "low"
+# media_resolution = "medium"
 
 [freee]
 # テスト事業所と本番事業所は別の名前で持つ。
 # poc_company_id = 1234567
 # prod_company_id = 7654321
+# worker が使う事業所。G1 で "prod" に変える。
+# target = "poc"                # "poc" / "prod"
+# 予算（1 日 3,000 回）の日の区切り。F16 が分かるまで "jst"（JST の暦日）だけ。
+# day_boundary = "jst"
+
+[provider]
+# kind = "freee"                # "freee" / "fake"（開発用。freee を呼ばず、プロセス内のメモリだけ）
 
 [ingest]
 # max_upload_bytes = 20971520   # 20MB

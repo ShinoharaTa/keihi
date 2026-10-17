@@ -1,6 +1,7 @@
 // 設定とシークレット（docs/mvp-plan.md T1-2）。一時ディレクトリだけを使う。
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,13 @@ before(async () => {
 after(async () => {
   await rm(root, { recursive: true, force: true });
 });
+
+function dir2(toml: string): string {
+  const d = path.join(root, String(n++));
+  mkdirSync(d);
+  writeFileSync(path.join(d, 'config.toml'), toml);
+  return d;
+}
 
 async function dir(toml: string | null, env: string | null, mode = 0o600): Promise<string> {
   const d = path.join(root, String(n++));
@@ -81,6 +89,30 @@ describe('loadConfig', () => {
     assert.throws(() => loadConfig({ configDir: d6 }), /count_from/);
     const d5 = await dir('[other]\nx = 1\n', null);
     assert.throws(() => loadConfig({ configDir: d5 }), /知らないセクション/);
+  });
+});
+
+describe('worker の配線（[freee] target / day_boundary、[provider] kind、[gemini] thinking_level / media_resolution）', () => {
+  test('既定は poc / jst / freee / low / medium', async () => {
+    const cfg = loadConfig({ configDir: await dir(null, null) });
+    assert.deepEqual(cfg.freee, { pocCompanyId: null, prodCompanyId: null, target: 'poc', dayBoundary: 'jst' });
+    assert.deepEqual(cfg.provider, { kind: 'freee' });
+    assert.equal(cfg.gemini.thinkingLevel, 'low');
+    assert.equal(cfg.gemini.mediaResolution, 'medium');
+  });
+  test('指定を読む', async () => {
+    const cfg = loadConfig({
+      configDir: await dir('[freee]\ntarget = "prod"\nday_boundary = "jst"\n[provider]\nkind = "fake"\n[gemini]\nthinking_level = "medium"\nmedia_resolution = "high"\n', null),
+    });
+    assert.equal(cfg.freee.target, 'prod');
+    assert.equal(cfg.provider.kind, 'fake');
+    assert.equal(cfg.gemini.thinkingLevel, 'medium');
+    assert.equal(cfg.gemini.mediaResolution, 'high');
+  });
+  test('知らない値は拒否', async () => {
+    for (const toml of ['[freee]\ntarget = "production"\n', '[freee]\nday_boundary = "utc"\n', '[provider]\nkind = "mf"\n', '[gemini]\nthinking_level = "max"\n']) {
+      assert.throws(() => loadConfig({ configDir: dir2(toml) }), ConfigError, toml);
+    }
   });
 });
 
