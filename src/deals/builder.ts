@@ -186,6 +186,11 @@ export function reviewForDeal(row: ReviewRow, receiptIds: number[], resolveTax: 
   const qualified = row.qualified_invoice === 1;
   const txnDate = row.txn_date;
 
+  // tax_id は freee の税区分コード、または税率の区分（T2-8 の区分か Gemini の区分）。
+  const tax = row.tax_id ?? '';
+  const taxCat = REVIEW_CATEGORY[tax] ?? ((TAX_CATEGORIES as readonly string[]).includes(tax) ? (tax as TaxCategory) : null);
+  const taxCode = (): number | null => (/^\d+$/.test(tax) ? Number(tax) : taxCat ? resolveTax(taxCat, txnDate, qualified) : null);
+
   let taxLines: TaxLine[];
   const byRate = row.tax_by_rate_json ? (JSON.parse(row.tax_by_rate_json) as { category: string; amount_incl_tax: number }[]) : [];
   if (Array.isArray(byRate) && byRate.length > 0) {
@@ -194,11 +199,18 @@ export function reviewForDeal(row: ReviewRow, receiptIds: number[], resolveTax: 
       if (!cat) throw new DealBuildError(`税率の区分が不正: ${x.category}`);
       return { taxCode: resolveTax(cat, txnDate, qualified), amount: x.amount_incl_tax };
     });
+    // 確定の tax_id は人が選んだ税率の区分。内訳（抽出の値）と食い違えば、1 行なら tax_id を優先する（人の上書き）。
+    // 複数行で tax_id がどの行の区分とも合わないときは、どの行を直したのか決められないので作らない。
+    if (tax !== '') {
+      const code = taxCode();
+      if (code === null) throw new DealBuildError(`税区分が不正: ${row.tax_id}`);
+      if (taxLines.length === 1) taxLines = [{ taxCode: code, amount: taxLines[0].amount }];
+      else if (!taxLines.some((l) => l.taxCode === code)) {
+        throw new DealBuildError(`確定の税区分 ${row.tax_id} が税率ごとの内訳（${byRate.map((x) => x.category).join(', ')}）のどれとも合わない`);
+      }
+    }
   } else {
-    const tax = row.tax_id ?? '';
-    // tax_id は freee の税区分コード、または税率の区分（T2-8 の区分か Gemini の区分）。
-    const cat = REVIEW_CATEGORY[tax] ?? ((TAX_CATEGORIES as readonly string[]).includes(tax) ? (tax as TaxCategory) : null);
-    const code = /^\d+$/.test(tax) ? Number(tax) : cat ? resolveTax(cat, txnDate, qualified) : null;
+    const code = taxCode();
     if (code === null) throw new DealBuildError(`税区分が不正: ${row.tax_id}`);
     taxLines = [{ taxCode: code, amount: row.amount }];
   }
