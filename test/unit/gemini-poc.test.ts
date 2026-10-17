@@ -19,7 +19,6 @@ import {
   parseEnv,
   parseTomlSubset,
   scoreOutput,
-  stripMetadata,
   summarize,
   validateSchema,
   type Row,
@@ -57,11 +56,14 @@ const goodOutput = {
   extraction: {
     txn_date: '2026-09-11',
     amount_total: 240,
-    tax_by_rate: [{ rate: 10, amount_incl_tax: 240, tax: 21 }],
+    tax_by_rate: [{ category: 'taxable_10', amount_incl_tax: 240, tax: 21 }],
     vendor_name: 'テスト 文具店',
     invoice_reg_no: 'T9995784636321',
+    payment_hint: null,
+    description: null,
+    confidence: 0.9,
   },
-  account_candidates: [{ account_id: '消耗品費', tax_id: '課税仕入10%', confidence: 0.9, reason: '文具' }],
+  account_candidates: [{ account_id: '消耗品費', tax_id: 'taxable_10', confidence: 0.9, reason: '文具' }],
   questions: [],
 };
 
@@ -137,35 +139,14 @@ after(async () => {
   await rm(work, { recursive: true, force: true });
 });
 
-describe('EXIF 除去（D13）', () => {
-  test('JPEG の EXIF を落とし、画素は変えない', async () => {
-    assert.ok(jpegWithExif.includes(EXIF_MARK));
+describe('送信する画像のメタデータ（D13。派生画像は deriveForAi）', () => {
+  test('dry-run の検出: JPEG の APP1（詰め物と単独マーカーがあっても）、PNG の文字列チャンク', async () => {
     assert.ok(hasJpegExif(jpegWithExif));
-    const out = stripMetadata(jpegWithExif, 'image/jpeg');
-    assert.ok(!out.includes(EXIF_MARK));
-    assert.ok(!hasJpegExif(out));
-    assert.equal((await sharp(out).metadata()).exif, undefined);
-    const [a, b] = await Promise.all([sharp(jpegWithExif).raw().toBuffer(), sharp(out).raw().toBuffer()]);
-    assert.ok(a.equals(b));
-  });
-
-  test('PNG の文字列チャンクを落とす', async () => {
-    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'white' } }).png().toBuffer();
-    const withText = pngWithText(png);
-    assert.ok(hasPngMetadata(withText));
-    const out = stripMetadata(withText, 'image/png');
-    assert.ok(!out.includes(EXIF_MARK));
-    assert.ok(!hasPngMetadata(out));
-    assert.ok(out.equals(png));
-  });
-
-  test('0xFF の詰め物と単独マーカーがあっても APP1 を検出して落とす', async () => {
-    // SOI の後に詰め物 3 バイトと RST0（長さを持たない）を挟む
     const padded = Buffer.concat([jpegWithExif.subarray(0, 2), Buffer.from([0xff, 0xd0, 0xff, 0xff, 0xff]), jpegWithExif.subarray(3)]);
     assert.ok(hasJpegExif(padded));
-    const out = stripMetadata(padded, 'image/jpeg');
-    assert.ok(!out.includes(EXIF_MARK));
-    assert.ok(!hasJpegExif(out));
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'white' } }).png().toBuffer();
+    assert.ok(!hasPngMetadata(png));
+    assert.ok(hasPngMetadata(pngWithText(png)));
   });
 });
 

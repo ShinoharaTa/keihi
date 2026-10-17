@@ -1,7 +1,17 @@
-// Gemini の最小クライアント（docs/mvp-plan.md T2-3）。
+// Gemini のクライアント（docs/mvp-plan.md T2-3、mvp-plan-v0.1.md T2-3）。
 // REST generateContent を fetch で直接呼ぶ。SDK は使わない。
 // 画像は inline のみ（Files API・キャッシュ・Interactions API は使わない。classification-ocr.md B-2）。
-// API キーは x-goog-api-key ヘッダでだけ送り、URL・ログ・例外メッセージには出さない。
+// API キーは x-goog-api-key ヘッダでだけ送り、URL・ログ・例外メッセージ・保存する応答本文には出さない。
+// - 設定（model・paid_tier_confirmed・thinking_level・media_resolution）は createGeminiFromConfig で読む。
+//   有料 tier の確認かキーが無ければ ConfigError（requireGemini）。
+// - 領収書の抽出（extractReceipt）は、原本から deriveForAi で作った派生画像だけを送り（D13）、
+//   応答は schema.ts の構造化出力（responseJsonSchema）で受ける。応答の検証は呼び出し側が validate.ts で行う。
+// - generateContent に「保存しない（store: false）」相当のパラメータは無い（Interactions API の store は使わない）ので付けない。
+import { createHash } from 'node:crypto';
+import { requireGemini, type Config } from '../../config.ts';
+import { deriveForAi } from './derive.ts';
+import { buildPrompt, SYSTEM_INSTRUCTION } from './prompt.ts';
+import { buildResponseSchema, type SchemaAccount } from './schema.ts';
 
 export const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -29,6 +39,10 @@ export type Usage = { tokensIn: number; tokensOut: number; tokensThoughts: numbe
 export type GenerateResult = {
   json: unknown;
   rawText: string;
+  // HTTP の応答本文そのまま（キーは *** に置き換える）。ai_turns.response_json に保存する（U6）。
+  responseBody: string;
+  // 送ったリクエスト本文の sha256（ai_turns.request_sha256）。
+  requestSha256: string;
   usage: Usage;
   latencyMs: number;
   modelVersion: string | null;
@@ -39,10 +53,12 @@ export class GeminiError extends Error {
   readonly status: number | null;
   readonly usage: Usage | null;
   readonly latencyMs: number;
+  readonly responseBody: string | null;
+  readonly requestSha256: string | null;
   constructor(
     code: GeminiError['code'],
     message: string,
-    opts: { status?: number | null; usage?: Usage | null; latencyMs: number },
+    opts: { status?: number | null; usage?: Usage | null; latencyMs: number; responseBody?: string | null; requestSha256?: string | null },
   ) {
     super(message);
     this.name = 'GeminiError';
@@ -50,6 +66,18 @@ export class GeminiError extends Error {
     this.status = opts.status ?? null;
     this.usage = opts.usage ?? null;
     this.latencyMs = opts.latencyMs;
+    this.responseBody = opts.responseBody ?? null;
+    this.requestSha256 = opts.requestSha256 ?? null;
+  }
+
+  // 時間を置けば通りうる失敗（429・5xx・接続できない）。ジョブの再試行に回す。
+  get retryable(): boolean {
+    return this.code === 'network' || (this.code === 'http' && this.status !== null && (this.status === 429 || this.status >= 500));
+  }
+
+  // 応答は来たが構造化出力として読めない（スキーマ違反と同じ扱い）。
+  get malformed(): boolean {
+    return this.code === 'invalid_json' || this.code === 'empty';
   }
 }
 
@@ -114,6 +142,7 @@ export function createGeminiClient(opts: {
     async generate(input) {
       const url = generateContentUrl(baseUrl, input.model);
       const body = JSON.stringify(buildGenerateContentBody(input));
+      const requestSha256 = createHash('sha256').update(body).digest('hex');
       const started = performance.now();
       const elapsed = () => Math.round(performance.now() - started);
       let res: Response;
@@ -126,21 +155,23 @@ export function createGeminiClient(opts: {
         });
       } catch (e) {
         const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-        throw new GeminiError('network', redact(`Gemini への接続に失敗: ${msg}`), { latencyMs: elapsed() });
+        throw new GeminiError('network', redact(`Gemini への接続に失敗: ${msg}`), { latencyMs: elapsed(), requestSha256 });
       }
-      const text = await res.text();
+      const text = redact(await res.text());
       const latencyMs = elapsed();
       if (!res.ok) {
-        throw new GeminiError('http', redact(`Gemini HTTP ${res.status}: ${text.slice(0, 500)}`), {
+        throw new GeminiError('http', `Gemini HTTP ${res.status}: ${text.slice(0, 500)}`, {
           status: res.status,
           latencyMs,
+          responseBody: text,
+          requestSha256,
         });
       }
       let raw: RawResponse;
       try {
         raw = JSON.parse(text) as RawResponse;
       } catch {
-        throw new GeminiError('invalid_json', 'Gemini の応答が JSON でない', { status: res.status, latencyMs });
+        throw new GeminiError('invalid_json', 'Gemini の応答が JSON でない', { status: res.status, latencyMs, responseBody: text, requestSha256 });
       }
       const usage = usageOf(raw);
       const parts = raw.candidates?.[0]?.content?.parts ?? [];
@@ -148,15 +179,59 @@ export function createGeminiClient(opts: {
         .filter((p) => !p.thought && typeof p.text === 'string')
         .map((p) => p.text)
         .join('');
-      if (!rawText) throw new GeminiError('empty', 'Gemini の応答に本文が無い', { status: res.status, usage, latencyMs });
+      const meta = { status: res.status, usage, latencyMs, responseBody: text, requestSha256 };
+      if (!rawText) throw new GeminiError('empty', 'Gemini の応答に本文が無い', meta);
       // スキーマ違反・不正 JSON は再試行せずエラー（classification-ocr.md 受け入れ条件）。
       let json: unknown;
       try {
         json = JSON.parse(rawText);
       } catch {
-        throw new GeminiError('invalid_json', '構造化出力が JSON として読めない', { status: res.status, usage, latencyMs });
+        throw new GeminiError('invalid_json', '構造化出力が JSON として読めない', meta);
       }
-      return { json, rawText, usage, latencyMs, modelVersion: raw.modelVersion ?? null };
+      return { json, rawText, responseBody: text, requestSha256, usage, latencyMs, modelVersion: raw.modelVersion ?? null };
     },
   };
+}
+
+// ---- 設定から作る / 領収書の抽出 ----
+
+export type GeminiSettings = { model: string; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution };
+export type Gemini = GeminiSettings & { client: GeminiClient };
+
+// 有料 tier の確認とキーが無ければ ConfigError（classification-ocr.md 受け入れ条件）。
+export function createGeminiFromConfig(cfg: Config, opts: { fetch?: typeof fetch; baseUrl?: string; timeoutMs?: number } = {}): Gemini {
+  const g = requireGemini(cfg);
+  return {
+    model: g.model,
+    thinkingLevel: cfg.gemini.thinkingLevel,
+    mediaResolution: cfg.gemini.mediaResolution,
+    client: createGeminiClient({ apiKey: g.apiKey, fetch: opts.fetch, baseUrl: opts.baseUrl, timeoutMs: opts.timeoutMs }),
+  };
+}
+
+export type ReceiptRequest = {
+  // 原本のバイト列（そのままは送らない。deriveForAi の派生画像を送る）。
+  original: Buffer;
+  // Gemini に見せる科目（enabled_accounts）。応答スキーマの enum になる。
+  accounts: readonly SchemaAccount[];
+  // 呼び出しごとに足す文脈（辞書の集計など。prompt.ts）。
+  context?: string;
+};
+
+export async function buildReceiptInput(req: ReceiptRequest, s: GeminiSettings): Promise<GenerateInput> {
+  const d = await deriveForAi(req.original);
+  const prompt = req.context ? `${buildPrompt(req.accounts)}\n${req.context}` : buildPrompt(req.accounts);
+  return {
+    model: s.model,
+    systemInstruction: SYSTEM_INSTRUCTION,
+    prompt,
+    inline: { mimeType: d.mime, data: d.bytes },
+    responseJsonSchema: buildResponseSchema(req.accounts),
+    thinkingLevel: s.thinkingLevel,
+    mediaResolution: s.mediaResolution,
+  };
+}
+
+export async function extractReceipt(g: Gemini, req: ReceiptRequest, override: Partial<GeminiSettings> = {}): Promise<GenerateResult> {
+  return g.client.generate(await buildReceiptInput(req, { ...g, ...override }));
 }
