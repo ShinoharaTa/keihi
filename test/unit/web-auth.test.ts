@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Hono } from 'hono';
+import { appendAudit } from '../../src/audit.ts';
 import { ConfigError, loadConfig } from '../../src/config.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -88,7 +89,13 @@ describe('Tailscale-User-Login', () => {
     assert.deepEqual(await f.json(), { reason: 'forbidden' });
     const ok = await req('/api/status', { user: USER });
     assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { ok: true, user: USER, documents: { total: 0 }, jobs: { queued: 0, running: 0, failed: 0 } });
+    assert.deepEqual(await ok.json(), {
+      ok: true,
+      user: USER,
+      documents: { total: 0, needs_attention: 0 },
+      jobs: { queued: 0, running: 0, failed: 0 },
+      backup: { last_success_at: null, last_drill: null },
+    });
   });
   test('取り込み API・一覧・PWA も認証の後ろにある', async () => {
     assert.equal((await req('/api/documents', { method: 'POST', body: new FormData() })).status, 401);
@@ -211,5 +218,18 @@ describe('main.ts', () => {
     assert.match(src, /hostname: WEB_HOST/);
     const cfg = await readFile('src/config.ts', 'utf8');
     assert.match(cfg, /export const WEB_HOST = '127\.0\.0\.1';/);
+  });
+});
+
+describe('/api/status のバックアップ状態', () => {
+  test('最後に成功した backup.run と最後の backup.drill を監査ログから読む', async () => {
+    const a = (action: string, payload: Record<string, unknown>, ts: string) => appendAudit(db, { actor: 'backup', action, entity: 'backup', entityId: null, payload }, new Date(ts));
+    a('backup.run', { ok: true }, '2026-10-10T00:00:00.000Z');
+    a('backup.run', { ok: false, error: 'x' }, '2026-10-11T00:00:00.000Z');
+    a('backup.drill', { ok: true, failure_count: 0 }, '2026-10-01T00:00:00.000Z');
+    a('backup.drill', { ok: false, failure_count: 2, failures: ['secret'] }, '2026-10-12T00:00:00.000Z');
+    const r = await req('/api/status', { user: USER });
+    const j = (await r.json()) as { backup: unknown };
+    assert.deepEqual(j.backup, { last_success_at: '2026-10-10T00:00:00.000Z', last_drill: { at: '2026-10-12T00:00:00.000Z', ok: false, failure_count: 2 } });
   });
 });
