@@ -5,7 +5,16 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { TOKEN_URL, TokenStore, buildAuthorizeUrl, createTokenProvider, type StoredToken } from '../../src/providers/freee/auth.ts';
+import { spawnSync } from 'node:child_process';
+import {
+  LOCK_WAIT_MS,
+  TOKEN_TIMEOUT_MS,
+  TOKEN_URL,
+  TokenStore,
+  buildAuthorizeUrl,
+  createTokenProvider,
+  type StoredToken,
+} from '../../src/providers/freee/auth.ts';
 import { FreeeGuardError, createFreeeClient } from '../../src/providers/freee/client.ts';
 import {
   CreatedLog,
@@ -153,6 +162,57 @@ describe('OAuth', () => {
     assert.equal(api.length, 2);
     assert.equal(api[0].headers.get('authorization'), `Bearer ${ACCESS}`);
     assert.equal(api[1].headers.get('authorization'), 'Bearer at-TEST-new-1-0123456789');
+  });
+
+  test('読んだトークンは期限が近づくまでファイルを読み直さない', async () => {
+    const dir = await makeConfigDir();
+    const store = new TokenStore(tokenFile(dir, 'poc'));
+    let now = NOW();
+    const m = mockFetch();
+    const p = createTokenProvider({ store, creds: { clientId: 'c', clientSecret: CLIENT_SECRET }, fetch: m.fetch, nowSec: () => now });
+    assert.equal(await p.get(), ACCESS);
+    // 他のプロセスが更新したとする
+    await store.write(token({ access_token: 'at-TEST-other-0123456789', created_at: now + 1000 }));
+    assert.equal(await p.get(), ACCESS);
+    // 期限の近くでは読み直し、他が更新した分を使う（自分では更新しない）
+    now += 21600 - 200;
+    assert.equal(await p.get(), 'at-TEST-other-0123456789');
+    assert.equal(m.reqs.length, 0);
+  });
+
+  test('ロックの待ち時間はトークン更新のタイムアウトより長い', () => {
+    assert.ok(LOCK_WAIT_MS > TOKEN_TIMEOUT_MS);
+  });
+
+  test('ロックファイルに pid と時刻を書き、終わったら消す', async () => {
+    const dir = await makeConfigDir();
+    const store = new TokenStore(tokenFile(dir, 'poc'));
+    const held = await store.withLock(async () => JSON.parse(await readFile(store.lockPath, 'utf8')) as { pid: number; at: string });
+    assert.equal(held.pid, process.pid);
+    assert.ok(!Number.isNaN(Date.parse(held.at)));
+    await assert.rejects(stat(store.lockPath), /ENOENT/);
+  });
+
+  test('保持者の pid が生きていないロックは回収する', async () => {
+    const dir = await makeConfigDir();
+    const store = new TokenStore(tokenFile(dir, 'poc'));
+    const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+    await writeFile(store.lockPath, JSON.stringify({ pid: dead, at: '2026-01-01T00:00:00.000Z' }));
+    assert.equal(await store.withLock(async () => 'ok', { waitMs: 200 }), 'ok');
+  });
+
+  test('保持者が生きていれば待ち、時間切れでも消せとは言わない。保持者が分からなければ消せと言う', async () => {
+    const dir = await makeConfigDir();
+    const store = new TokenStore(tokenFile(dir, 'poc'));
+    await writeFile(store.lockPath, JSON.stringify({ pid: process.pid, at: '2026-01-01T00:00:00.000Z' }));
+    await assert.rejects(store.withLock(async () => 'x', { waitMs: 150 }), (e: Error) => {
+      assert.match(e.message, new RegExp(`pid ${process.pid}`));
+      assert.doesNotMatch(e.message, /消す/);
+      return true;
+    });
+    await writeFile(store.lockPath, 'garbage');
+    await assert.rejects(store.withLock(async () => 'x', { waitMs: 150 }), /確かめてから消す/);
+    assert.equal(await readFile(store.lockPath, 'utf8'), 'garbage');
   });
 
   test('パーミッションが 0600 でないトークンファイルは読まない', async () => {
@@ -371,6 +431,18 @@ describe('cleanup', () => {
     // F13 は紐付き中の証憑以外を全部消すので、残るのは（モックでは消せた扱いなので）無し
     assert.equal((await log.outstanding(POC)).length, 0);
   });
+
+  test('F11 の再実行は、前回の取引が無くても前回の明細があれば作らずに読むだけ', async () => {
+    const dir = await makeConfigDir();
+    const created = path.join(work, `c${n++}.jsonl`);
+    const e: CreatedEntry = { op: 'created', type: 'wallet_txn', id: 4242, company_id: POC, step: 'F11', at: '2026-10-01T00:00:00.000Z' };
+    await writeFile(created, JSON.stringify(e) + '\n');
+    const m = mockFetch();
+    const s = sink();
+    assert.equal(await main(['--only', 'F11', '--config-dir', dir, '--results', path.join(work, `r${n++}.md`), '--created', created], { fetch: m.fetch, ...s }), 0, s.lines.join('\n'));
+    const api = m.reqs.filter((r) => r.url.href !== TOKEN_URL);
+    assert.deepEqual(api.map((r) => `${r.method} ${r.url.pathname}`), ['GET /api/1/wallet_txns/4242']);
+  });
 });
 
 describe('補助', () => {
@@ -430,5 +502,16 @@ describe('freee-auth', () => {
       assert.equal(await authMain([...args, '--config-dir', dir], { fetch: f, readCode: async () => 'c0de-TEST', ...s }), 1);
       assert.equal(await new TokenStore(tokenFile(dir, args.length ? 'prod' : 'poc')).read(), null);
     }
+  });
+
+  test('poc_company_id が未設定でも、prod_company_id と同じ事業所はテスト事業所用に保存しない', async () => {
+    const dir = await makeConfigDir({ token: null });
+    await writeFile(path.join(dir, 'config.toml'), `[freee]\nprod_company_id = ${PROD}\n`);
+    const f = (async () =>
+      new Response(JSON.stringify({ access_token: 'at-TEST-y-0123456789', refresh_token: 'rt-TEST-y-0123456789', expires_in: 21600, company_id: PROD }))) as typeof fetch;
+    const s = sink();
+    assert.equal(await authMain(['--config-dir', dir], { fetch: f, readCode: async () => 'c0de-TEST', ...s }), 1);
+    assert.equal(await new TokenStore(tokenFile(dir, 'poc')).read(), null);
+    assert.match(s.lines.join('\n'), /prod_company_id と同じ/);
   });
 });

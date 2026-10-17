@@ -16,7 +16,7 @@
 // - トークンは ~/.config/keihi/freee-token-{poc,prod}.json（0600）にだけ置き、ログ・結果には出さない。
 // - 出力は ID・HTTP ステータス・X-Freee-Request-ID・件数と、ダミーに入れた値の照合結果だけ。
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -38,6 +38,7 @@ import {
   type RequestOptions,
 } from '../../src/providers/freee/client.ts';
 import type { Truth } from '../fixtures/gen-receipts.ts';
+import { assertSecretsFile, mimeOf } from './common.ts';
 import { ACCOUNTS, parseEnv, parseTomlSubset } from './gemini-poc.ts';
 
 export const DEFAULT_CONFIG_DIR = path.join(homedir(), '.config', 'keihi');
@@ -95,17 +96,7 @@ export async function loadFreeeConfig(configDir: string): Promise<FreeeConfig> {
 
 export async function loadFreeeCredentials(configDir: string): Promise<ClientCredentials> {
   const secretsPath = path.join(configDir, 'secrets.env');
-  let st;
-  try {
-    st = await stat(secretsPath);
-  } catch {
-    throw new Error(`${secretsPath} が無い`);
-  }
-  if (!st.isFile()) throw new Error(`${secretsPath} が通常のファイルではない`);
-  const mode = st.mode & 0o777;
-  if (mode !== 0o600) {
-    throw new Error(`${secretsPath} のパーミッションが 0600 ではない（現在 0${mode.toString(8)}）。chmod 600 してから実行する`);
-  }
+  await assertSecretsFile(secretsPath);
   const env = parseEnv(await readFile(secretsPath, 'utf8'));
   if (!env.FREEE_CLIENT_ID) throw new Error(`${secretsPath} に FREEE_CLIENT_ID が無い`);
   if (!env.FREEE_CLIENT_SECRET) throw new Error(`${secretsPath} に FREEE_CLIENT_SECRET が無い`);
@@ -266,15 +257,6 @@ export async function loadTruth(dir: string, file: string): Promise<{ truth: Tru
   return { truth, bytes: await readFile(path.join(dir, file)) };
 }
 
-export function mimeOf(file: string): string {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-  if (ext === '.png') return 'image/png';
-  if (ext === '.pdf') return 'application/pdf';
-  if (ext === '.heic' || ext === '.heif') return 'image/heic';
-  throw new Error(`未対応の形式: ${ext}`);
-}
-
 // JPEG の SOI の直後に COM セグメント（ダミーの文字列）を足して、ちょうど size バイトにする。画像データは変えない。
 export function padJpegTo(buf: Buffer, size: number): Buffer {
   if (buf[0] !== 0xff || buf[1] !== 0xd8) throw new Error('JPEG ではない');
@@ -327,7 +309,7 @@ async function uploadReceipt(
   const name = opts.name ?? file;
   const form = new FormData();
   form.set('company_id', String(ctx.companyId));
-  form.set('receipt', new Blob([new Uint8Array(loaded.bytes)], { type: mimeOf(name) }), name);
+  form.set('receipt', new Blob([new Uint8Array(loaded.bytes)], { type: mimeOf(name, { heic: true }) }), name);
   form.set('description', opts.description ?? `${ctx.runId}-${label}`);
   if (opts.meta) for (const [k, v] of Object.entries(metaFields(loaded.truth))) form.set(k, v);
   const res = await call(ctx, label, 'POST', '/api/1/receipts', { form });
@@ -697,11 +679,16 @@ const step: Record<StepId, (ctx: Ctx) => Promise<void>> = {
     const q = { query: { company_id: ctx.companyId } };
     const prev = ctx.dryRun ? [] : (await ctx.created.outstanding(ctx.companyId)).filter((e) => e.step === 'F11');
     const prevDeal = prev.filter((e) => e.type === 'deal').at(-1);
-    if (prevDeal) {
-      // 2 回目以降: 画面で確定した後の状態を読むだけ（新しく作らない）。
-      const deal = obj(obj((await call(ctx, 'get deal', 'GET', `/api/1/deals/${prevDeal.id}`, q)).json).deal);
-      note(ctx, `前回の取引 id=${prevDeal.id}: status=${String(deal.status)} due_amount=${String(deal.due_amount)}`);
-      for (const w of prev.filter((e) => e.type === 'wallet_txn')) {
+    const prevTxns = prev.filter((e) => e.type === 'wallet_txn');
+    if (prevDeal || prevTxns.length > 0) {
+      // 2 回目以降: 画面で確定した後の状態を読むだけ（新しく作らない）。前回の取引が無くても明細があれば作らない。
+      if (prevDeal) {
+        const deal = obj(obj((await call(ctx, 'get deal', 'GET', `/api/1/deals/${prevDeal.id}`, q)).json).deal);
+        note(ctx, `前回の取引 id=${prevDeal.id}: status=${String(deal.status)} due_amount=${String(deal.due_amount)}`);
+      } else {
+        note(ctx, '前回の取引の記録が無い（明細だけ読む）');
+      }
+      for (const w of prevTxns) {
         const wt = obj(obj((await call(ctx, 'get txn', 'GET', `/api/1/wallet_txns/${w.id}`, q)).json).wallet_txn);
         note(ctx, `前回の明細 id=${w.id}: status=${String(wt.status)} due_amount=${String(wt.due_amount)}`);
       }

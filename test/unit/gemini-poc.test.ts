@@ -16,6 +16,8 @@ import {
   hasPngMetadata,
   loadGeminiSettings,
   main,
+  parseEnv,
+  parseTomlSubset,
   scoreOutput,
   stripMetadata,
   summarize,
@@ -155,6 +157,33 @@ describe('EXIF 除去（D13）', () => {
     assert.ok(!out.includes(EXIF_MARK));
     assert.ok(!hasPngMetadata(out));
     assert.ok(out.equals(png));
+  });
+
+  test('0xFF の詰め物と単独マーカーがあっても APP1 を検出して落とす', async () => {
+    // SOI の後に詰め物 3 バイトと RST0（長さを持たない）を挟む
+    const padded = Buffer.concat([jpegWithExif.subarray(0, 2), Buffer.from([0xff, 0xd0, 0xff, 0xff, 0xff]), jpegWithExif.subarray(3)]);
+    assert.ok(hasJpegExif(padded));
+    const out = stripMetadata(padded, 'image/jpeg');
+    assert.ok(!out.includes(EXIF_MARK));
+    assert.ok(!hasJpegExif(out));
+  });
+});
+
+describe('設定ファイルのコメント', () => {
+  test('secrets.env: 引用符なしの値は空白に続く # 以降を落とし、引用符の中はそのまま', () => {
+    const env = parseEnv('A=abc # c\nB="a #b"\nC=\'x # y\' # z\nD=p#q\nE= # only\n');
+    assert.equal(env.A, 'abc');
+    assert.equal(env.B, 'a #b');
+    assert.equal(env.C, 'x # y');
+    assert.equal(env.D, 'p#q');
+    assert.equal(env.E, '');
+  });
+
+  test('config.toml: 引用符の中の # はコメントにしない', () => {
+    const t = parseTomlSubset('[gemini]\nmodel = "a#b" # c\nother = "x"#c\nn = 3 # n\n# all\n');
+    assert.equal(t.gemini.model, 'a#b');
+    assert.equal(t.gemini.other, 'x');
+    assert.equal(t.gemini.n, 3);
   });
 });
 
