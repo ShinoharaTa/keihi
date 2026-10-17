@@ -5,6 +5,7 @@
 // - 残り営業日（days_left）: 今日の翌日〜期限日の営業日の数。期限が今日なら 0、過ぎていれば負（過ぎた営業日の数）。
 import { addDays, isBusinessDay, todayInTokyo, type CalendarOptions } from '../calendar/businessDays.ts';
 import type { Db } from '../db/index.ts';
+import { listAttention } from './attention.ts';
 
 export const URGENT_BUSINESS_DAYS = 2;
 export const LIST_FILTERS = ['review', 'attention', 'needs_review', 'approved', 'personal', 'duplicate', 'rejected', 'received'] as const;
@@ -97,12 +98,12 @@ export function listDocuments(db: Db, filter: ListFilter | null, opts: ListOptio
   return (db.prepare(sql).all(...args) as Row[]).map((r) => toItem(r, today, cal));
 }
 
-// バッジ用の件数。urgent は確認待ちのうち残り 2 営業日以内。
+// バッジ用の件数。urgent は確認待ちのうち残り 2 営業日以内。attention は要対応タブ（GET /api/attention の total）と同じく dismiss 済みを除く。
 export function countDocuments(db: Db, opts: Omit<ListOptions, 'limit'>): { review: number; attention: number; urgent: number } {
   const today = todayInTokyo(opts.now);
   const cal = opts.calendar ?? {};
   const pending = db.prepare(`SELECT d.deadline_on FROM documents d WHERE ${REVIEW_WHERE}`).all() as { deadline_on: string }[];
-  const attention = (db.prepare(`SELECT count(*) n FROM documents WHERE status = 'needs_attention'`).get() as { n: number }).n;
+  const attention = listAttention(db).length;
   const urgent = pending.filter((r) => businessDaysLeft(today, r.deadline_on, cal) <= URGENT_BUSINESS_DAYS).length;
   return { review: pending.length, attention, urgent };
 }

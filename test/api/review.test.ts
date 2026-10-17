@@ -550,6 +550,17 @@ describe('GET /api/documents（T2-11）', () => {
     const at = (await (await app.request('/api/documents?status=attention')).json()) as { items: any[] };
     assert.deepEqual(at.items.map((i) => [i.id, i.needs_attention_reason]), [[id, 'send_rejected']]);
   });
+
+  test('件数の attention は要対応タブ（GET /api/attention の total）と同じく dismiss 済みを除く', async () => {
+    const a = addDoc({ status: 'needs_attention' });
+    const b = addDoc({ status: 'needs_attention' });
+    for (const id of [a, b]) appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: id, payload: { reason: 'upload_rejected' } }, NOW);
+    appendAudit(db, { actor: 'user', action: 'document.attention_dismissed', entity: 'document', entityId: b, payload: { reason: 'upload_rejected' } }, NOW);
+    const counts = (await (await app.request('/api/documents/counts')).json()) as { attention: number };
+    const list = (await (await app.request('/api/attention')).json()) as { total: number };
+    assert.equal(counts.attention, 1);
+    assert.equal(list.total, 1);
+  });
 });
 
 describe('確定で worker を起動する', () => {
