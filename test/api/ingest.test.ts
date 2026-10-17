@@ -9,7 +9,9 @@ import type { MiddlewareHandler } from 'hono';
 import { verifyAudit } from '../../src/audit.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { createApp } from '../../src/web/app.ts';
+import { createExtractHandler } from '../../src/worker/handlers/extract.ts';
 import type { Hono } from 'hono';
 
 const FX = 'test/fixtures/receipts';
@@ -207,11 +209,22 @@ describe('POST /api/documents', () => {
     assert.deepEqual([x.status, x.json.reason], [422, 'invalid_received_on']);
   });
 
-  test('no_ai なら extract を積まない（D12）', async () => {
+  test('no_ai でも extract を積むが Gemini は呼ばれない（D12）', async () => {
     const r = await post({ kind: 'scan', size_preset: 'receipt80', no_ai: 'true' }, await fx('r12_receipt80.png'));
     assert.equal(r.status, 201);
-    assert.deepEqual((db.prepare('SELECT kind FROM jobs').all() as { kind: string }[]).map((j) => j.kind), ['upload_receipt']);
+    assert.deepEqual((db.prepare('SELECT kind FROM jobs ORDER BY id').all() as { kind: string }[]).map((j) => j.kind), ['upload_receipt', 'extract']);
     assert.equal((db.prepare('SELECT no_ai FROM documents').get() as { no_ai: number }).no_ai, 1);
+    let geminiCalls = 0;
+    const extract = createExtractHandler(() => ({
+      gemini: () => {
+        geminiCalls++;
+        throw new Error('no_ai では呼ばない');
+      },
+      objectsDir,
+    }));
+    assert.deepEqual(await runUntilEmpty(db, { extract, upload_receipt: async () => {} }, { now: () => NOW }), { done: 2, failed: 0 });
+    assert.equal(geminiCalls, 0);
+    assert.equal((db.prepare('SELECT status FROM documents').get() as { status: string }).status, 'needs_review');
   });
 
   test('file が無ければ 422', async () => {

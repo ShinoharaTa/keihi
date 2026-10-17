@@ -6,7 +6,7 @@
 //   paper_required = 1、paper_status = keep_required を記録する（スキャナ保存の要件を満たさないので紙原本を残す）。
 //   scan の PDF は画素を判定できないので R2・R3 を満たさない扱い（force が無ければ 422）。
 // - 受領日はクライアントが送る（撮影日 / 受領日）。無ければ Asia/Tokyo の受信日（R5）。未来日は 422。
-// - documents 行 + audit（document.received）+ jobs（upload_receipt、no_ai でなければ extract）を 1 トランザクションで記録し、
+// - documents 行 + audit（document.received）+ jobs（upload_receipt、extract。no_ai でも extract は積む）を 1 トランザクションで記録し、
 //   コミット後に worker を起動する。
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -178,7 +178,8 @@ export function ingestRoutes(deps: AppDeps): Hono {
             at,
           );
           enqueue(deps.db, 'upload_receipt', id, { now: at });
-          if (!noAi) enqueue(deps.db, 'extract', id, { now: at });
+          // no_ai でも積む（抽出ハンドラが Gemini を呼ばずに needs_review にする）。
+          enqueue(deps.db, 'extract', id, { now: at });
         });
       } catch (e) {
         if (e instanceof Error && /UNIQUE constraint failed: documents\.sha256/.test(e.message)) {
