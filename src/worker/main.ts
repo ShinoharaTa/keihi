@@ -1,5 +1,6 @@
 // worker のエントリ（docs/mvp-plan-v0.1.md T1-8、§4.4 keihi-worker.service）。
-// 実行可能なジョブが無くなったら終了する（ワンショット）。常駐しない。ポートを開かない。
+// 実行可能なジョブが無くなったら（[worker] linger_ms の猶予の後）終了する（ワンショット）。常駐しない。ポートを開かない。
+// 再試行のバックオフや取りこぼしは keihi-worker.timer（2 分ごと）が拾う。
 // - Provider は config.toml の [provider] kind（既定 freee）と [freee] target（既定 poc）から、最初に要るジョブで 1 回だけ作る
 //   （設定が無くても Provider を使わないジョブは動く）。freee の予算の日の区切りは [freee] day_boundary。
 // - Gemini（[gemini]）も同じく、最初に要るジョブで 1 回だけ作る（no_ai の抽出では作らない）。
@@ -9,7 +10,7 @@ import { parseArgs } from 'node:util';
 import { createGeminiFromConfig, type Gemini } from '../ai/gemini/client.ts';
 import { loadConfig, requireFreee, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
-import { runUntilEmpty, type Handlers } from '../jobs/worker.ts';
+import { runUntilEmpty, type Handlers, type RunOptions } from '../jobs/worker.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
 import { refreshIfExpiringSoon, TOKEN_URL, TokenStore } from '../providers/freee/auth.ts';
 import { budgetedFetch, createBudget, resetHourJstFor } from '../providers/freee/budget.ts';
@@ -109,7 +110,7 @@ export const HANDLERS: Handlers = {
 };
 
 // 実行環境を設定して HANDLERS を動かす（テストからも使う）。
-export async function runWith(rt: WorkerRuntime, opts: { now?: () => Date; log?: (s: string) => void } = {}) {
+export async function runWith(rt: WorkerRuntime, opts: RunOptions = {}) {
   current = rt;
   try {
     return await runUntilEmpty(rt.db, HANDLERS, opts);
@@ -123,7 +124,7 @@ export async function main(argv: string[]): Promise<number> {
   const cfg = loadConfig();
   const db = openDb(values.db ?? cfg.dbPath);
   try {
-    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s) });
+    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s), lingerMs: cfg.worker.lingerMs });
     console.log(`worker: done=${s.done} failed=${s.failed}`);
     return 0;
   } finally {

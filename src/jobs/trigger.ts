@@ -1,5 +1,6 @@
 // worker の起動（docs/mvp-plan-v0.1.md T1-8）。`systemctl --user start --no-block keihi-worker.service`。
-// 既に動いていれば systemd 側で二重起動しない（oneshot）。失敗しても取り込みは止めない（timer が拾う）。
+// 既に動いていれば systemd 側で二重起動しない（oneshot。動作中の start は畳まれるので、worker は空になった後に
+// [worker] linger_ms だけ待ってもう一度 claim する）。起動に失敗・取りこぼしても keihi-worker.timer（2 分ごと）が拾う。
 // daily（docs/mvp-plan.md §4.4 keihi-daily）: keihi-daily.service が `node src/jobs/trigger.ts daily` で daily ジョブを 1 件積み、
 // worker を起動する。まだ実行されていない daily ジョブ（queued / running）があれば積み増さない。
 //

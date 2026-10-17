@@ -2,7 +2,7 @@
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,6 +102,39 @@ describe('worker', () => {
     db.close();
   });
 
+  test('空になったら lingerMs だけ待ってもう一度 claim する（待つ間に積まれたものも処理する）', async () => {
+    const ran: string[] = [];
+    const sleeps: number[] = [];
+    enqueue(db, 'extract', 'D1', { now: T0 });
+    let late = true;
+    const s = await runUntilEmpty(
+      db,
+      { extract: async (j) => void ran.push(j.ref_id!) },
+      {
+        now: () => T0,
+        lingerMs: 1500,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          // 1 回目の猶予の間にだけ積む（start --no-block が畳まれたケース）。
+          if (late) enqueue(db, 'extract', 'D2', { now: T0 });
+          late = false;
+        },
+      },
+    );
+    assert.deepEqual(ran, ['D1', 'D2']);
+    assert.deepEqual(s, { done: 2, failed: 0 });
+    // D2 の後にもう一度だけ待って、何も無いので返る。
+    assert.deepEqual(sleeps, [1500, 1500]);
+    db.close();
+  });
+
+  test('lingerMs = 0（既定）なら待たずに返る', async () => {
+    let slept = 0;
+    assert.deepEqual(await runUntilEmpty(db, {}, { now: () => T0, sleep: async () => void slept++ }), { done: 0, failed: 0 });
+    assert.equal(slept, 0);
+    db.close();
+  });
+
   test('HANDLERS は確定 API と日次が積むジョブを全部持つ', () => {
     for (const k of [...JOBS_ON_APPROVE, 'daily', 'reconcile_deals']) assert.equal(typeof HANDLERS[k], 'function', k);
   });
@@ -131,4 +164,21 @@ test('trigger は systemctl --user start --no-block keihi-worker.service を呼�
   triggerWorker(fake);
   assert.deepEqual(calls, [['systemctl', ['--user', 'start', '--no-block', 'keihi-worker.service']]]);
   assert.deepEqual([...TRIGGER_ARGS], calls[0][1]);
+});
+
+test('deploy/systemd/keihi-worker.timer は起動後と終了 2 分後に worker を起動する', async () => {
+  db.close();
+  const dir = path.resolve(import.meta.dirname, '..', '..', 'deploy', 'systemd');
+  const timer = await readFile(path.join(dir, 'keihi-worker.timer'), 'utf8');
+  assert.match(timer, /^\[Timer\]$/m);
+  assert.match(timer, /^OnBootSec=1min$/m);
+  assert.match(timer, /^OnUnitInactiveSec=2min$/m);
+  assert.match(timer, /^Persistent=true$/m);
+  assert.match(timer, /^WantedBy=timers\.target$/m);
+  // Unit= を書かない（同名の keihi-worker.service を起動する）。
+  assert.doesNotMatch(timer, /^Unit=/m);
+  for (const line of timer.split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    assert.match(line, /^(\[[A-Za-z]+\]|[A-Za-z]+=.+)$/, line);
+  }
 });

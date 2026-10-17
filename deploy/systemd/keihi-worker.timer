@@ -1,0 +1,15 @@
+# keihi-worker.service を定期的に起動する安全網（docs/ops/systemd.md §4）。
+# - 再試行（jobs のバックオフ 1/5/30/120 分）と、確定（approve）などで積まれたジョブが次の取り込みや daily まで止まらないようにする。
+# - 取り込み・確定の `systemctl --user start --no-block` が動作中の oneshot に畳まれて取りこぼした分もここで拾う。
+# OnUnitInactiveSec: worker が終わってから 2 分後に次を起動する（動作中に重ねて起動しない）。
+# インストール例（手作業）: ln -s ~/workspace/keihi/deploy/systemd/keihi-worker.timer ~/.config/systemd/user/
+[Unit]
+Description=keihi worker timer
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

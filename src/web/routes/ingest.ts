@@ -188,7 +188,7 @@ export function ingestRoutes(deps: AppDeps): Hono {
         }
         throw e;
       }
-      // 起動に失敗しても記録は済んでいる（timer が拾う）。
+      // 起動に失敗しても記録は済んでいる（keihi-worker.timer が 2 分ごとに拾う）。
       try {
         deps.triggerWorker();
       } catch {

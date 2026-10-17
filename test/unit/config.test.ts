@@ -151,6 +151,14 @@ test('dumpConfig はシークレットを *** にする', async () => {
   assert.equal(o.freee.pocCompanyId, 123);
 });
 
+describe('[worker]', () => {
+  test('linger_ms の既定は 1500、0 も指定できる、負・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).worker, { lingerMs: 1500 });
+    assert.deepEqual(loadConfig({ configDir: dir2('[worker]\nlinger_ms = 0\n'), dataDir: '/data/keihi' }).worker, { lingerMs: 0 });
+    for (const bad of ['[worker]\nlinger_ms = -1', '[worker]\nlinger = 1']) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  });
+});
+
 describe('[backup] / [retention]', () => {
   test('既定値（drill_dir は <data_dir>/drill）', () => {
     const c = loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' });

@@ -28,6 +28,8 @@ export const DEFAULT_CHECK_INTERVAL_DAYS = 7;
 export const DEFAULT_READ_DATA_SUBSET = '5%';
 // F6（freee が再圧縮するか）が未確認なので、既定は「ダウンロードできること」の確認だけ。
 export const DEFAULT_REMOTE_VERIFY_MODE: RemoteVerifyMode = 'download_only';
+// [worker]（src/jobs/worker.ts）。キューが空になってからもう一度 claim するまでの猶予。
+export const DEFAULT_WORKER_LINGER_MS = 1500;
 // [retention]（docs/ops/retention.md の案。税理士確認 #8 で確定する）。
 export const DEFAULT_RETENTION_YEARS = 7;
 export const DEFAULT_RETENTION_EXTRA_YEARS = 1;
@@ -83,6 +85,8 @@ export type Config = {
     remoteVerifyMode: RemoteVerifyMode;
   };
   retention: { years: number; extraYears: number; start: RetentionStart };
+  // lingerMs: キューが空と判断した後に待ってもう一度 claim する時間（start --no-block が動作中の oneshot に畳まれる対策）。
+  worker: { lingerMs: number };
   secrets: Secrets;
 };
 
@@ -124,6 +128,7 @@ const KNOWN: Record<string, string[]> = {
   mcp: ['port'],
   backup: ['repository', 'keep_snapshots', 'check_interval_days', 'read_data_subset', 'drill_dir', 'remote_verify_mode'],
   retention: ['years', 'extra_years', 'start'],
+  worker: ['linger_ms'],
 };
 
 function readConfigToml(file: string): Table {
@@ -287,6 +292,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       extraYears: optNonNegativeInt(t, 'retention', 'extra_years') ?? DEFAULT_RETENTION_EXTRA_YEARS,
       start: optEnum(t, 'retention', 'start', ['next_year_0316'] as const) ?? DEFAULT_RETENTION_START,
     },
+    worker: { lingerMs: optNonNegativeInt(t, 'worker', 'linger_ms') ?? DEFAULT_WORKER_LINGER_MS },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }
