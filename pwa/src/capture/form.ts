@@ -63,8 +63,8 @@ export function canSend(f: Fields, today: string): boolean {
 const REASONS: Record<string, string> = {
   network: '通信できない（オンラインに戻ったら再送する）',
   unauthenticated: '認証できない（Tailscale を確認）',
-  forbidden: 'このユーザーは許可されていない',
-  invalid_origin: '送信元が許可されていない',
+  forbidden: '設定エラー: このユーザーは許可されていない（サーバーの許可ユーザーを確認）',
+  invalid_origin: '設定エラー: 送信元が許可されていない（サーバーの許可ホストを確認）',
   too_large: 'ファイルが大きすぎる',
   unsupported_media_type: '対応していない形式（JPEG・PNG・PDF のみ）',
   kind_required: '種類を選んでいない',
