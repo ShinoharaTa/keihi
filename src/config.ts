@@ -14,6 +14,11 @@ export const DEFAULT_DATA_DIR = path.join(homedir(), '.local', 'share', 'keihi')
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 // T1-6: 取り込みのサイズ上限の初期値（freee は 64MB。mvp-plan.md T1-6 の変更）。
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+// T1-14（D4）: web は 127.0.0.1 の固定ポート。バインド先は設定にしない（0.0.0.0 にできないようにする）。
+export const WEB_HOST = '127.0.0.1';
+export const DEFAULT_WEB_PORT = 8795;
+// M7（keihi MCP）用に予約するだけ。M7 までは何も開かない。
+export const DEFAULT_MCP_PORT = 8796;
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -38,6 +43,10 @@ export type Config = {
   calendar: { deadlineMode: DeadlineMode; yearEndHolidays: boolean };
   // 7 営業日の数え始め。既定は早い方（受領日が営業日ならその日を 1 日目）。税理士確認 #3 の結果で変える前提。
   deadline: { countFrom: CountFrom };
+  // T1-14。allowedUsers は Tailscale-User-Login の許可リスト（空なら誰も通さない）。
+  // allowedHosts は Host ヘッダの許可リスト（`127.0.0.1:<port>` は常に含む。tailscale serve のホスト名は設定で足す）。
+  web: { port: number; allowedUsers: string[]; allowedHosts: string[] };
+  mcp: { port: number };
   secrets: Secrets;
 };
 
@@ -74,6 +83,8 @@ const KNOWN: Record<string, string[]> = {
   ingest: ['max_upload_bytes'],
   calendar: ['deadline_mode', 'year_end_holidays'],
   deadline: ['count_from'],
+  web: ['port', 'allowed_users', 'allowed_hosts'],
+  mcp: ['port'],
 };
 
 function readConfigToml(file: string): Table {
@@ -125,6 +136,21 @@ function optPositiveInt(t: Table, sec: string, key: string): number | null {
   return v;
 }
 
+function optStringArray(t: Table, sec: string, key: string): string[] | null {
+  const v = section(t, sec)[key];
+  if (v === undefined) return null;
+  if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x !== '')) {
+    throw new ConfigError(`config.toml の ${sec}.${key} は空でない文字列の配列で指定する`);
+  }
+  return v as string[];
+}
+
+function optPort(t: Table, sec: string, key: string): number | null {
+  const v = optPositiveInt(t, sec, key);
+  if (v !== null && v > 65535) throw new ConfigError(`config.toml の ${sec}.${key} は 1〜65535 で指定する`);
+  return v;
+}
+
 function readSecrets(file: string): Secrets {
   let st;
   try {
@@ -156,6 +182,14 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   const pocCompanyId = optPositiveInt(t, 'freee', 'poc_company_id');
   const prodCompanyId = optPositiveInt(t, 'freee', 'prod_company_id');
   if (pocCompanyId !== null && pocCompanyId === prodCompanyId) throw new ConfigError('config.toml の freee.poc_company_id と prod_company_id が同じ');
+  const webPort = optPort(t, 'web', 'port') ?? DEFAULT_WEB_PORT;
+  const mcpPort = optPort(t, 'mcp', 'port') ?? DEFAULT_MCP_PORT;
+  if (webPort === mcpPort) throw new ConfigError('config.toml の web.port と mcp.port が同じ');
+  const allowedHosts = [`${WEB_HOST}:${webPort}`];
+  for (const h of optStringArray(t, 'web', 'allowed_hosts') ?? []) {
+    const v = h.toLowerCase();
+    if (!allowedHosts.includes(v)) allowedHosts.push(v);
+  }
   return {
     configDir,
     dataDir,
@@ -170,6 +204,8 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     ingest: { maxBytes: optPositiveInt(t, 'ingest', 'max_upload_bytes') ?? DEFAULT_MAX_UPLOAD_BYTES },
     calendar: { deadlineMode: mode, yearEndHolidays: optBool(t, 'calendar', 'year_end_holidays') ?? false },
     deadline: { countFrom },
+    web: { port: webPort, allowedUsers: optStringArray(t, 'web', 'allowed_users') ?? [], allowedHosts },
+    mcp: { port: mcpPort },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }
