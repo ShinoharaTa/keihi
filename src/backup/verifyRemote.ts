@@ -10,8 +10,9 @@
 // - 自動では直らない取得の失敗（4xx。消された・見つからない等）は needs_attention（remote_download_failed）。
 //   再認可が要る・再試行で直る失敗（429・403 の使用制限・5xx・タイムアウト）は、そこで止めて次回に回す。
 // - 月 1 回の実行は daily（worker/handlers/daily.ts）から呼ぶ。
+import { markNeedsAttention } from '../attention.ts';
 import { appendAudit } from '../audit.ts';
-import { tx, type Db } from '../db/index.ts';
+import type { Db } from '../db/index.ts';
 import { BudgetExceededError } from '../providers/freee/budget.ts';
 import { ProviderError, type Provider } from '../providers/types.ts';
 import { readObject, sha256Hex } from '../storage/objects.ts';
@@ -66,15 +67,6 @@ export function selectTargets(db: Db, limit: number): Target[] {
     .all(PROVIDER, limit) as Target[];
 }
 
-function markNeedsAttention(db: Db, documentId: string, reason: string, detail: Record<string, unknown>, now: Date): void {
-  tx(db, () => {
-    const cur = db.prepare('SELECT status FROM documents WHERE id = ?').get(documentId) as { status: string };
-    if (cur.status === 'needs_attention') return;
-    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(documentId);
-    appendAudit(db, { actor: 'backup', action: 'document.needs_attention', entity: 'document', entityId: documentId, payload: { reason, from: cur.status, ...detail } }, now);
-  });
-}
-
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export async function verifyRemoteReceipts(deps: RemoteVerifyDeps): Promise<RemoteVerifyResult> {
@@ -114,7 +106,7 @@ export async function verifyRemoteReceipts(deps: RemoteVerifyDeps): Promise<Remo
       res.attention++;
       res.items.push({ documentId: t.id, remoteReceiptId: remoteId, result: 'failed', remoteSha256: null });
       appendAudit(db, { actor: 'backup', action: 'receipt.remote_verify_failed', entity: 'document', entityId: t.id, payload: { provider: PROVIDER, remote_receipt_id: remoteId, mode, error: msg } }, at);
-      markNeedsAttention(db, t.id, 'remote_download_failed', { remote_receipt_id: remoteId, error: msg }, at);
+      markNeedsAttention(db, t.id, 'remote_download_failed', { remote_receipt_id: remoteId, error: msg }, { now: at, actor: 'backup' });
       continue;
     }
 
@@ -156,7 +148,7 @@ export async function verifyRemoteReceipts(deps: RemoteVerifyDeps): Promise<Remo
     );
     if (reason) {
       res.attention++;
-      markNeedsAttention(db, t.id, reason, { remote_receipt_id: remoteId, sha256: t.sha256, remote_sha256: remoteSha }, at);
+      markNeedsAttention(db, t.id, reason, { remote_receipt_id: remoteId, sha256: t.sha256, remote_sha256: remoteSha }, { now: at, actor: 'backup' });
     } else res.ok++;
   }
 

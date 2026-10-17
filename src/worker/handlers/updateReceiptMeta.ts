@@ -8,11 +8,11 @@
 // - provider_uploads.meta_deadline_on（保存から 70 日）を過ぎていれば PUT せず needs_attention: meta_deadline_passed。
 // - 証憑がまだ上がっていなければ例外（再試行）。Provider の失敗は例外で再試行に回し、自動では直らない失敗と最後の試行は
 //   needs_attention にする（uploadReceipt と同じ）。
+import { describeError, markNeedsAttention } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
 import type { Handler } from '../../jobs/worker.ts';
-import { BudgetExceededError } from '../../providers/freee/budget.ts';
 import { ProviderError, type Provider, type ReceiptMeta } from '../../providers/types.ts';
 import { PROVIDER } from './uploadReceipt.ts';
 
@@ -69,21 +69,6 @@ export function metaFromReview(db: Db, documentId: string, review: ReviewRow): R
   return meta;
 }
 
-function markNeedsAttention(db: Db, documentId: string, reason: string, detail: Record<string, unknown>, now: Date): void {
-  tx(db, () => {
-    const cur = db.prepare('SELECT status FROM documents WHERE id = ?').get(documentId) as { status: string };
-    if (cur.status === 'needs_attention') return;
-    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(documentId);
-    appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: documentId, payload: { reason, from: cur.status, ...detail } }, now);
-  });
-}
-
-function describeError(e: unknown): string {
-  if (e instanceof ProviderError) return `${e.kind}: ${e.message}`;
-  if (e instanceof BudgetExceededError) return `budget: ${e.message}`;
-  return e instanceof Error ? e.message : String(e);
-}
-
 export function createUpdateReceiptMetaHandler(getDeps: () => UpdateReceiptMetaDeps): Handler {
   return async (job, ctx) => {
     const { db } = ctx;
@@ -109,7 +94,7 @@ export function createUpdateReceiptMetaHandler(getDeps: () => UpdateReceiptMetaD
 
     const today = todayInTokyo(now);
     if (up.meta_deadline_on && today > up.meta_deadline_on) {
-      markNeedsAttention(db, documentId, 'meta_deadline_passed', { meta_deadline_on: up.meta_deadline_on, review_version: review.version }, now);
+      markNeedsAttention(db, documentId, 'meta_deadline_passed', { meta_deadline_on: up.meta_deadline_on, review_version: review.version }, { now });
       return;
     }
 
@@ -122,7 +107,7 @@ export function createUpdateReceiptMetaHandler(getDeps: () => UpdateReceiptMetaD
       db.prepare('UPDATE provider_uploads SET last_error = ? WHERE id = ?').run(msg, up.id);
       const reason =
         e instanceof ProviderError && !e.retryable ? (e.kind === 'auth_invalid_grant' ? 'freee_reauth_required' : 'meta_update_rejected') : isLastAttempt ? 'meta_retries_exhausted' : null;
-      if (reason) markNeedsAttention(db, documentId, reason, { review_version: review.version, error: msg }, now);
+      if (reason) markNeedsAttention(db, documentId, reason, { review_version: review.version, error: msg }, { now });
       throw e;
     }
     tx(db, () => {

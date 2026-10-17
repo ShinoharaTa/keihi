@@ -7,12 +7,12 @@
 // - 失敗したら例外を投げて再試行に回す（jobs のバックオフ）。その際、次のどれかなら documents.status を needs_attention にする:
 //   期限（deadline_on）の 2 営業日前を過ぎた / 自動では直らない失敗（再認可が要る・4xx・大きすぎる）/ 最後の試行。
 // - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts が設定から組み立てて渡す。
+import { describeError, markNeedsAttention } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
 import { addDays, subtractBusinessDays, todayInTokyo, type CalendarOptions } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { ulid } from '../../db/ids.ts';
 import type { Handler } from '../../jobs/worker.ts';
-import { BudgetExceededError } from '../../providers/freee/budget.ts';
 import { ProviderError, type Provider, type Receipt } from '../../providers/types.ts';
 import { readObject, sha256Hex } from '../../storage/objects.ts';
 
@@ -63,25 +63,10 @@ function ensureUploadRow(db: Db, documentId: string, now: Date): UploadRow {
   return db.prepare('SELECT id, state, attempts, remote_receipt_id FROM provider_uploads WHERE document_id = ? AND provider = ?').get(documentId, PROVIDER) as UploadRow;
 }
 
-function describeError(e: unknown): string {
-  if (e instanceof ProviderError) return `${e.kind}: ${e.message}`;
-  if (e instanceof BudgetExceededError) return `budget: ${e.message}`;
-  return e instanceof Error ? e.message : String(e);
-}
-
 // 自動の再試行では直らない失敗。
 function needsHuman(e: unknown): string | null {
   if (e instanceof ProviderError && !e.retryable) return e.kind === 'auth_invalid_grant' ? 'freee_reauth_required' : 'upload_rejected';
   return null;
-}
-
-function markNeedsAttention(db: Db, doc: DocRow, reason: string, detail: Record<string, unknown>, now: Date): void {
-  tx(db, () => {
-    const cur = db.prepare('SELECT status FROM documents WHERE id = ?').get(doc.id) as { status: string };
-    if (cur.status === 'needs_attention') return;
-    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(doc.id);
-    appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: doc.id, payload: { reason, from: cur.status, ...detail } }, now);
-  });
 }
 
 export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Handler {
@@ -150,7 +135,7 @@ export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Ha
       db.prepare(`UPDATE provider_uploads SET last_error = ? WHERE id = ?`).run(msg, up.id);
       const warnOn = subtractBusinessDays(doc.deadline_on, WARN_BUSINESS_DAYS, deps.calendar);
       const reason = needsHuman(e) ?? (today >= warnOn ? 'upload_deadline_near' : isLastAttempt ? 'upload_retries_exhausted' : null);
-      if (reason) markNeedsAttention(db, doc, reason, { deadline_on: doc.deadline_on, warn_on: warnOn, error: msg }, now);
+      if (reason) markNeedsAttention(db, doc.id, reason, { deadline_on: doc.deadline_on, warn_on: warnOn, error: msg }, { now });
       throw e;
     }
   };

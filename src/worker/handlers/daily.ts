@@ -10,6 +10,7 @@
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
 // 7. needs_attention の集計。結果は settings.daily_report と監査ログ（daily.completed）に残す。
 // - 各段は独立に動かし、どれかが失敗したら最後に例外を投げてジョブの再試行に回す（成功した段も再試行でもう一度動く）。
+import { getSetting, markNeedsAttention, setSetting } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import { verifyRemoteReceipts, type RemoteVerifyResult } from '../../backup/verifyRemote.ts';
@@ -52,17 +53,6 @@ export type DailyReport = {
   errors: { step: string; error: string }[];
 };
 
-function getSetting(db: Db, key: string): unknown {
-  const r = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(key) as { value_json: string } | undefined;
-  return r ? JSON.parse(r.value_json) : undefined;
-}
-
-function setSetting(db: Db, key: string, value: unknown, now: Date): void {
-  db.prepare(
-    'INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at',
-  ).run(key, JSON.stringify(value), now.toISOString());
-}
-
 // 検索項目の期限チェック。過ぎたものは needs_attention にし、7 日前からのものを返す。
 export function checkMetaDeadlines(db: Db, now: Date): { warn: MetaDeadlineItem[]; passed: MetaDeadlineItem[] } {
   const today = todayInTokyo(now);
@@ -79,16 +69,7 @@ export function checkMetaDeadlines(db: Db, now: Date): { warn: MetaDeadlineItem[
     const item = { document_id: r.document_id, meta_deadline_on: r.meta_deadline_on };
     if (today > r.meta_deadline_on) {
       passed.push(item);
-      if (r.status !== 'needs_attention') {
-        tx(db, () => {
-          db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(r.document_id);
-          appendAudit(
-            db,
-            { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: r.document_id, payload: { reason: 'meta_deadline_passed', from: r.status, meta_deadline_on: r.meta_deadline_on } },
-            now,
-          );
-        });
-      }
+      markNeedsAttention(db, r.document_id, 'meta_deadline_passed', { meta_deadline_on: r.meta_deadline_on }, { now });
     } else if (today >= addDays(r.meta_deadline_on, -META_WARN_DAYS)) warn.push(item);
   }
   setSetting(db, META_WARNINGS_KEY, warn, now);
