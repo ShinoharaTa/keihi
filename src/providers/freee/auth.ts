@@ -4,7 +4,11 @@
 // - アクセストークンは 6 時間、リフレッシュトークンは 90 日・1 回限り [FR-AUTH]。
 //   更新したら新しいリフレッシュトークンを先に保存してから使う。更新はロックファイルでプロセスをまたいで排他にする。
 // - トークン・client_secret・認可コードはログ・例外メッセージに出さない。保存先のファイルは 0600。
-import { open, readFile, rename, rm, stat, writeFile, chmod } from 'node:fs/promises';
+// - リフレッシュトークンの 90 日の失効を防ぐため、残り 30 日を切ったら refreshIfExpiringSoon() で更新する（keihi-daily から呼ぶ）。
+import { open, readFile, rename, rm, stat, chmod } from 'node:fs/promises';
+import path from 'node:path';
+import { ProviderError } from '../types.ts';
+import { BudgetExceededError } from './budget.ts';
 
 export const AUTHORIZE_URL = 'https://accounts.secure.freee.co.jp/public_api/authorize';
 export const TOKEN_URL = 'https://accounts.secure.freee.co.jp/public_api/token';
@@ -14,6 +18,9 @@ export const REFRESH_MARGIN_SEC = 300;
 // トークンエンドポイントのタイムアウト。ロックの待ち時間はこれより長くする（更新中の他プロセスを待ち切れるように）。
 export const TOKEN_TIMEOUT_MS = 30_000;
 export const LOCK_WAIT_MS = 45_000;
+// リフレッシュトークンの寿命（90 日）と、日次の更新を始める残り日数（30 日）[FR-AUTH]、mvp-plan.md T1-10。
+export const REFRESH_TOKEN_LIFETIME_SEC = 90 * 86400;
+export const REFRESH_TOKEN_RENEW_BEFORE_SEC = 30 * 86400;
 
 export type ClientCredentials = { clientId: string; clientSecret: string };
 
@@ -59,6 +66,11 @@ export function needsRefresh(t: StoredToken, nowSec: number): boolean {
   return nowSec >= expiresAt(t) - REFRESH_MARGIN_SEC;
 }
 
+// リフレッシュトークンの失効時刻。更新のたびに新しいものが発行されるので、最後に受け取った時刻（created_at）から数える。
+export function refreshTokenExpiresAt(t: StoredToken): number {
+  return t.created_at + REFRESH_TOKEN_LIFETIME_SEC;
+}
+
 function toStoredToken(raw: Record<string, unknown>, nowSec: number): StoredToken {
   const s = (k: string) => (typeof raw[k] === 'string' ? (raw[k] as string) : '');
   if (!s('access_token') || !s('refresh_token')) throw new FreeeAuthError('トークン応答に access_token / refresh_token が無い');
@@ -92,6 +104,8 @@ async function postToken(
       signal: AbortSignal.timeout(opts.timeoutMs ?? TOKEN_TIMEOUT_MS),
     });
   } catch (e) {
+    // 予算の不足・停止中（fetch を包んだ予算が投げる）は、そのまま呼び出し側に返す。
+    if (e instanceof ProviderError || e instanceof BudgetExceededError) throw e;
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     throw new FreeeAuthError(redact(`freee のトークンエンドポイントへの接続に失敗: ${msg}`));
   }
@@ -160,9 +174,10 @@ function isAlive(pid: number): boolean {
 export class TokenStore {
   readonly path: string;
   readonly lockPath: string;
-  constructor(file: string) {
+  // lockPath の既定は <file>.lock（PoC）。keihi 本体は <data_dir>/freee-token.lock を渡す（mvp-plan.md §4.1）。
+  constructor(file: string, lockPath?: string) {
     this.path = file;
-    this.lockPath = `${file}.lock`;
+    this.lockPath = lockPath ?? `${file}.lock`;
   }
 
   async read(): Promise<StoredToken | null> {
@@ -179,13 +194,25 @@ export class TokenStore {
     return JSON.parse(await readFile(this.path, 'utf8')) as StoredToken;
   }
 
-  // 一時ファイルに 0600 で書いて rename する（途中で落ちても古い方か新しい方のどちらかが残る）。
+  // 一時ファイルに 0600 で書いて fsync → rename → ディレクトリを fsync する（途中で落ちても古い方か新しい方のどちらかが残る）。
   async write(t: StoredToken): Promise<void> {
     const tmp = `${this.path}.tmp-${process.pid}`;
     await rm(tmp, { force: true });
-    await writeFile(tmp, JSON.stringify(t, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    const fh = await open(tmp, 'wx', 0o600);
+    try {
+      await fh.writeFile(JSON.stringify(t, null, 2) + '\n');
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
     await chmod(tmp, 0o600);
     await rename(tmp, this.path);
+    const dir = await open(path.dirname(this.path), 'r');
+    try {
+      await dir.sync();
+    } finally {
+      await dir.close();
+    }
   }
 
   // ロックファイルの保持者。読めない・中身が壊れていれば null。
@@ -286,4 +313,31 @@ export function createTokenProvider(opts: {
       });
     },
   };
+}
+
+export type RefreshCheck = { refreshed: boolean; refreshTokenExpiresAt: number };
+
+// 日次（keihi-daily）から呼ぶ。リフレッシュトークンの残りが 30 日を切っていれば、ロックの中で 1 回だけ更新する。
+// トークンが無ければ例外（再認可が要る）。invalid_grant は FreeeAuthError（error = 'invalid_grant'）。
+export async function refreshIfExpiringSoon(opts: {
+  store: TokenStore;
+  creds: ClientCredentials;
+  fetch?: typeof fetch;
+  nowSec?: () => number;
+}): Promise<RefreshCheck> {
+  const nowSec = opts.nowSec ?? (() => Math.floor(Date.now() / 1000));
+  const due = (t: StoredToken) => nowSec() >= refreshTokenExpiresAt(t) - REFRESH_TOKEN_RENEW_BEFORE_SEC;
+  const cur = await opts.store.read();
+  if (!cur) throw new Error(`${opts.store.path} が無い。keihi freee auth で認可する`);
+  if (!due(cur)) return { refreshed: false, refreshTokenExpiresAt: refreshTokenExpiresAt(cur) };
+  return opts.store.withLock(async () => {
+    // ロックを取る間に他のプロセスが更新していれば何もしない。
+    const t = await opts.store.read();
+    if (!t) throw new Error(`${opts.store.path} が無い`);
+    if (!due(t)) return { refreshed: false, refreshTokenExpiresAt: refreshTokenExpiresAt(t) };
+    const next = await refreshWith(opts.creds, t.refresh_token, { fetch: opts.fetch, nowSec });
+    if (next.company_id === null) next.company_id = t.company_id;
+    await opts.store.write(next);
+    return { refreshed: true, refreshTokenExpiresAt: refreshTokenExpiresAt(next) };
+  });
 }

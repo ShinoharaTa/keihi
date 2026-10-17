@@ -3,7 +3,10 @@
 // - readOnly のクライアント（本番事業所の F15 用）は GET 以外を送る前に拒否する。
 // - HTTP のエラーは例外にせず、ステータスをそのまま返す（PoC で記録するため）。
 // - アクセストークンは Authorization ヘッダでだけ送り、URL・ログ・例外メッセージには出さない。
+// - keihi 本体（provider.ts）は budget（T1-15）・serial（1 本ずつ）・downloadLimit（/receipts/{id}/download は 1 秒 3 回）を付けて使う。
+//   PoC は付けない（F6 で上限を超えたときの応答を見るため）。
 import type { TokenProvider } from './auth.ts';
+import type { Purpose } from './budget.ts';
 
 export const DEFAULT_API_BASE = 'https://api.freee.co.jp';
 
@@ -16,7 +19,19 @@ export type RequestOptions = {
   form?: FormData;
   // 応答をバイト列で受け取る（/receipts/{id}/download）。
   binary?: boolean;
+  // 予算の用途。budget を付けたクライアントでは必須。
+  purpose?: Purpose;
 };
+
+// HTTP の 1 回ごとに予算を確かめて記録する（budget.ts の Budget の一部）。
+export type CallBudget = {
+  begin(purpose: Purpose, method: string, endpoint: string): number;
+  finish(callId: number, status: number | null, requestId: string | null): void;
+};
+
+export type RateLimit = { max: number; windowMs: number };
+export const DOWNLOAD_LIMIT: RateLimit = { max: 3, windowMs: 1000 };
+const DOWNLOAD_PATH = /^\/api\/1\/receipts\/\d+\/download$/;
 
 export type ApiResponse = {
   status: number;
@@ -31,6 +46,16 @@ export class FreeeGuardError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'FreeeGuardError';
+  }
+}
+
+// 応答が来なかった（接続できない・タイムアウト）。timeout は「実は届いている」ことがある。
+export class FreeeNetworkError extends Error {
+  readonly timeout: boolean;
+  constructor(message: string, timeout: boolean) {
+    super(message);
+    this.name = 'FreeeNetworkError';
+    this.timeout = timeout;
   }
 }
 
@@ -77,11 +102,34 @@ export function createFreeeClient(opts: {
   fetch?: typeof fetch;
   baseUrl?: string;
   timeoutMs?: number;
+  budget?: CallBudget;
+  // true なら request を 1 本ずつ順に送る（前の応答を待ってから次を送る）。
+  serial?: boolean;
+  downloadLimit?: RateLimit;
+  nowMs?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }): FreeeClient {
   const doFetch = opts.fetch ?? fetch;
   const baseUrl = opts.baseUrl ?? DEFAULT_API_BASE;
   const timeoutMs = opts.timeoutMs ?? 60_000;
+  const nowMs = opts.nowMs ?? (() => Date.now());
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const self = { companyId: opts.companyId, readOnly: opts.readOnly ?? false };
+  const downloads: number[] = [];
+  let chain: Promise<unknown> = Promise.resolve();
+
+  // 直近 windowMs に max 回送っていれば、いちばん古いものが窓から出るまで待つ。
+  async function waitDownloadSlot(limit: RateLimit): Promise<void> {
+    for (;;) {
+      const t = nowMs();
+      while (downloads.length && t - downloads[0] >= limit.windowMs) downloads.shift();
+      if (downloads.length < limit.max) {
+        downloads.push(t);
+        return;
+      }
+      await sleep(limit.windowMs - (t - downloads[0]));
+    }
+  }
 
   async function send(method: Method, path: string, o: RequestOptions, token: string): Promise<Response> {
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: o.binary ? '*/*' : 'application/json' };
@@ -92,40 +140,55 @@ export function createFreeeClient(opts: {
     } else if (o.form) {
       body = o.form; // multipart の境界は fetch が付ける
     }
+    if (opts.downloadLimit && method === 'GET' && DOWNLOAD_PATH.test(path)) await waitDownloadSlot(opts.downloadLimit);
+    const callId = opts.budget ? opts.budget.begin(o.purpose!, method, path) : null;
+    let res: Response;
     try {
-      return await doFetch(buildUrl(baseUrl, path, o.query), { method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
+      res = await doFetch(buildUrl(baseUrl, path, o.query), { method, headers, body, signal: AbortSignal.timeout(timeoutMs) });
     } catch (e) {
+      if (callId !== null) opts.budget!.finish(callId, null, null);
       const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      throw new Error(`freee への接続に失敗: ${method} ${path}: ${msg.split(token).join('***')}`);
+      const timeout = e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      throw new FreeeNetworkError(`freee への接続に失敗: ${method} ${path}: ${msg.split(token).join('***')}`, timeout);
     }
+    if (callId !== null) opts.budget!.finish(callId, res.status, res.headers.get('x-freee-request-id'));
+    return res;
+  }
+
+  async function doRequest(method: Method, path: string, o: RequestOptions): Promise<ApiResponse> {
+    guardRequest(self, method, path, o);
+    if (opts.budget && !o.purpose) throw new FreeeGuardError(`${method} ${path} に予算の用途（purpose）が無い`);
+    let token = await opts.tokens.get();
+    let res = await send(method, path, o, token);
+    if (res.status === 401) {
+      // 期限切れなどで弾かれたら 1 回だけ更新して送り直す。
+      await res.body?.cancel();
+      token = await opts.tokens.get({ force: true, rejected: token });
+      res = await send(method, path, o, token);
+    }
+    const requestId = res.headers.get('x-freee-request-id');
+    let json: unknown = null;
+    let bytes: Buffer | null = null;
+    if (o.binary && res.ok) {
+      bytes = Buffer.from(await res.arrayBuffer());
+    } else {
+      const text = await res.text();
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+    }
+    return { status: res.status, ok: res.ok, headers: res.headers, requestId, json, bytes };
   }
 
   return {
     ...self,
-    async request(method, path, o = {}) {
-      guardRequest(self, method, path, o);
-      let token = await opts.tokens.get();
-      let res = await send(method, path, o, token);
-      if (res.status === 401) {
-        // 期限切れなどで弾かれたら 1 回だけ更新して送り直す。
-        await res.body?.cancel();
-        token = await opts.tokens.get({ force: true, rejected: token });
-        res = await send(method, path, o, token);
-      }
-      const requestId = res.headers.get('x-freee-request-id');
-      let json: unknown = null;
-      let bytes: Buffer | null = null;
-      if (o.binary && res.ok) {
-        bytes = Buffer.from(await res.arrayBuffer());
-      } else {
-        const text = await res.text();
-        try {
-          json = text ? JSON.parse(text) : null;
-        } catch {
-          json = null;
-        }
-      }
-      return { status: res.status, ok: res.ok, headers: res.headers, requestId, json, bytes };
+    request(method, path, o = {}) {
+      if (!opts.serial) return doRequest(method, path, o);
+      const p = chain.then(() => doRequest(method, path, o));
+      chain = p.catch(() => {});
+      return p;
     },
   };
 }
