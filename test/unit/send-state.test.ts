@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import type { Db } from '../../src/db/index.ts';
-import { canTransition, DEAL_STATES, dealRowForDocument, markNeedsAttention, requeueDeal, type DealState } from '../../src/deals/stateMachine.ts';
+import { canTransition, DEAL_STATES, dealRowForDocument, ensureDealRow, markNeedsAttention, requeueDeal, type DealState } from '../../src/deals/stateMachine.ts';
 import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
@@ -278,13 +278,42 @@ describe('send_deal', () => {
     assert.deepEqual(methods(), ['createExpenseDeal:client']);
   });
 
-  test('401 invalid_grant: freee_reauth_required', async () => {
+  test('401 invalid_grant: needs_attention にせず 6 時間後に積み直す（再認可待ち）', async () => {
     const { doc, upload } = setup();
     await upload;
-    fake.failNext('auth_invalid_grant');
+    fake.failNext('auth_invalid_grant', { times: 2 });
+    const job = enqueue(db, SEND, doc, { now: T0 });
+    assert.deepEqual(await runAt(0), { done: 1, failed: 0 });
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.notEqual(deal(doc).state, 'needs_attention');
+    assert.equal(deal(doc).attention_reason, null);
+    const queued = () => db.prepare(`SELECT run_after FROM jobs WHERE kind = 'send_deal' AND state = 'queued'`).all().map((r) => (r as { run_after: string }).run_after);
+    assert.deepEqual(queued(), [at(360).toISOString()]);
+    assert.ok(actions().includes('deal.waiting_reauth'));
+    await runAt(359);
+    assert.equal(methods().length, 1);
+    await runAt(360); // まだ再認可されていない
+    assert.deepEqual(queued(), [at(720).toISOString()]);
+    await runAt(720);
+    assert.equal(deal(doc).state, 'receipt_linked');
+    assert.equal(fake.state.deals.size, 1);
+  });
+
+  test('build_failed: 既にある queued 行の下書き・発生日は上書きしない', async () => {
+    const doc = addDocument(db);
+    addReview(db, doc, { amount: 1100 });
+    const draft = { refNumber: `kh-${doc}`, issueDate: '2026-10-15', details: [{ accountItemId: 101, taxCode: 1, amount: 1100 }], receiptIds: [], payment: { kind: 'cash' as const } };
+    const before = ensureDealRow(db, { documentId: doc, reviewId: `R-${doc}-1`, provider: 'freee', draft }, T0);
+    addReview(db, doc, { version: 2, amount: 1100, txnDate: '2026-10-16', creditAccount: 'owner' }); // 事業主借がマスタに無い
     enqueue(db, SEND, doc, { now: T0 });
     await runAt(0);
-    assert.equal(deal(doc).attention_reason, 'freee_reauth_required');
+    const row = deal(doc);
+    assert.equal(row.attention_reason, 'build_failed');
+    assert.match(JSON.parse(row.attention_detail_json!).error, /事業主借/);
+    assert.equal(row.draft_json, before.draft_json);
+    assert.equal(row.issue_date, '2026-10-15');
+    assert.equal(row.ref_number, `kh-${doc}`);
+    assert.deepEqual(methods(), []);
   });
 
   test('最大 6 回で諦めて needs_attention（send_retries_exhausted）、ジョブは failed', async () => {

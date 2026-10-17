@@ -5,10 +5,13 @@
 //   全部送り直す。F9）で付ける。後から付けるのは、このジョブの再実行か日次の照合（reconcile_deals）。
 // - 2 回目以降の POST の前に、発生日の範囲で一覧を取り ref_number を照合する（stateMachine.ts）。
 // - 4xx（自動で直らない失敗）は再送せず needs_attention にして、ジョブは完了させる。
+// - 401 invalid_grant（再認可待ち。freee_reauth_required の間も Provider が同じ失敗を返す）は needs_attention にせず、
+//   REAUTH_RETRY_MS 後に send_deal を積み直してジョブは完了させる（人が `keihi freee auth` すれば次で送れる）。
 //   それ以外の失敗は例外を投げてジョブキューのバックオフに任せる。最後の試行で失敗したら needs_attention にする。
 // - Provider は呼び出し側が渡す（予算を通したもの。worker/main.ts の HANDLERS）。
 import { appendAudit } from '../../audit.ts';
 import type { Db } from '../../db/index.ts';
+import { enqueue } from '../../jobs/queue.ts';
 import type { Handler } from '../../jobs/worker.ts';
 import { BudgetExceededError } from '../../providers/freee/budget.ts';
 import { ProviderError, type Deal, type Provider } from '../../providers/types.ts';
@@ -17,6 +20,7 @@ import {
   DealBuildError,
   latestApprovedReview,
   resolveBuildOptions,
+  refNumber,
   reviewForDeal,
   taxResolver,
   type DealDraft,
@@ -24,6 +28,7 @@ import {
 } from '../../deals/builder.ts';
 import {
   countAttempt,
+  dealRowForDocument,
   draftOf,
   ensureDealRow,
   findDealsByRef,
@@ -37,6 +42,7 @@ import {
 } from '../../deals/stateMachine.ts';
 
 export const PROVIDER = 'freee';
+export const REAUTH_RETRY_MS = 6 * 60 * 60 * 1000;
 
 export type DealProvider = Pick<Provider, 'createExpenseDeal' | 'attachReceipts' | 'listDeals' | 'getDeal'>;
 
@@ -52,11 +58,13 @@ export function describeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-// 自動の再試行では直らない失敗。
-function humanReason(e: unknown): 'send_rejected' | 'freee_reauth_required' | null {
-  if (e instanceof ProviderError && !e.retryable) return e.kind === 'auth_invalid_grant' ? 'freee_reauth_required' : 'send_rejected';
+// 自動の再試行では直らない失敗（再認可待ちは除く）。
+function humanReason(e: unknown): 'send_rejected' | null {
+  if (e instanceof ProviderError && !e.retryable && e.kind !== 'auth_invalid_grant') return 'send_rejected';
   return null;
 }
+
+const isReauth = (e: unknown) => e instanceof ProviderError && e.kind === 'auth_invalid_grant';
 
 function afterCreate(db: Db, row: DealRow, deal: Deal, expectedReceipts: number[], now: Date, adopted: boolean): DealRow {
   const linked = expectedReceipts.length > 0 && expectedReceipts.every((r) => deal.receiptIds.includes(r));
@@ -88,8 +96,11 @@ export function createSendDealHandler(getDeps: () => SendDealDeps): Handler {
       draft = buildDeal(input, resolveBuildOptions(db, PROVIDER, resolveTax, input.txnDate, input.payment));
     } catch (e) {
       if (!(e instanceof DealBuildError)) throw e;
-      // 行が無いと要対応に出せないので、内容の無い下書きで行を作ってから needs_attention にする。
-      const row = ensureDealRow(db, { documentId, reviewId: review.id, provider: PROVIDER, draft: { refNumber: `kh-${documentId}`, issueDate: review.txn_date ?? '', details: [], receiptIds: [], payment: { kind: 'cash' } } }, now);
+      // 行が無いと要対応に出せないので、無ければ内容の無い下書きで行を作る。既にある行の下書きは上書きしない
+      // （needs_attention にするだけ。直した確定版か再送で下書きを作り直す。stateMachine.ts ensureDealRow）。
+      const row =
+        dealRowForDocument(db, documentId, PROVIDER) ??
+        ensureDealRow(db, { documentId, reviewId: review.id, provider: PROVIDER, draft: { refNumber: refNumber(documentId), issueDate: review.txn_date ?? '', details: [], receiptIds: [], payment: { kind: 'cash' } } }, now);
       markNeedsAttention(db, row.id, 'build_failed', { error: e.message, review_id: review.id }, now);
       return;
     }
@@ -138,6 +149,12 @@ export function createSendDealHandler(getDeps: () => SendDealDeps): Handler {
     } catch (e) {
       const msg = describeError(e);
       recordError(db, row.id, msg, now);
+      if (isReauth(e)) {
+        const runAfter = new Date(now.getTime() + REAUTH_RETRY_MS);
+        enqueue(db, 'send_deal', documentId, { runAfter, now });
+        appendAudit(db, { actor: 'worker', action: 'deal.waiting_reauth', entity: 'deal', entityId: row.id, payload: { document_id: documentId, error: msg, run_after: runAfter.toISOString() } }, now);
+        return;
+      }
       const reason = humanReason(e);
       if (reason) {
         markNeedsAttention(db, row.id, reason, { error: msg, status: e instanceof ProviderError ? e.status : null }, now);
