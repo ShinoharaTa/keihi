@@ -11,8 +11,10 @@
 //   回数を数えずに 6 時間後へ延期する（jobs.last_error = "reauth_pending since=<ISO>: ..."）。待ちが [worker] reauth_wait_days
 //   （既定 7 日）を超えたら needs_attention（upload_reauth_expired）にしてジョブを終える。再認可の後は daily が
 //   wakeReauthPending で即時に起こす。
+// - 後から成功したとき、needs_attention の理由がアップロードのもの（upload_*）なら status を元の段階に戻す
+//   （抽出済みなら needs_review、未抽出なら received）。
 // - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts が設定から組み立てて渡す。
-import { describeError, markNeedsAttention } from '../../attention.ts';
+import { clearNeedsAttention, describeError, lastAttentionReason, markNeedsAttention } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
 import { addDays, subtractBusinessDays, todayInTokyo, type CalendarOptions } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
@@ -155,6 +157,10 @@ export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Ha
           },
           now,
         );
+        if (doc.status === 'needs_attention' && lastAttentionReason(db, doc.id)?.startsWith('upload_')) {
+          const extracted = db.prepare('SELECT 1 FROM extractions WHERE document_id = ? LIMIT 1').get(doc.id) !== undefined;
+          clearNeedsAttention(db, doc.id, extracted ? 'needs_review' : 'received', { now, detail: { remote_receipt_id: remote.id } });
+        }
       });
     } catch (e) {
       const msg = describeError(e).slice(0, 1000);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { verifyAudit } from '../../src/audit.ts';
+import { appendAudit, verifyAudit } from '../../src/audit.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { ulid } from '../../src/db/ids.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -257,6 +257,36 @@ describe('upload_receipt', () => {
     assert.equal(getJob(db, job)!.state, 'failed');
     assert.equal(status(id), 'needs_attention');
     assert.equal(audits().at(-1)!.payload.reason, 'upload_retries_exhausted');
+  });
+
+  test('期限が近くて needs_attention になった後に成功したら、status を元の段階に戻す（未抽出 → received、抽出済み → needs_review）', async () => {
+    for (const extracted of [false, true]) {
+      const id = await addDocument({ deadlineOn: '2026-10-16', bytes: Buffer.concat([ORIGINAL, Buffer.from([extracted ? 1 : 0])]) });
+      if (extracted) {
+        db.prepare(`INSERT INTO extractions (id, document_id, engine, raw_json, confidence, created_at) VALUES (?, ?, 'gemini', '{}', 0.9, ?)`).run(`EX${id}`, id, T0.toISOString());
+      }
+      fake.failNext('server');
+      enqueue(db, 'upload_receipt', id, { now: T0 });
+      await runAt(0);
+      assert.equal(status(id), 'needs_attention');
+      await runAt(1);
+      assert.equal(upload(id).state, 'uploaded');
+      assert.equal(status(id), extracted ? 'needs_review' : 'received');
+      const a = audits().at(-1)!;
+      assert.equal(a.action, 'document.needs_attention_cleared');
+      assert.equal(a.payload.reason, 'upload_deadline_near');
+    }
+    assert.ok(verifyAudit(db).ok);
+  });
+
+  test('upload 以外の理由の needs_attention は成功しても戻さない', async () => {
+    const id = await addDocument();
+    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(id);
+    appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: id, payload: { reason: 'ai_schema_invalid', from: 'received' } }, T0);
+    enqueue(db, 'upload_receipt', id, { now: T0 });
+    await runAt(0);
+    assert.equal(upload(id).state, 'uploaded');
+    assert.equal(status(id), 'needs_attention');
   });
 
   test('原本が記録の sha256 と違えば送らない', async () => {
