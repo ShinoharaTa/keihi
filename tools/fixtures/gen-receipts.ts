@@ -631,12 +631,20 @@ if (import.meta.main) {
     options: {
       seed: { type: 'string', default: '1' },
       out: { type: 'string', default: DEFAULT_OUT_DIR },
+      // pretest 用: 生成物が揃っていれば何もしない（毎回 20 秒かけて作り直さないため）
+      'if-missing': { type: 'boolean', default: false },
     },
   });
   const seed = Number(values.seed);
   if (!Number.isInteger(seed) || seed < 0) {
     console.error(`--seed は 0 以上の整数: ${values.seed}`);
     process.exit(2);
+  }
+  if (values['if-missing']) {
+    const existing = await readdir(values.out).catch(() => [] as string[]);
+    if (existing.filter((n) => n.endsWith('.truth.json')).length >= CASES.length) {
+      process.exit(0);
+    }
   }
   const truths = await generate({ seed, outDir: values.out });
   console.log(`generated ${truths.length} fixtures (seed=${seed}) -> ${values.out}`);

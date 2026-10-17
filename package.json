@@ -15,7 +15,8 @@
     "migrate": "node src/db/migrate.ts",
     "worker": "node src/worker/main.ts",
     "gen:fixtures": "node tools/fixtures/gen-receipts.ts",
-    "update:holidays": "node tools/update-holidays.ts"
+    "update:holidays": "node tools/update-holidays.ts",
+    "pretest": "node tools/fixtures/gen-receipts.ts --seed 1 --if-missing"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
