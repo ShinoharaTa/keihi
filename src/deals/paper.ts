@@ -8,6 +8,7 @@
 //   settings の paper_discard_allowed が true になるまで、discard_ok は keep_required に置き換える。
 // - 電子取引（kind = e_transaction）は紙原本が無いので unknown のまま（判定しない）。
 // - discarded は documents.paper_discarded_at（0004_deals.sql）で持つ。0001 の paper_status の CHECK に無いため。
+import { getSetting } from '../attention.ts';
 import { appendAudit } from '../audit.ts';
 import { todayInTokyo } from '../calendar/businessDays.ts';
 import { tx, type Db } from '../db/index.ts';
@@ -52,8 +53,7 @@ export function computePaperStatus(p: PaperInput): PaperResult {
 export const DISCARD_ALLOWED_KEY = 'paper_discard_allowed';
 
 export function discardAllowed(db: Db): boolean {
-  const r = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(DISCARD_ALLOWED_KEY) as { value_json: string } | undefined;
-  return r ? JSON.parse(r.value_json) === true : false;
+  return getSetting(db, DISCARD_ALLOWED_KEY) === true;
 }
 
 export type PaperRow = {
