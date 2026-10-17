@@ -27,7 +27,7 @@ type ReviewRow = {
   vendor: string | null;
   decision: string;
   invoice_reg_no?: string | null;
-  qualified_invoice?: string | null;
+  qualified_invoice?: string | number | boolean | null;
 };
 
 const REG_NO = /^T\d{13}$/;
@@ -51,17 +51,21 @@ export function metaFromReview(db: Db, documentId: string, review: ReviewRow): R
   if (review.vendor) meta.partnerName = review.vendor;
   if (review.txn_date) meta.issueDate = review.txn_date;
   if (review.amount !== null) meta.amount = review.amount;
-  let reg: string | null = null;
-  if (review.invoice_reg_no !== undefined) reg = review.invoice_reg_no;
-  else {
+  // 登録番号: reviews（0003 で追加された列。人が確定した値）を優先し、null なら最新の extractions にフォールバック。
+  let reg: string | null = review.invoice_reg_no ?? null;
+  if (reg === null) {
     const ex = db.prepare('SELECT invoice_reg_no FROM extractions WHERE document_id = ? ORDER BY created_at DESC, id DESC LIMIT 1').get(documentId) as
       | { invoice_reg_no: string | null }
       | undefined;
     reg = ex?.invoice_reg_no ?? null;
   }
   if (reg && REG_NO.test(reg)) meta.invoiceRegistrationNumber = reg;
+  // qualified_invoice: reviews では INTEGER 0/1（0003）。文字列（将来の列）も受ける。未設定なら登録番号の有無から決める。
   const q = review.qualified_invoice;
-  meta.qualifiedInvoice = q && QUALIFIED.has(q) ? (q as ReceiptMeta['qualifiedInvoice']) : meta.invoiceRegistrationNumber ? 'qualified' : 'unselected';
+  if (q === 1 || q === true || q === 'qualified') meta.qualifiedInvoice = 'qualified';
+  else if (q === 0 || q === false || q === 'not_qualified') meta.qualifiedInvoice = 'not_qualified';
+  else if (typeof q === 'string' && QUALIFIED.has(q)) meta.qualifiedInvoice = q as ReceiptMeta['qualifiedInvoice'];
+  else meta.qualifiedInvoice = meta.invoiceRegistrationNumber ? 'qualified' : 'unselected';
   return meta;
 }
 
