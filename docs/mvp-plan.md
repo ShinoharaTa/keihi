@@ -55,7 +55,7 @@ M1  基盤・取り込み・原本保存・freee OAuth・即アップロード
 | M0 | 残り: T0-3r（実行）、T0-2'（freee PoC）、T0-4（マスタの対応表）、T0-5（向き補正） | ユーザー 1.5h + 実装 1.5 日 | Y2、Gemini 有料キー、テスト事業所 |
 | M1 | 雛形、設定、DB、監査ログ、原本保存、取り込み API、期限計算、ジョブ、Provider、**freee OAuth**、**API 予算**、即アップロード、PWA 撮影、共有、systemd | 7〜8 日 | T0-2'（F1・F2・F4・F7・F14） |
 | M2 | マスタ同期（freee）、辞書、Gemini 抽出、検証、確認カード（固定）、確定 API、学習、**検索項目の PUT** | 5〜5.5 日 | M1、T0-4、U7・U8 |
-| M4 | 取引ビルダ（未決済 + receipt_ids）、送信状態機械、freee 送信、照合、要対応、紙原本ステータス、対応表 | 4 日 | M2、F8・F9、Y5・U4' |
+| M4 | 取引ビルダ（連携カードは未決済・現金/事業主借は決済済み + receipt_ids）、送信状態機械、freee 送信、照合、要対応、紙原本ステータス、対応表 | 4 日 | M2、F8・F9、Y5・U4' |
 | M5 | restic、スナップショット、バックアップ、リストア訓練、**証憑の sha256 照合**、運用文書 | 2.5〜3 日 | Q4、F6 |
 | M6 | 提案の基盤、明細の同期、照合、ルール提案、確認カード v1.1 | 5〜6 日 | G1、F10〜F12、Y5・P2' |
 | M7 | keihi MCP | 約 5 日 | M6、K1〜K3 |
@@ -178,7 +178,7 @@ M1  基盤・取り込み・原本保存・freee OAuth・即アップロード
 
 ### M4: 取引の送信・照合
 
-**T4-1 取引ビルダ**: 確定版の review → `DealDraft`（支出、**未決済**＝payments なし、`details`: 科目・税区分・金額、`partner`、`receipt_ids`、`ref_number` = 照合キー）。按分は U4'。受け入れ: 表駆動（現金・事業主借・カード、按分 0/50/100、軽減税率混在で 2 行）。残る判断: **Y5**（連携カードの支払いを未決済の取引で作り、freee で消込）、U4'。
+**T4-1 取引ビルダ**: 確定版の review → `DealDraft`（支出。**連携カード（card:*）は未決済**＝payments なし、**現金は wallet「現金」・事業主借は private_account_item「事業主借」の payments 付きで決済済み**（統合時に決定、2026-10-17）、`details`: 科目・税区分・金額、`partner`、`receipt_ids`、`ref_number` = 照合キー）。按分は U4'。受け入れ: 表駆動（現金・事業主借・カード、按分 0/50/100、軽減税率混在で 2 行）。残る判断: **Y5**（連携カードの支払いを未決済の取引で作り、freee で消込）、U4'。
 **T4-2 送信の状態機械**: architecture.md §3.3 の状態（queued → sending → deal_created → receipt_linked → verified / needs_attention）。受け入れ: fake の「タイムアウトだが成功」で、再送の前に**発生日の範囲で `GET /deals` を取り、`ref_number` をローカルで照合**（GET に ref_number の絞り込みは無い [事実: FR-OA]）して既存を採用。4xx は再送せず needs_attention。
 **T4-3 freee 送信**: `POST /deals`（receipt_ids 付き）。証憑なしで作った取引に後から付けるときは `PUT /deals/{id}`（**details を全部送り直す**。F9）。受け入れ: 契約テストと fake のシナリオ。
 **T4-4 日次照合**: `GET /deals`（keihi が作った取引）で金額・科目・`receipt_ids` を確認 → verified。freee 側で人が編集した取引は差分を報告するだけ。受け入れ: 「証憑が外れた」「金額が変わった」「取引が消えた」の 3 ケースが needs_attention。
