@@ -2,7 +2,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -11,7 +11,9 @@ import {
   INJECTED_INSTRUCTION,
   WATERMARK,
   buildCase,
+  FIXTURES_MARKER,
   checkDigit,
+  clearOutDir,
   generate,
   isValidRegistrationNumber,
   type Truth,
@@ -176,5 +178,35 @@ describe('画像の条件', () => {
       if (t.variations.includes('grayscale')) assert.equal(meta.channels, 1, t.file);
       else assert.equal(meta.channels, 3, t.file);
     }
+  });
+});
+
+describe('出力先の掃除', () => {
+  test('生成物以外のファイルがあり、マーカーが無ければ拒否して何も消さない', async () => {
+    const dir = path.join(work, 'other');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'r01_old.jpg'), 'x');
+    await writeFile(path.join(dir, 'notes.txt'), 'keep');
+    await assert.rejects(generate({ seed: 1, outDir: dir }), /生成物以外/);
+    assert.deepEqual((await readdir(dir)).sort(), ['notes.txt', 'r01_old.jpg']);
+  });
+
+  test('マーカーがあれば生成物だけを消し、他のファイルとサブディレクトリは残す', async () => {
+    const dir = path.join(work, 'marked');
+    await mkdir(path.join(dir, 'sub'), { recursive: true });
+    for (const f of ['r01_a.jpg', 'r02_b.png', 'r03_c.pdf', 'r03_c.truth.json', 'notes.txt', 'r1_x.jpg', FIXTURES_MARKER]) {
+      await writeFile(path.join(dir, f), 'x');
+    }
+    await clearOutDir(dir);
+    assert.deepEqual((await readdir(dir)).sort(), [FIXTURES_MARKER, 'notes.txt', 'r1_x.jpg', 'sub'].sort());
+  });
+
+  test('生成物だけのディレクトリと、無いディレクトリはそのまま扱える', async () => {
+    const dir = path.join(work, 'only');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'r01_a.jpg'), 'x');
+    await clearOutDir(dir);
+    assert.deepEqual(await readdir(dir), []);
+    await clearOutDir(path.join(work, 'missing'));
   });
 });

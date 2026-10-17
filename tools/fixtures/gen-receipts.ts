@@ -4,7 +4,7 @@
 //
 //   node tools/fixtures/gen-receipts.ts --seed 1 [--out test/fixtures/receipts]
 
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import sharp from 'sharp';
@@ -571,9 +571,31 @@ async function toPdf(png: Buffer, widthMm: number, heightMm: number): Promise<Bu
   return Buffer.from(await doc.save());
 }
 
+// 生成物として消してよいファイル名。
+export const GENERATED_FILE = /^r\d\d_.*\.(jpg|png|pdf|truth\.json)$/;
+// これがあるディレクトリは、生成物以外のファイルがあっても出力先にしてよい（生成物以外は消さない）。
+export const FIXTURES_MARKER = '.keihi-fixtures';
+
+// 出力先の古い生成物だけを消す。生成物以外のファイルがあり、マーカーが無ければ拒否する（誤った --out で消さないため）。
+export async function clearOutDir(outDir: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(outDir, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw e;
+  }
+  const generated = entries.filter((e) => e.isFile() && GENERATED_FILE.test(e.name));
+  const others = entries.filter((e) => !generated.includes(e) && e.name !== FIXTURES_MARKER);
+  if (others.length > 0 && !entries.some((e) => e.name === FIXTURES_MARKER)) {
+    throw new Error(`${outDir} に生成物以外のファイルがある（${others[0].name} など）。出力先を確かめるか、${FIXTURES_MARKER} を置く`);
+  }
+  for (const e of generated) await rm(path.join(outDir, e.name));
+}
+
 export async function generate(opts: { seed: number; outDir: string }): Promise<Truth[]> {
   const { seed, outDir } = opts;
-  await rm(outDir, { recursive: true, force: true });
+  await clearOutDir(outDir);
   await mkdir(outDir, { recursive: true });
   const truths: Truth[] = [];
   for (let i = 0; i < CASES.length; i++) {
