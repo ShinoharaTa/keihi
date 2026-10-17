@@ -7,12 +7,21 @@
     "node": ">=24"
   },
   "scripts": {
+    "dev": "node --watch src/web/main.ts",
+    "build": "node tools/dev/build.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "node tools/dev/lint.ts",
+    "migrate": "node src/db/migrate.ts",
+    "worker": "node src/worker/main.ts",
     "gen:fixtures": "node tools/fixtures/gen-receipts.ts",
-    "test": "node --test \"test/**/*.test.ts\""
+    "update:holidays": "node tools/update-holidays.ts"
   },
   "dependencies": {
+    "hono": "^4.13.13",
     "pdf-lib": "^1.17.1",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "smol-toml": "^1.9.1"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",

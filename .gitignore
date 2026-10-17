@@ -7,3 +7,6 @@ storage/
 models/
 .venv/
 node_modules/
+*.env
+!deploy/*.example.env
+poc/
