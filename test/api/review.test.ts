@@ -28,8 +28,10 @@ let n = 0;
 let db: Db;
 let objectsDir: string;
 let app: Hono;
+let clock = NOW;
 
 function make() {
+  clock = NOW;
   objectsDir = path.join(root, `objects-${n}`);
   db = openDb(path.join(root, `${n++}.db`));
   migrate(db);
@@ -59,7 +61,7 @@ function make() {
     },
     auth: allow,
     triggerWorker: () => {},
-    now: () => NOW,
+    now: () => clock,
   });
 }
 
@@ -165,6 +167,26 @@ describe('GET /api/documents/:id/card（T2-7）', () => {
     const r2 = await getCard(id);
     assert.equal(r2.json.card_id, r.json.card_id);
     assert.equal(audits('ai.proposed').length, 1);
+  });
+
+  test('日付が進んでも・documents.status が変わっても同じカード（残り営業日と status は応答で付け足す）', async () => {
+    const id = addDoc();
+    addExtraction(id, {}, [GEMINI]);
+    const r = await getCard(id);
+    assert.equal(r.json.dataModel.days_left, 6);
+    const stored = JSON.parse((db.prepare('SELECT card_json FROM ui_cards WHERE id = ?').get(r.json.card_id) as { card_json: string }).card_json);
+    assert.equal('days_left' in stored.dataModel, false);
+    assert.equal('status' in stored.dataModel, false);
+    clock = new Date('2026-10-19T03:00:00.000Z'); // 月
+    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(id);
+    const r2 = await getCard(id);
+    assert.equal(r2.json.card_id, r.json.card_id);
+    assert.equal(r2.json.dataModel.days_left, 5);
+    assert.equal(r2.json.dataModel.status, 'needs_attention');
+    assert.equal(audits('ai.proposed').length, 1);
+    // 古くならないので、そのカードで確定できる
+    const a = await act(id, 'approve', { card_id: r.json.card_id, expected_version: 0, values: { payment: 'cash' } });
+    assert.equal(a.status, 200);
   });
 
   test('質問カード（questions[]）は surface に入れない', async () => {

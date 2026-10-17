@@ -7,7 +7,8 @@
 //   enabled_accounts に無い科目は捨てる。上位 3 件。
 // - 画像は ReceiptThumb の document_id だけ（PWA が /api/documents/:id/thumbnail を引く。URL は持たない）。
 // - 確定の版があれば、値と出所はその版から始める（訂正のため）。科目候補は AI・辞書のまま。
-// - ui_cards に保存し、内容が前回の open と同じなら使い回す。新しく作ったら前の open を superseded にし、
+// - ui_cards に保存し、内容が前回の open と同じなら使い回す。日々変わる値（documents.status・残り営業日）は保存も比較もせず、
+//   表示用に API 応答で付け足す（日付が変わっただけで別のカードにしない。LIVE_FIELDS）。新しく作ったら前の open を superseded にし、
 //   AI（または辞書）の提案として audit に ai.proposed を残す（actor = 提案者 ai | dictionary）。確定の版から作ったカードは提案ではないので残さない。
 import { readFileSync } from 'node:fs';
 import { appendAudit, canonicalJson } from '../audit.ts';
@@ -60,6 +61,15 @@ export type DataModel = {
   accounts: { id: string; name: string; private: boolean }[];
   warnings: string[];
 };
+
+// 保存・比較しない（日々変わる）項目。
+export const LIVE_FIELDS = ['status', 'days_left'] as const;
+export type StoredDataModel = Omit<DataModel, (typeof LIVE_FIELDS)[number]>;
+
+export function storedDataModel(dm: DataModel): StoredDataModel {
+  const { status: _s, days_left: _d, ...rest } = dm;
+  return rest;
+}
 
 export type Card = { surface: Surface; dataModel: DataModel; proposer: 'ai' | 'dictionary' | null };
 
@@ -301,7 +311,7 @@ export function parseSources(json: string | null): Partial<Sources> {
   }
 }
 
-export type StoredCard = { id: string; document_id: string; ai_turn_id: string | null; status: string; card: { surface: Surface; dataModel: DataModel } };
+export type StoredCard = { id: string; document_id: string; ai_turn_id: string | null; status: string; card: { surface: Surface; dataModel: StoredDataModel } };
 
 export function getStoredCard(db: Db, cardId: string): StoredCard | null {
   const r = db.prepare('SELECT id, document_id, ai_turn_id, status, card_json FROM ui_cards WHERE id = ? AND kind = ?').get(cardId, CARD_KIND) as
@@ -315,7 +325,7 @@ export function getStoredCard(db: Db, cardId: string): StoredCard | null {
 export function openCard(db: Db, documentId: string, opts: CardOptions): { cardId: string; created: boolean; card: Card } | null {
   const card = buildCard(db, documentId, opts);
   if (!card) return null;
-  const json = canonicalJson({ surface: card.surface, dataModel: card.dataModel });
+  const json = canonicalJson({ surface: card.surface, dataModel: storedDataModel(card.dataModel) });
   return tx(db, () => {
     const open = db
       .prepare(`SELECT id, card_json FROM ui_cards WHERE document_id = ? AND kind = ? AND status = 'open' ORDER BY id DESC`)
