@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import type { Db } from '../../src/db/index.ts';
-import { canTransition, DEAL_STATES, dealRowForDocument, type DealState } from '../../src/deals/stateMachine.ts';
+import { canTransition, DEAL_STATES, dealRowForDocument, markNeedsAttention, requeueDeal, type DealState } from '../../src/deals/stateMachine.ts';
 import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
@@ -82,7 +82,87 @@ describe('状態機械', () => {
       ['receipt_linked', 'deal_created'],
     ];
     for (const [a, b] of ng) assert.equal(canTransition(a, b), false, `${a} → ${b}`);
-    for (const s of DEAL_STATES) assert.equal(canTransition('needs_attention', s), false);
+    for (const s of DEAL_STATES) assert.equal(canTransition('needs_attention', s), s === 'queued', `needs_attention → ${s}`);
+  });
+});
+
+describe('needs_attention からの復帰', () => {
+  test('requeueDeal: 4xx の要対応を queued に戻し、再送で作る。文書の状態も approved に戻す', async () => {
+    const { doc, upload } = setup();
+    await upload;
+    fake.failNext('client');
+    enqueue(db, SEND, doc, { now: T0 });
+    await runAt(0);
+    assert.equal(deal(doc).state, 'needs_attention');
+    const row = requeueDeal(db, doc, { reason: 'user_retry', now: at(10) })!;
+    assert.equal(row.state, 'queued');
+    assert.equal(docStatus(doc), 'approved');
+    assert.equal(actions().filter((a) => a === 'deal.queued').length, 2); // 作成と戻し
+    enqueue(db, SEND, doc, { now: at(10) });
+    await runAt(10);
+    assert.equal(deal(doc).state, 'receipt_linked');
+    // 2 回目は送る前に一覧で照合する（attempts は数え続ける）
+    assert.deepEqual(methods(), ['createExpenseDeal:client', 'listDeals:ok', 'createExpenseDeal:ok']);
+    assert.equal(fake.state.deals.size, 1);
+    assert.equal(verifyAudit(db).ok, true);
+  });
+
+  test('requeueDeal: needs_attention でなければ null、freee に取引がある行は戻せない', async () => {
+    const { doc, upload } = setup();
+    await upload;
+    assert.equal(requeueDeal(db, doc, { reason: 'user_retry', now: T0 }), null);
+    enqueue(db, SEND, doc, { now: T0 });
+    await runAt(0);
+    assert.equal(requeueDeal(db, doc, { reason: 'user_retry', now: T0 }), null);
+    markNeedsAttention(db, deal(doc).id, 'amount_changed', {}, at(1));
+    assert.throws(() => requeueDeal(db, doc, { reason: 'user_retry', now: at(2) }), /queued に戻せない/);
+    assert.equal(deal(doc).state, 'needs_attention');
+  });
+
+  test('build_failed の後に新しい確定版が来たら、新しい下書きで queued に戻して送る', async () => {
+    const doc = addDocument(db);
+    addReview(db, doc, { amount: 1100, creditAccount: 'owner' }); // 事業主借がマスタに無い
+    enqueue(db, SEND, doc, { now: T0 });
+    await runAt(0);
+    assert.equal(deal(doc).attention_reason, 'build_failed');
+    addReview(db, doc, { version: 2, amount: 1100, creditAccount: 'cash' });
+    enqueue(db, SEND, doc, { now: at(5) });
+    await runAt(5);
+    const row = deal(doc);
+    assert.equal(row.state, 'deal_created');
+    assert.equal(row.review_id, `R-${doc}-2`);
+    assert.equal(fake.state.deals.get(1)!.amount, 1100);
+  });
+
+  test('build_failed をマスタで直して requeueDeal: 同じ確定版でも下書きを作り直して送る', async () => {
+    const doc = addDocument(db);
+    addReview(db, doc, { amount: 1100, creditAccount: 'owner' });
+    enqueue(db, SEND, doc, { now: T0 });
+    await runAt(0);
+    assert.equal(deal(doc).attention_reason, 'build_failed');
+    applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }, { remoteId: '105', name: '事業主借', data: {} }], at(1).toISOString());
+    requeueDeal(db, doc, { reason: 'user_retry', now: at(2) });
+    enqueue(db, SEND, doc, { now: at(2) });
+    await runAt(2);
+    const sent = fake.calls.find((c) => c.method === 'createExpenseDeal')!.args[0] as { details: unknown[]; payments: { fromWalletableId: number }[] };
+    assert.equal(sent.details.length, 1);
+    assert.equal(sent.payments[0].fromWalletableId, 105);
+    assert.equal(deal(doc).state, 'deal_created');
+  });
+
+  test('送った後の新しい確定版でも、送る内容が同じ（memo だけの変更など）なら何もしない', async () => {
+    const { doc } = setup({ uploaded: false });
+    enqueue(db, SEND, doc, { now: T0 });
+    await runAt(0);
+    assert.equal(deal(doc).state, 'deal_created');
+    await uploadReceipt(doc); // 下書きの receiptIds は変わるが、比べるときは揃える
+    addReview(db, doc, { version: 2, amount: 1100, taxId: '1' });
+    enqueue(db, SEND, doc, { now: at(5) });
+    await runAt(5);
+    const row = deal(doc);
+    assert.equal(row.state, 'receipt_linked');
+    assert.equal(row.attention_reason, null);
+    assert.equal(row.review_id, `R-${doc}-1`);
   });
 });
 

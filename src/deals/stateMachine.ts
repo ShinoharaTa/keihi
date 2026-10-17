@@ -1,6 +1,8 @@
 // 取引の送信の状態機械（docs/mvp-plan.md T4-2、architecture.md §3.3）。
 //   queued → sending → deal_created → receipt_linked → verified
 //   どこからでも needs_attention（4xx・再試行の上限・照合の差分）。verified も照合の差分で needs_attention に戻る。
+//   needs_attention → queued: freee にまだ取引が無い（remote_deal_id が NULL）ものだけ。要対応の再送（requeueDeal）か、
+//   新しい確定版が来たとき（ensureDealRow）。
 // - 冪等キーが freee に無いので、POST /deals を 2 回目以降に試す前に、発生日の範囲で listDeals を取り、
 //   ref_number を手元で照合する（GET に ref_number の絞り込みは無い）。見つかればそれを採用して送らない。
 // - 再送の間隔はジョブキューのバックオフ（1 → 5 → 30 → 120 分、最大 6 回。src/jobs/queue.ts）に任せる。
@@ -21,7 +23,7 @@ const NEXT: Record<DealState, readonly DealState[]> = {
   deal_created: ['receipt_linked', 'needs_attention'],
   receipt_linked: ['verified', 'needs_attention'],
   verified: ['verified', 'needs_attention'],
-  needs_attention: [],
+  needs_attention: ['queued'],
 };
 
 export function canTransition(from: DealState, to: DealState): boolean {
@@ -30,6 +32,7 @@ export function canTransition(from: DealState, to: DealState): boolean {
 
 // 送信状態 → documents.status。
 const DOCUMENT_STATUS: Partial<Record<DealState, string>> = {
+  queued: 'approved', // needs_attention から戻したとき（送る前の確定版は approve）
   deal_created: 'sent',
   receipt_linked: 'sent',
   verified: 'verified',
@@ -82,12 +85,17 @@ export function dealRowForDocument(db: Db, documentId: string, provider: string)
   return (db.prepare('SELECT * FROM deals WHERE document_id = ? AND provider = ?').get(documentId, provider) as DealRow | undefined) ?? null;
 }
 
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
 // 文書の送信行を作る（既にあれば何もしない）。queued のままなら確定版の変更を下書きに反映する。
-// 送った後（sending 以降）に確定版が変わったら、上書きせず needs_attention にする。
+// - needs_attention で freee にまだ取引が無い行に新しい確定版が来たら、新しい下書きで queued に戻す。
+// - 送った後（sending 以降）に確定版が変わったら、上書きせず下書きを比べる。同じ（memo だけの変更など、送る内容が
+//   変わらない）なら何もしない。違えば needs_attention（review_changed_after_send）にする。
+//   証憑（receiptIds）は下書きを作った時点のアップロードの状態で変わるので、比べるときは送った下書きの値に揃える。
 export function ensureDealRow(db: Db, input: { documentId: string; reviewId: string; provider: string; draft: DealDraft }, now: Date): DealRow {
   return tx(db, () => {
     const json = canonicalJson(input.draft);
-    const sha = createHash('sha256').update(json).digest('hex');
+    const sha = sha256(json);
     const iso = now.toISOString();
     const cur = dealRowForDocument(db, input.documentId, input.provider);
     if (!cur) {
@@ -99,8 +107,7 @@ export function ensureDealRow(db: Db, input: { documentId: string; reviewId: str
       appendAudit(db, { actor: 'worker', action: 'deal.queued', entity: 'deal', entityId: id, payload: { document_id: input.documentId, review_id: input.reviewId, ref_number: input.draft.refNumber, draft_sha256: sha } }, now);
       return getDealRow(db, id)!;
     }
-    if (cur.review_id === input.reviewId) return cur;
-    if (cur.state === 'queued') {
+    const updateDraft = () =>
       db.prepare('UPDATE deals SET review_id = ?, issue_date = ?, draft_json = ?, draft_sha256 = ?, updated_at = ? WHERE id = ?').run(
         input.reviewId,
         input.draft.issueDate,
@@ -109,13 +116,36 @@ export function ensureDealRow(db: Db, input: { documentId: string; reviewId: str
         iso,
         cur.id,
       );
+    if (cur.state === 'queued') {
+      // 同じ確定版でも下書きが変わることがある（build_failed の後にマスタを直して再送したときなど）。
+      if (cur.review_id === input.reviewId && cur.draft_sha256 === sha) return cur;
+      updateDraft();
       appendAudit(db, { actor: 'worker', action: 'deal.draft_updated', entity: 'deal', entityId: cur.id, payload: { review_id: input.reviewId, draft_sha256: sha } }, now);
       return getDealRow(db, cur.id)!;
     }
+    if (cur.review_id === input.reviewId) return cur;
+    if (cur.state === 'needs_attention' && cur.remote_deal_id === null) {
+      updateDraft();
+      return transition(db, cur.id, 'queued', {}, now, { reason: 'review_changed', review_id: input.reviewId, draft_sha256: sha });
+    }
+    if (sha256(canonicalJson({ ...input.draft, receiptIds: draftOf(cur).receiptIds })) === cur.draft_sha256) return cur;
     if (cur.state !== 'needs_attention') {
       markNeedsAttention(db, cur.id, 'review_changed_after_send', { sent_review_id: cur.review_id, new_review_id: input.reviewId }, now);
     }
     return getDealRow(db, cur.id)!;
+  });
+}
+
+// 要対応の再送（POST /api/outbound/:id/retry）。needs_attention の行を queued に戻す（下書きは次の send_deal で作り直す）。
+// freee に取引がある（remote_deal_id がある）行は戻せない（再送の前の照合で既存の取引を採用してしまうため）。
+// needs_attention の行が無ければ null。send_deal を積むのは呼び出し側。
+export function requeueDeal(db: Db, documentId: string, opts: { reason: string; now?: Date }): DealRow | null {
+  const now = opts.now ?? new Date();
+  return tx(db, () => {
+    const row = db.prepare(`SELECT * FROM deals WHERE document_id = ? AND state = 'needs_attention' ORDER BY id LIMIT 1`).get(documentId) as DealRow | undefined;
+    if (!row) return null;
+    if (row.remote_deal_id !== null) throw new Error(`deal ${row.id}: freee に取引（${row.remote_deal_id}）があるので queued に戻せない`);
+    return transition(db, row.id, 'queued', {}, now, { reason: opts.reason, attention_reason: row.attention_reason });
   });
 }
 
