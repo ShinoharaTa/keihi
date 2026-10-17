@@ -11,6 +11,7 @@ import { appendAudit, verifyAudit } from '../../src/audit.ts';
 import { validateSchema } from '../../src/ai/validate.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { ensureDealRow, markNeedsAttention } from '../../src/deals/stateMachine.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
 import { CATALOG } from '../../src/review/card.ts';
 import { putObject } from '../../src/storage/objects.ts';
@@ -537,5 +538,15 @@ describe('GET /api/documents（T2-11）', () => {
     const counts = await (await app.request('/api/documents/counts')).json();
     assert.deepEqual(counts, { review: 3, attention: 1, urgent: 2 });
     assert.equal((await app.request('/api/documents?status=bogus')).status, 400);
+  });
+
+  test('要対応の理由は、文書側より新しい送信の要対応があれば deals.attention_reason', async () => {
+    const id = addDoc({ status: 'approved' });
+    appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: id, payload: { reason: 'meta_retries_exhausted' } }, NOW);
+    db.prepare(`INSERT INTO reviews (id, document_id, version, decision, decided_at, proration_pct) VALUES ('RV1', ?, 1, 'approve', ?, 100)`).run(id, NOW.toISOString());
+    const row = ensureDealRow(db, { documentId: id, reviewId: 'RV1', provider: 'freee', draft: { refNumber: `kh-${id}`, issueDate: '2026-10-15', details: [], receiptIds: [], payment: { kind: 'cash' } } }, NOW);
+    markNeedsAttention(db, row.id, 'send_rejected', {}, NOW);
+    const at = (await (await app.request('/api/documents?status=attention')).json()) as { items: any[] };
+    assert.deepEqual(at.items.map((i) => [i.id, i.needs_attention_reason]), [[id, 'send_rejected']]);
   });
 });
