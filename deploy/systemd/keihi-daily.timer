@@ -1,0 +1,10 @@
+# keihi-daily.service を毎日 03:30（ローカル時刻）に起動する（docs/mvp-plan-v0.1.md §4.4）。止まっていた間の分は起動時に 1 回だけ。
+[Unit]
+Description=keihi daily timer
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

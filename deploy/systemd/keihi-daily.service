@@ -1,0 +1,16 @@
+# keihi の日次（docs/mvp-plan.md §4.4、docs/mvp-plan-v0.1.md §4.4）。systemctl --user 用。keihi-daily.timer から起動する。
+# daily ジョブ（トークンの更新・マスタ同期・検索項目の期限チェック・needs_attention の集計）を積み、keihi-worker.service を起動する。
+# 処理そのものは worker が行う（このサービスは積んで終わる）。
+# インストール例（手作業）: ln -s ~/workspace/keihi/deploy/systemd/keihi-daily.{service,timer} ~/.config/systemd/user/
+#                          systemctl --user daemon-reload && systemctl --user enable --now keihi-daily.timer
+[Unit]
+Description=keihi daily (enqueue)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/keihi
+ExecStart=%h/.nvm/versions/node/v24.20.0/bin/node %h/workspace/keihi/src/jobs/trigger.ts daily
+MemoryMax=256M
+Nice=10
+NoNewPrivileges=yes
+UMask=0077

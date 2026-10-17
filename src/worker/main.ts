@@ -11,8 +11,10 @@ import { loadConfig, requireFreee, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers } from '../jobs/worker.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
-import { resetHourJstFor } from '../providers/freee/budget.ts';
+import { refreshIfExpiringSoon, TOKEN_URL, TokenStore } from '../providers/freee/auth.ts';
+import { budgetedFetch, createBudget, resetHourJstFor } from '../providers/freee/budget.ts';
 import { createFreeeProvider, freeeTokenPaths, type FreeeProvider } from '../providers/freee/provider.ts';
+import { createDailyHandler } from './handlers/daily.ts';
 import { createExtractHandler } from './handlers/extract.ts';
 import { createUpdateReceiptMetaHandler } from './handlers/updateReceiptMeta.ts';
 import { createUploadReceiptHandler } from './handlers/uploadReceipt.ts';
@@ -38,6 +40,21 @@ export function buildProvider(cfg: Config, db: Db, opts: { fetch?: typeof fetch 
     fetch: opts.fetch,
     resetHourJst: resetHourJstFor(cfg.freee.dayBoundary),
   });
+}
+
+// daily のトークン更新（残り 30 日）。トークンエンドポイントの呼び出しは予算（auth）に通す。fake では null。
+export function buildTokenRefresher(cfg: Config, db: Db, opts: { fetch?: typeof fetch } = {}) {
+  if (cfg.provider.kind === 'fake') return null;
+  return () => {
+    const f = requireFreee(cfg, cfg.freee.target);
+    const { tokenPath, lockPath } = freeeTokenPaths(cfg.dataDir);
+    const budget = createBudget({ db, resetHourJst: resetHourJstFor(cfg.freee.dayBoundary) });
+    return refreshIfExpiringSoon({
+      store: new TokenStore(tokenPath, lockPath),
+      creds: { clientId: f.clientId, clientSecret: f.clientSecret },
+      fetch: budgetedFetch(budget, 'auth', new URL(TOKEN_URL).pathname, opts.fetch ?? fetch),
+    });
+  };
 }
 
 export function createRuntime(cfg: Config, db: Db, opts: { fetch?: typeof fetch } = {}): WorkerRuntime {
@@ -69,6 +86,10 @@ export const HANDLERS: Handlers = {
     return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir };
   }),
   update_receipt_meta: createUpdateReceiptMetaHandler(() => ({ provider: runtime().provider() })),
+  daily: createDailyHandler(() => {
+    const rt = runtime();
+    return { provider: rt.provider, refreshToken: buildTokenRefresher(rt.cfg, rt.db) };
+  }),
 };
 
 // 実行環境を設定して HANDLERS を動かす（テストからも使う）。
