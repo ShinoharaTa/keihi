@@ -11,6 +11,7 @@ import { migrate } from '../../src/db/migrate.ts';
 import { BACKOFF_MINUTES, MAX_ATTEMPTS, claim, enqueue, getJob } from '../../src/jobs/queue.ts';
 import { TRIGGER_ARGS, triggerWorker, type SpawnLike } from '../../src/jobs/trigger.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
+import { JOBS_ON_APPROVE } from '../../src/review/confirm.ts';
 import { HANDLERS } from '../../src/worker/main.ts';
 
 const MAIN_TS = fileURLToPath(new URL('../../src/worker/main.ts', import.meta.url));
@@ -99,6 +100,10 @@ describe('worker', () => {
     assert.match(getJob(db, a)!.last_error!, /実行環境が未設定/);
     assert.equal(getJob(db, b)!.state, 'queued');
     db.close();
+  });
+
+  test('HANDLERS は確定 API と日次が積むジョブを全部持つ', () => {
+    for (const k of [...JOBS_ON_APPROVE, 'daily', 'reconcile_deals']) assert.equal(typeof HANDLERS[k], 'function', k);
   });
 
   test('src/worker/main.ts は処理後に exit code 0 で終了する', async () => {

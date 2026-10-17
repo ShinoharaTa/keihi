@@ -16,6 +16,8 @@ import { budgetedFetch, createBudget, resetHourJstFor } from '../providers/freee
 import { createFreeeProvider, freeeTokenPaths, type FreeeProvider } from '../providers/freee/provider.ts';
 import { createDailyHandler } from './handlers/daily.ts';
 import { createExtractHandler } from './handlers/extract.ts';
+import { createReconcileHandler } from './handlers/reconcile.ts';
+import { createSendDealHandler } from './handlers/send.ts';
 import { createUpdateReceiptMetaHandler } from './handlers/updateReceiptMeta.ts';
 import { createUploadReceiptHandler } from './handlers/uploadReceipt.ts';
 
@@ -86,6 +88,8 @@ export const HANDLERS: Handlers = {
     return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir };
   }),
   update_receipt_meta: createUpdateReceiptMetaHandler(() => ({ provider: runtime().provider() })),
+  send_deal: createSendDealHandler(() => ({ provider: runtime().provider() })),
+  reconcile_deals: createReconcileHandler(() => ({ provider: runtime().provider() })),
   daily: createDailyHandler(() => {
     const rt = runtime();
     return { provider: rt.provider, refreshToken: buildTokenRefresher(rt.cfg, rt.db) };

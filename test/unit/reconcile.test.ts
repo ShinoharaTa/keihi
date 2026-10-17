@@ -8,7 +8,7 @@ import type { Db } from '../../src/db/index.ts';
 import { compareDeal } from '../../src/deals/reconcile.ts';
 import { dealRowForDocument } from '../../src/deals/stateMachine.ts';
 import type { TaxResolver } from '../../src/deals/builder.ts';
-import { enqueue, getJob, type JobKind } from '../../src/jobs/queue.ts';
+import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
 import { createFakeProvider, type FakeProvider } from '../../src/providers/fake/index.ts';
@@ -55,14 +55,14 @@ async function sentDocument(o: { uploaded?: boolean; txnDate?: string } = {}): P
     const r = await fake.uploadReceipt({ bytes: Buffer.from('x'), fileName: 'a.jpg', mime: 'image/jpeg', key: `kh-${doc}` });
     markUploaded(db, doc, r.id);
   }
-  enqueue(db, 'send_deal' as JobKind, doc, { now: clock });
+  enqueue(db, 'send_deal', doc, { now: clock });
   await runAt(0);
   fake.calls.length = 0;
   return doc;
 }
 
 async function reconcile(min = 60) {
-  const job = enqueue(db, 'reconcile_deals' as JobKind, null, { now: at(min) });
+  const job = enqueue(db, 'reconcile_deals', null, { now: at(min) });
   const s = await runAt(min);
   return { job, s };
 }

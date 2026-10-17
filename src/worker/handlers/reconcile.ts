@@ -1,6 +1,6 @@
 // reconcile_deals ジョブ（docs/mvp-plan.md T4-4）。keihi が作った取引を freee と照合する（src/deals/reconcile.ts）。
 // 日次（keihi-daily）から積む想定。ref_id は使わない。Provider の失敗は例外を投げてジョブキューのバックオフに任せる。
-// - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts での配線は未実装。
+// - Provider は呼び出し側が渡す（予算を通したもの。worker/main.ts の HANDLERS）。
 import { appendAudit } from '../../audit.ts';
 import { reconcileDeals } from '../../deals/reconcile.ts';
 import type { Handler } from '../../jobs/worker.ts';
@@ -17,7 +17,3 @@ export function createReconcileHandler(getDeps: () => ReconcileDeps): Handler {
   };
 }
 
-// worker/main.ts の HANDLERS が使う既定のハンドラ。freee の Provider の配線は未実装なので失敗させる。
-export const reconcileDealsHandler: Handler = createReconcileHandler(() => {
-  throw new Error('reconcile_deals の Provider の配線が未実装（worker/main.ts で createReconcileHandler に freee の Provider を渡す）');
-});

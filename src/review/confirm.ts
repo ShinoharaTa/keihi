@@ -9,7 +9,7 @@ import { appendAudit } from '../audit.ts';
 import { checkInvoiceRegNo, sanitizeText } from '../ai/validate.ts';
 import { tx, type Db } from '../db/index.ts';
 import { ulid } from '../db/ids.ts';
-import { enqueue, type JobKind } from '../jobs/queue.ts';
+import { enqueue } from '../jobs/queue.ts';
 import { enabledAccounts, loadAccountMap, type AccountMap } from '../masters/accounts.ts';
 import { TAX_CATEGORIES, type TaxCategory } from '../masters/tax-map.ts';
 import { getStoredCard, type StoredCard } from './card.ts';
@@ -287,8 +287,7 @@ export function decide(db: Db, input: DecideInput): DecideResult {
     const jobs: string[] = [];
     if (input.decision === 'approve') {
       for (const k of JOBS_ON_APPROVE) {
-        // JobKind は src/jobs（別担当）が増やす。名前だけ合わせて積む。
-        enqueue(db, k as unknown as JobKind, doc.id, { now: input.now });
+        enqueue(db, k, doc.id, { now: input.now });
         jobs.push(k);
       }
     }

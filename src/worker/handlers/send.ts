@@ -6,7 +6,7 @@
 // - 2 回目以降の POST の前に、発生日の範囲で一覧を取り ref_number を照合する（stateMachine.ts）。
 // - 4xx（自動で直らない失敗）は再送せず needs_attention にして、ジョブは完了させる。
 //   それ以外の失敗は例外を投げてジョブキューのバックオフに任せる。最後の試行で失敗したら needs_attention にする。
-// - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts での配線は未実装。
+// - Provider は呼び出し側が渡す（予算を通したもの。worker/main.ts の HANDLERS）。
 import { appendAudit } from '../../audit.ts';
 import type { Db } from '../../db/index.ts';
 import type { Handler } from '../../jobs/worker.ts';
@@ -148,7 +148,3 @@ export function createSendDealHandler(getDeps: () => SendDealDeps): Handler {
   };
 }
 
-// worker/main.ts の HANDLERS が使う既定のハンドラ。freee の Provider の配線は未実装なので、送ったことにせず失敗させる。
-export const sendDeal: Handler = createSendDealHandler(() => {
-  throw new Error('send_deal の Provider の配線が未実装（worker/main.ts で createSendDealHandler に freee の Provider を渡す）');
-});

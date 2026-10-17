@@ -7,7 +7,7 @@ import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import type { Db } from '../../src/db/index.ts';
 import { canTransition, DEAL_STATES, dealRowForDocument, type DealState } from '../../src/deals/stateMachine.ts';
-import { enqueue, getJob, type JobKind } from '../../src/jobs/queue.ts';
+import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
 import { createFakeProvider, type FakeProvider } from '../../src/providers/fake/index.ts';
@@ -16,7 +16,7 @@ import type { TaxResolver } from '../../src/deals/builder.ts';
 import { addDocument, addReview, markUploaded, openTestDb, T0 } from './deals-helpers.ts';
 
 const at = (min: number) => new Date(T0.getTime() + min * 60_000);
-const SEND = 'send_deal' as JobKind;
+const SEND = 'send_deal';
 const resolveTax: TaxResolver = (cat) => ({ taxable_10: 1, taxable_8_reduced: 2, non_taxable: 4, out_of_scope: 3 })[cat];
 
 let root: string;
