@@ -5,14 +5,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Db } from '../../src/db/index.ts';
-import { compareDeal } from '../../src/deals/reconcile.ts';
+import { compareDeal, reconcileDeals } from '../../src/deals/reconcile.ts';
 import { dealRowForDocument } from '../../src/deals/stateMachine.ts';
 import type { TaxResolver } from '../../src/deals/builder.ts';
 import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
 import { createFakeProvider, type FakeProvider } from '../../src/providers/fake/index.ts';
-import type { Deal } from '../../src/providers/types.ts';
+import { ProviderError, type Deal } from '../../src/providers/types.ts';
 import { createReconcileHandler } from '../../src/worker/handlers/reconcile.ts';
 import { createSendDealHandler } from '../../src/worker/handlers/send.ts';
 import { addDocument, addReview, markUploaded, openTestDb, T0 } from './deals-helpers.ts';
@@ -83,7 +83,7 @@ describe('reconcile_deals', () => {
       fake.calls.map((c) => c.method),
       ['listDeals'],
     );
-    assert.deepEqual(fake.calls[0].args, [{ startIssueDate: '2026-10-10', endIssueDate: '2026-10-15' }]);
+    assert.deepEqual(fake.calls[0].args, [{ startIssueDate: '2026-10-10', endIssueDate: '2026-10-15', limit: 100, offset: 0 }]);
     assert.equal((db.prepare('SELECT status FROM documents WHERE id = ?').get(a) as { status: string }).status, 'verified');
   });
 
@@ -169,6 +169,82 @@ describe('reconcile_deals', () => {
     const { job } = await reconcile();
     assert.equal(getJob(db, job)!.state, 'queued');
     assert.equal(row(doc).state, 'receipt_linked');
+  });
+
+  test('取引ごとの 5xx は飛ばして続け、最後にまとめて再試行に回す（照合できた分は進める）', async () => {
+    const a = await sentDocument({ txnDate: '2026-10-10' });
+    const b = await sentDocument({ txnDate: '2026-10-15' });
+    remote(a).issueDate = '2026-09-01'; // 一覧から外れて getDeal になる
+    fake.calls.length = 0;
+    const job = enqueue(db, 'reconcile_deals', null, { now: at(60) });
+    clock = at(60);
+    // 一覧は成功させ、getDeal（a）だけ 5xx にする
+    const origGet = fake.getDeal;
+    fake.getDeal = async () => {
+      throw new ProviderError('server', 'boom', { status: 503 });
+    };
+    await runUntilEmpty(db, handlers(), { now: () => clock });
+    fake.getDeal = origGet;
+    assert.equal(getJob(db, job)!.state, 'queued');
+    assert.equal(row(a).state, 'receipt_linked');
+    assert.equal(row(b).state, 'verified');
+    const audit = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'deals.reconciled'`).get() as { payload_json: string };
+    const p = JSON.parse(audit.payload_json);
+    assert.equal(p.verified, 1);
+    assert.equal(p.failed, 1);
+    assert.equal(p.errors[0].dealId, row(a).id);
+  });
+
+  test('取引ごとの 4xx（attachReceipts の 404）はその取引だけ needs_attention にして続ける', async () => {
+    const a = await sentDocument({ uploaded: false });
+    const b = await sentDocument();
+    const r = await fake.uploadReceipt({ bytes: Buffer.from('y'), fileName: 'a.jpg', mime: 'image/jpeg', key: `kh-${a}` });
+    markUploaded(db, a, r.id);
+    await fake.deleteDeal(Number(row(a).remote_deal_id));
+    fake.calls.length = 0;
+    const { job } = await reconcile();
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.equal(row(a).attention_reason, 'deal_missing');
+    assert.equal(row(b).state, 'verified');
+  });
+
+  test('verified は発生日が直近 35 日のものだけ見る', async () => {
+    const old = await sentDocument({ txnDate: '2026-09-10' }); // 今日（JST 2026-10-16）の 36 日前
+    const edge = await sentDocument({ txnDate: '2026-09-11' }); // 35 日前
+    await reconcile(60);
+    assert.equal(row(old).state, 'verified');
+    remote(old).receiptIds = [];
+    remote(edge).receiptIds = [];
+    fake.calls.length = 0;
+    await reconcile(120);
+    assert.equal(row(old).state, 'verified'); // 範囲外なので見ない
+    assert.equal(row(edge).attention_reason, 'receipt_detached');
+    assert.deepEqual(fake.calls[0].args, [{ startIssueDate: '2026-09-11', endIssueDate: '2026-09-11', limit: 100, offset: 0 }]);
+  });
+
+  test('一覧はページ上限まで。上限で打ち切ったら一覧に無いものは翌日に回す（getDeal しない）', async () => {
+    const docs: string[] = [];
+    for (let i = 0; i < 3; i++) docs.push(await sentDocument());
+    fake.calls.length = 0;
+    clock = at(60);
+    // 1 ページ 100 件を 2 ページ分に見せるため、他人の取引を 200 件足す
+    for (let i = 0; i < 200; i++) await fake.createExpenseDeal({ issueDate: '2026-10-15', refNumber: `other-${i}`, details: [{ accountItemId: 101, taxCode: 1, amount: 1 }] });
+    // 自分の取引（ID 1〜3）は 1 ページ目にあるので、上限 1 ページでも見つかる
+    let s = await reconcileDeals(db, fake, { providerName: 'freee', now: () => clock, maxPages: 1 });
+    assert.equal(s.checked, 3);
+    assert.equal(s.deferred, 0);
+    // 取引を消すと一覧に無い。上限で打ち切っているので getDeal せずに翌日へ
+    await fake.deleteDeal(Number(row(docs[0]).remote_deal_id));
+    fake.calls.length = 0;
+    s = await reconcileDeals(db, fake, { providerName: 'freee', now: () => clock, maxPages: 1 });
+    assert.equal(s.deferred, 1);
+    assert.deepEqual(fake.calls.map((c) => c.method), ['listDeals']);
+    assert.equal(row(docs[0]).state, 'verified');
+    // 上限を上げれば最後まで読み、getDeal で消えたことがわかる
+    fake.calls.length = 0;
+    s = await reconcileDeals(db, fake, { providerName: 'freee', now: () => clock, maxPages: 20 });
+    assert.deepEqual(fake.calls.map((c) => c.method), ['listDeals', 'listDeals', 'listDeals', 'getDeal']);
+    assert.equal(row(docs[0]).attention_reason, 'deal_missing');
   });
 });
 
