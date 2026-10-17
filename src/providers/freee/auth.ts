@@ -11,6 +11,9 @@ export const TOKEN_URL = 'https://accounts.secure.freee.co.jp/public_api/token';
 export const OOB_REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob';
 // 期限の 5 分前から更新する。
 export const REFRESH_MARGIN_SEC = 300;
+// トークンエンドポイントのタイムアウト。ロックの待ち時間はこれより長くする（更新中の他プロセスを待ち切れるように）。
+export const TOKEN_TIMEOUT_MS = 30_000;
+export const LOCK_WAIT_MS = 45_000;
 
 export type ClientCredentials = { clientId: string; clientSecret: string };
 
@@ -86,7 +89,7 @@ async function postToken(
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams(params),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? TOKEN_TIMEOUT_MS),
     });
   } catch (e) {
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -144,6 +147,16 @@ export function refreshWith(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// シグナル 0 で存在だけ確かめる。EPERM は他ユーザーのプロセスが居るということなので生きている扱い。
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export class TokenStore {
   readonly path: string;
   readonly lockPath: string;
@@ -175,9 +188,28 @@ export class TokenStore {
     await rename(tmp, this.path);
   }
 
-  // O_EXCL のロックファイルで排他にする。60 秒より古いロックは自動では消さない（手で確認して消す）。
+  // ロックファイルの保持者。読めない・中身が壊れていれば null。
+  private async readHolder(): Promise<{ raw: string; pid: number | null; at: string | null } | null> {
+    let raw: string;
+    try {
+      raw = await readFile(this.lockPath, 'utf8');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw e;
+    }
+    try {
+      const j = JSON.parse(raw) as { pid?: unknown; at?: unknown };
+      const pid = typeof j.pid === 'number' && Number.isInteger(j.pid) && j.pid > 0 ? j.pid : null;
+      return { raw, pid, at: typeof j.at === 'string' ? j.at : null };
+    } catch {
+      return { raw, pid: null, at: null };
+    }
+  }
+
+  // O_EXCL のロックファイルで排他にする。中身は保持者の pid と取得時刻。
+  // 保持者の pid が生きていなければ stale として消して取り直す。保持者が分からないロックは自動では消さない。
   async withLock<T>(fn: () => Promise<T>, opts: { waitMs?: number } = {}): Promise<T> {
-    const deadline = Date.now() + (opts.waitMs ?? 10_000);
+    const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
     let fh;
     for (;;) {
       try {
@@ -185,15 +217,29 @@ export class TokenStore {
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+        const holder = await this.readHolder();
+        if (holder === null) continue; // 読む間に消えた
+        if (holder.pid !== null && !isAlive(holder.pid)) {
+          // 読み直して同じ中身のときだけ消す（他のプロセスが先に回収して取り直したロックは消さない）。
+          const again = await this.readHolder();
+          if (again?.raw === holder.raw) await rm(this.lockPath, { force: true });
+          continue;
+        }
         if (Date.now() >= deadline) {
-          throw new Error(`${this.lockPath} が残っている。他の更新が動いていないことを確かめてから消す`);
+          if (holder.pid !== null) {
+            throw new Error(`${this.lockPath} を pid ${holder.pid}（${holder.at ?? '時刻不明'}）が持っている。終わってから実行し直す`);
+          }
+          throw new Error(`${this.lockPath} が残っている（保持者が分からない）。他の更新が動いていないことを確かめてから消す`);
         }
         await sleep(100);
       }
     }
     try {
-      await fh.writeFile(`${process.pid}\n`);
-      await fh.close();
+      try {
+        await fh.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + '\n');
+      } finally {
+        await fh.close();
+      }
       return await fn();
     } finally {
       await rm(this.lockPath, { force: true });
@@ -213,20 +259,29 @@ export function createTokenProvider(opts: {
   nowSec?: () => number;
 }): TokenProvider {
   const nowSec = opts.nowSec ?? (() => Math.floor(Date.now() / 1000));
+  // 読んだトークンを持っておき、期限が近いか強制更新のときだけファイルを読み直す。
+  let cache: StoredToken | null = null;
   return {
     async get({ force = false, rejected } = {}) {
+      if (!force && cache && !needsRefresh(cache, nowSec())) return cache.access_token;
+      const prev = cache;
       const cur = await opts.store.read();
       if (!cur) throw new Error(`${opts.store.path} が無い。tools/poc/freee-auth.ts で認可する`);
+      cache = cur;
       if (!force && !needsRefresh(cur, nowSec())) return cur.access_token;
       return opts.store.withLock(async () => {
         // ロックを取る間に他のプロセスが更新していれば、それを使う（リフレッシュトークンは 1 回限り）。
         const t = await opts.store.read();
         if (!t) throw new Error(`${opts.store.path} が無い`);
-        const stillBad = force ? t.access_token === (rejected ?? cur.access_token) : needsRefresh(t, nowSec());
-        if (!stillBad) return t.access_token;
+        const stillBad = force ? t.access_token === (rejected ?? prev?.access_token ?? cur.access_token) : needsRefresh(t, nowSec());
+        if (!stillBad) {
+          cache = t;
+          return t.access_token;
+        }
         const next = await refreshWith(opts.creds, t.refresh_token, { fetch: opts.fetch, nowSec });
         if (next.company_id === null) next.company_id = t.company_id;
         await opts.store.write(next);
+        cache = next;
         return next.access_token;
       });
     },
