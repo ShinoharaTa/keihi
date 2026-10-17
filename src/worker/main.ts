@@ -92,7 +92,19 @@ export const HANDLERS: Handlers = {
   reconcile_deals: createReconcileHandler(() => ({ provider: runtime().provider() })),
   daily: createDailyHandler(() => {
     const rt = runtime();
-    return { provider: rt.provider, refreshToken: buildTokenRefresher(rt.cfg, rt.db) };
+    return {
+      provider: rt.provider,
+      refreshToken: buildTokenRefresher(rt.cfg, rt.db),
+      // 月 1 回の証憑の照合は予算の用途 sync で数える（既定の user ではない）。
+      remoteVerify: {
+        provider: () => {
+          const p = rt.provider();
+          return { downloadReceipt: (id: number) => p.downloadReceipt(id, { purpose: 'sync' }) };
+        },
+        objectsDir: rt.cfg.objectsDir,
+        mode: rt.cfg.backup.remoteVerifyMode,
+      },
+    };
   }),
 };
 

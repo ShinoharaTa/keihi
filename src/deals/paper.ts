@@ -95,7 +95,7 @@ export function paperStatusOf(db: Db, documentId: string, now: Date = new Date()
 }
 
 // documents.paper_status を計算し直して保存する（変わったものだけ。監査ログに残す）。documentId を省けば全件。
-// 日次（keihi-daily）から呼ぶ想定（配線は未実装）。
+// 日次（worker/handlers/daily.ts）から呼ぶ。
 export function refreshPaperStatuses(db: Db, now: Date = new Date(), documentId?: string): number {
   return tx(db, () => {
     const allowed = discardAllowed(db);

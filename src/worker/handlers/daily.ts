@@ -4,11 +4,19 @@
 // 2. マスタ同期（src/masters/sync.ts）。
 // 3. 検索項目の期限チェック: アップロード済みで meta_state = none の証憑のうち、meta_deadline_on を過ぎたものは
 //    needs_attention: meta_deadline_passed、期限の 7 日前からのものは settings.meta_deadline_warnings に載せる（PWA の一覧の警告）。
-// 4. needs_attention の集計。結果は settings.daily_report と監査ログ（daily.completed）に残す。
+// 4. 日次照合: reconcile_deals ジョブを積む（未実行のものがあれば積み増さない）。
+// 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
+// 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
+//    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
+// 7. needs_attention の集計。結果は settings.daily_report と監査ログ（daily.completed）に残す。
 // - 各段は独立に動かし、どれかが失敗したら最後に例外を投げてジョブの再試行に回す（成功した段も再試行でもう一度動く）。
 import { appendAudit } from '../../audit.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
+import { verifyRemoteReceipts, type RemoteVerifyResult } from '../../backup/verifyRemote.ts';
+import type { RemoteVerifyMode } from '../../config.ts';
+import { refreshPaperStatuses } from '../../deals/paper.ts';
 import { tx, type Db } from '../../db/index.ts';
+import { enqueue } from '../../jobs/queue.ts';
 import type { Handler } from '../../jobs/worker.ts';
 import { syncMasters, type SyncResult } from '../../masters/sync.ts';
 import { FreeeAuthError, type RefreshCheck } from '../../providers/freee/auth.ts';
@@ -19,11 +27,15 @@ import { PROVIDER } from './uploadReceipt.ts';
 export const META_WARN_DAYS = 7;
 export const DAILY_REPORT_KEY = 'daily_report';
 export const META_WARNINGS_KEY = 'meta_deadline_warnings';
+export const REMOTE_VERIFY_LAST_KEY = 'remote_verify_last_at';
+export const REMOTE_VERIFY_INTERVAL_DAYS = 30;
 
 export type DailyDeps = {
   provider: () => Provider;
   // freee のトークンの更新。null なら飛ばす（fake）。
   refreshToken: (() => Promise<RefreshCheck>) | null;
+  // 証憑の照合。省略・null なら飛ばす。provider は downloadReceipt を用途 sync で予算に通したもの。
+  remoteVerify?: { provider: () => Pick<Provider, 'downloadReceipt'>; objectsDir: string; mode: RemoteVerifyMode } | null;
 };
 
 export type MetaDeadlineItem = { document_id: string; meta_deadline_on: string };
@@ -33,9 +45,17 @@ export type DailyReport = {
   token: { refreshed: boolean; refresh_token_expires_at: string } | 'skipped' | null;
   masters: SyncResult | null;
   meta_deadline: { warn: MetaDeadlineItem[]; passed: MetaDeadlineItem[] } | null;
+  reconcile: { job_id: number; created: boolean } | null;
+  paper_status_changed: number | null;
+  remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
   errors: { step: string; error: string }[];
 };
+
+function getSetting(db: Db, key: string): unknown {
+  const r = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(key) as { value_json: string } | undefined;
+  return r ? JSON.parse(r.value_json) : undefined;
+}
 
 function setSetting(db: Db, key: string, value: unknown, now: Date): void {
   db.prepare(
@@ -75,12 +95,36 @@ export function checkMetaDeadlines(db: Db, now: Date): { warn: MetaDeadlineItem[
   return { warn, passed };
 }
 
+// reconcile_deals を積む。未実行のもの（queued / running）があればその id を返す（積み増さない）。
+export function enqueueReconcile(db: Db, now: Date): { job_id: number; created: boolean } {
+  const cur = db.prepare(`SELECT id FROM jobs WHERE kind = 'reconcile_deals' AND state IN ('queued', 'running') ORDER BY id LIMIT 1`).get() as { id: number } | undefined;
+  if (cur) return { job_id: cur.id, created: false };
+  return { job_id: enqueue(db, 'reconcile_deals', null, { now }), created: true };
+}
+
+// 前回の証憑の照合から REMOTE_VERIFY_INTERVAL_DAYS 日以上空いたか（未実行なら true）。
+export function remoteVerifyDue(db: Db, now: Date): boolean {
+  const last = getSetting(db, REMOTE_VERIFY_LAST_KEY);
+  if (typeof last !== 'string') return true;
+  return now.getTime() - new Date(last).getTime() >= REMOTE_VERIFY_INTERVAL_DAYS * 86_400_000;
+}
+
 export function createDailyHandler(getDeps: () => DailyDeps): Handler {
   return async (_job, ctx) => {
     const { db } = ctx;
     const now = ctx.now();
     const deps = getDeps();
-    const report: DailyReport = { at: now.toISOString(), token: null, masters: null, meta_deadline: null, needs_attention: 0, errors: [] };
+    const report: DailyReport = {
+      at: now.toISOString(),
+      token: null,
+      masters: null,
+      meta_deadline: null,
+      reconcile: null,
+      paper_status_changed: null,
+      remote_verify: null,
+      needs_attention: 0,
+      errors: [],
+    };
     const fail = (step: string, e: unknown) => report.errors.push({ step, error: (e instanceof Error ? e.message : String(e)).slice(0, 500) });
 
     if (deps.refreshToken === null) report.token = 'skipped';
@@ -106,7 +150,30 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       fail('meta_deadline', e);
     }
 
-    // T4-4（日次照合）はここで reconcile ジョブを積む（別担当が足す）。
+    try {
+      report.reconcile = enqueueReconcile(db, now);
+    } catch (e) {
+      fail('reconcile', e);
+    }
+
+    try {
+      report.paper_status_changed = refreshPaperStatuses(db, now);
+    } catch (e) {
+      fail('paper_status', e);
+    }
+
+    const rv = deps.remoteVerify ?? null;
+    if (rv === null) report.remote_verify = 'skipped';
+    else if (!remoteVerifyDue(db, now)) report.remote_verify = 'not_due';
+    else {
+      try {
+        const { items: _items, ...r } = await verifyRemoteReceipts({ db, provider: rv.provider(), objectsDir: rv.objectsDir, mode: rv.mode, now: ctx.now });
+        report.remote_verify = r;
+        if (r.stopped === null) setSetting(db, REMOTE_VERIFY_LAST_KEY, now.toISOString(), now);
+      } catch (e) {
+        fail('remote_verify', e);
+      }
+    }
 
     report.needs_attention = (db.prepare(`SELECT COUNT(*) AS n FROM documents WHERE status = 'needs_attention'`).get() as { n: number }).n;
 
@@ -124,6 +191,9 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             masters: report.masters,
             meta_deadline_warn: report.meta_deadline?.warn.length ?? null,
             meta_deadline_passed: report.meta_deadline?.passed.length ?? null,
+            reconcile: report.reconcile,
+            paper_status_changed: report.paper_status_changed,
+            remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,
             errors: report.errors,
           },

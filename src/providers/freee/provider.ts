@@ -32,7 +32,7 @@ import {
   type WalletableType,
 } from '../types.ts';
 import { FreeeAuthError, TOKEN_URL, TokenStore, createTokenProvider, type ClientCredentials } from './auth.ts';
-import { BudgetExceededError, DEFAULT_PURPOSES, budgetedFetch, createBudget, type Budget, type ProviderMethod } from './budget.ts';
+import { BudgetExceededError, DEFAULT_PURPOSES, budgetedFetch, createBudget, type Budget, type ProviderMethod, type Purpose } from './budget.ts';
 import { DOWNLOAD_LIMIT, FreeeGuardError, FreeeNetworkError, createFreeeClient, type ApiResponse, type Method, type Query, type RequestOptions } from './client.ts';
 import { isReauthRequired, setReauthRequired } from './state.ts';
 
@@ -57,8 +57,10 @@ const ACTION_OF = new Map<number, RuleAction>(Object.entries(ACT).map(([k, v]) =
 export type DateRange = { startDate: string; endDate: string };
 
 // findReceiptsByKey はアップロード日の範囲を受け取れる（GET /receipts は start_date・end_date が必須）。
+// downloadReceipt は予算の用途を差し替えられる（既定は DEFAULT_PURPOSES の user。月 1 回の照合は sync）。
 export type FreeeProvider = Provider & {
   findReceiptsByKey(key: string, range?: DateRange): Promise<Receipt[]>;
+  downloadReceipt(id: number, o?: { purpose?: Purpose }): Promise<{ bytes: Buffer; mime: string }>;
 };
 
 export type FreeeProviderOptions = {
@@ -216,12 +218,12 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
     return e;
   }
 
-  async function call(method: ProviderMethod, httpMethod: Method, p: string, o: RequestOptions = {}): Promise<ApiResponse> {
+  async function call(method: ProviderMethod, httpMethod: Method, p: string, o: RequestOptions = {}, purpose: Purpose = DEFAULT_PURPOSES[method]): Promise<ApiResponse> {
     if (isReauthRequired(db)) throw new ProviderError('auth_invalid_grant', 'freee の再認可が要る（keihi freee auth）。呼び出さない');
     let res: ApiResponse;
     try {
       await ensureToken();
-      res = await client.request(httpMethod, p, { ...o, purpose: DEFAULT_PURPOSES[method] });
+      res = await client.request(httpMethod, p, { ...o, purpose });
     } catch (e) {
       throw toProviderError(e);
     }
@@ -300,8 +302,8 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
       return receiptFrom(obj(obj(res.json).receipt));
     },
 
-    async downloadReceipt(id: number) {
-      const res = await call('downloadReceipt', 'GET', `/api/1/receipts/${id}/download`, { query: cq(), binary: true });
+    async downloadReceipt(id: number, o: { purpose?: Purpose } = {}) {
+      const res = await call('downloadReceipt', 'GET', `/api/1/receipts/${id}/download`, { query: cq(), binary: true }, o.purpose);
       const mime = (res.headers.get('content-type') ?? 'application/octet-stream').split(';')[0].trim();
       return { bytes: res.bytes ?? Buffer.alloc(0), mime };
     },

@@ -178,6 +178,17 @@ describe('直列化と download の上限', () => {
   });
 });
 
+describe('予算の用途', () => {
+  test('downloadReceipt は既定で user、purpose を渡せば差し替える', async () => {
+    const env = await makeEnv(dir());
+    await env.provider.downloadReceipt(1);
+    await env.provider.downloadReceipt(2, { purpose: 'sync' });
+    const rows = env.db.prepare(`SELECT purpose FROM freee_calls WHERE endpoint LIKE '%/download' ORDER BY id`).all() as { purpose: string }[];
+    assert.deepEqual(rows.map((r) => r.purpose), ['user', 'sync']);
+    env.db.close();
+  });
+});
+
 describe('対応づけ', () => {
   test('findReceiptsByKey は description が一致し削除されていないものだけ。期間は既定で 30 日前〜明日', async () => {
     const env = await makeEnv(dir(), {

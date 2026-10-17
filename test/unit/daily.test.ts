@@ -8,14 +8,14 @@ import { verifyAudit } from '../../src/audit.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { ulid } from '../../src/db/ids.ts';
 import { migrate } from '../../src/db/migrate.ts';
-import { getJob } from '../../src/jobs/queue.ts';
+import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { enqueueDaily, main as triggerMain, type SpawnLike } from '../../src/jobs/trigger.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { currentMasters } from '../../src/masters/sync.ts';
 import { createFakeProvider } from '../../src/providers/fake/index.ts';
 import { FreeeAuthError } from '../../src/providers/freee/auth.ts';
 import { isReauthRequired } from '../../src/providers/freee/state.ts';
-import { createDailyHandler, DAILY_REPORT_KEY, META_WARNINGS_KEY, type DailyDeps } from '../../src/worker/handlers/daily.ts';
+import { createDailyHandler, DAILY_REPORT_KEY, META_WARNINGS_KEY, REMOTE_VERIFY_LAST_KEY, type DailyDeps } from '../../src/worker/handlers/daily.ts';
 
 const T0 = new Date('2026-10-16T18:30:00.000Z'); // JST 2026-10-17 03:30
 let root: string;
@@ -50,7 +50,10 @@ function addUpload(metaDeadlineOn: string, opts: { metaState?: 'none' | 'sent'; 
 
 const setting = (key: string) => JSON.parse((db.prepare('SELECT value_json FROM settings WHERE key = ?').get(key) as { value_json: string }).value_json);
 const status = (id: string) => (db.prepare('SELECT status FROM documents WHERE id = ?').get(id) as { status: string }).status;
-const run = (deps: DailyDeps) => runUntilEmpty(db, { daily: createDailyHandler(() => deps) }, { now: () => T0 });
+// daily が積む reconcile_deals は何もしないハンドラで流す（照合そのものは reconcile.test.ts）。
+const run = (deps: DailyDeps, now: Date = T0) =>
+  runUntilEmpty(db, { daily: createDailyHandler(() => deps), reconcile_deals: async () => {} }, { now: () => now });
+const jobsOf = (kind: string) => db.prepare('SELECT id, state FROM jobs WHERE kind = ? ORDER BY id').all(kind) as { id: number; state: string }[];
 
 describe('daily', () => {
   test('トークンの更新・マスタ同期・検索項目の期限チェック・needs_attention の集計', async () => {
@@ -69,7 +72,7 @@ describe('daily', () => {
         return { refreshed: true, refreshTokenExpiresAt: T0.getTime() / 1000 + 90 * 86400 };
       },
     };
-    assert.deepEqual(await run(deps), { done: 1, failed: 0 });
+    assert.deepEqual(await run(deps), { done: 2, failed: 0 }); // daily + reconcile_deals
     assert.equal(getJob(db, job)!.state, 'done');
     assert.equal(refreshed, 1);
     assert.equal(fake.calls.filter((c) => c.method === 'syncMasters').length, 1);
@@ -94,7 +97,7 @@ describe('daily', () => {
 
   test('fake ではトークンの更新を飛ばす', async () => {
     enqueueDaily(db, T0);
-    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null }), { done: 1, failed: 0 });
+    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null }), { done: 2, failed: 0 });
     assert.equal(setting(DAILY_REPORT_KEY).token, 'skipped');
   });
 
@@ -108,12 +111,72 @@ describe('daily', () => {
         throw new FreeeAuthError('freee token HTTP 401', { status: 401, error: 'invalid_grant' });
       },
     });
-    assert.deepEqual(s, { done: 0, failed: 1 });
+    assert.deepEqual(s, { done: 1, failed: 1 }); // reconcile_deals は完了、daily は再試行
     assert.equal(getJob(db, job)!.state, 'queued');
     assert.equal(isReauthRequired(db), true);
     assert.equal(fake.calls.filter((c) => c.method === 'syncMasters').length, 1);
     assert.equal(status(passed), 'needs_attention');
     assert.equal(setting(DAILY_REPORT_KEY).errors[0].step, 'token');
+  });
+});
+
+describe('daily: 照合・紙原本・証憑の照合', () => {
+  test('reconcile_deals を積む（未実行のものがあれば積み増さない）', async () => {
+    enqueueDaily(db, T0);
+    await run({ provider: () => createFakeProvider(), refreshToken: null });
+    assert.equal(jobsOf('reconcile_deals').length, 1);
+    assert.equal(setting(DAILY_REPORT_KEY).reconcile.created, true);
+    const queued = enqueue(db, 'reconcile_deals', null, { now: T0, runAfter: new Date(T0.getTime() + 86_400_000) });
+    enqueueDaily(db, T0);
+    await run({ provider: () => createFakeProvider(), refreshToken: null });
+    assert.equal(jobsOf('reconcile_deals').length, 2);
+    assert.deepEqual(setting(DAILY_REPORT_KEY).reconcile, { job_id: queued, created: false });
+  });
+
+  test('紙原本のステータスを更新する', async () => {
+    const doc = addUpload('2026-10-30'); // 期限 2026-08-12 は過ぎ、同等確認なし → keep_required
+    enqueueDaily(db, T0);
+    await run({ provider: () => createFakeProvider(), refreshToken: null });
+    assert.equal((db.prepare('SELECT paper_status FROM documents WHERE id = ?').get(doc) as { paper_status: string }).paper_status, 'keep_required');
+    assert.equal(setting(DAILY_REPORT_KEY).paper_status_changed, 1);
+  });
+
+  test('証憑の照合は 30 日以上空いたときだけ。remoteVerify が無ければ飛ばす', async () => {
+    const fake = createFakeProvider();
+    let downloads = 0;
+    const deps: DailyDeps = {
+      provider: () => fake,
+      refreshToken: null,
+      remoteVerify: {
+        provider: () => ({
+          downloadReceipt: async () => {
+            downloads++;
+            return { bytes: Buffer.from('x'), mime: 'image/jpeg' };
+          },
+        }),
+        objectsDir: path.join(root, 'objects'),
+        mode: 'download_only',
+      },
+    };
+    addUpload('2026-10-30');
+    enqueueDaily(db, T0);
+    await run(deps);
+    assert.equal(downloads, 1);
+    assert.equal(setting(DAILY_REPORT_KEY).remote_verify.checked, 1);
+    assert.equal(setting(REMOTE_VERIFY_LAST_KEY), T0.toISOString());
+
+    const day = (d: number) => new Date(T0.getTime() + d * 86_400_000);
+    for (const [d, expect] of [[29, 1], [30, 2]] as const) {
+      db.prepare(`UPDATE jobs SET state = 'done' WHERE kind = 'daily'`).run();
+      enqueueDaily(db, day(d));
+      await run(deps, day(d));
+      assert.equal(downloads, expect, `day ${d}`);
+    }
+
+    db.prepare(`UPDATE jobs SET state = 'done' WHERE kind = 'daily'`).run();
+    enqueueDaily(db, day(90));
+    await run({ provider: () => fake, refreshToken: null }, day(90));
+    assert.equal(setting(DAILY_REPORT_KEY).remote_verify, 'skipped');
   });
 });
 

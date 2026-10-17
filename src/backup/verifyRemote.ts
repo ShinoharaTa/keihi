@@ -9,7 +9,7 @@
 //   download_only ダウンロードできて空でないことだけを確かめる。sha256 が一致したかは audit に記録するだけ（F6 の材料）。
 // - 自動では直らない取得の失敗（4xx。消された・見つからない等）は needs_attention（remote_download_failed）。
 //   再認可が要る・再試行で直る失敗（429・403 の使用制限・5xx・タイムアウト）は、そこで止めて次回に回す。
-// - worker のハンドラへの登録は呼び出し側（関数として export するだけ）。
+// - 月 1 回の実行は daily（worker/handlers/daily.ts）から呼ぶ。
 import { appendAudit } from '../audit.ts';
 import { tx, type Db } from '../db/index.ts';
 import { BudgetExceededError } from '../providers/freee/budget.ts';
