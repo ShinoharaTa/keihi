@@ -14,7 +14,7 @@ import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { currentMasters } from '../../src/masters/sync.ts';
 import { createFakeProvider } from '../../src/providers/fake/index.ts';
 import { FreeeAuthError } from '../../src/providers/freee/auth.ts';
-import { isReauthRequired } from '../../src/providers/freee/state.ts';
+import { isReauthRequired, setReauthRequired } from '../../src/providers/freee/state.ts';
 import { createDailyHandler, DAILY_REPORT_KEY, META_WARNINGS_KEY, REMOTE_VERIFY_LAST_KEY, type DailyDeps } from '../../src/worker/handlers/daily.ts';
 
 const T0 = new Date('2026-10-16T18:30:00.000Z'); // JST 2026-10-17 03:30
@@ -35,7 +35,8 @@ beforeEach(() => {
   migrate(db);
 });
 
-function addUpload(metaDeadlineOn: string, opts: { metaState?: 'none' | 'sent'; status?: string } = {}): string {
+// 最新の確定（reviews）は既定で approve。decision: null なら確定なし。
+function addUpload(metaDeadlineOn: string, opts: { metaState?: 'none' | 'sent'; status?: string; decision?: string | null } = {}): string {
   const id = ulid();
   const iso = T0.toISOString();
   db.prepare(
@@ -45,6 +46,10 @@ function addUpload(metaDeadlineOn: string, opts: { metaState?: 'none' | 'sent'; 
   db.prepare(
     `INSERT INTO provider_uploads (id, document_id, provider, state, remote_receipt_id, meta_state, meta_deadline_on, uploaded_at, created_at) VALUES (?, ?, 'freee', 'uploaded', '1', ?, ?, ?, ?)`,
   ).run(ulid(), id, opts.metaState ?? 'none', metaDeadlineOn, iso, iso);
+  const decision = opts.decision === undefined ? 'approve' : opts.decision;
+  if (decision !== null) {
+    db.prepare(`INSERT INTO reviews (id, document_id, version, txn_date, amount, vendor, decision, decided_at) VALUES (?, ?, 1, '2026-08-01', 1100, 'x', ?, ?)`).run(ulid(), id, decision, iso);
+  }
   return id;
 }
 
@@ -120,15 +125,102 @@ describe('daily', () => {
   });
 });
 
+describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
+  test('検索項目の期限チェックは最新の確定が approve のものだけ（reject / duplicate / personal・未確定・approve の後の reject は対象外）', async () => {
+    const ok = addUpload('2026-10-01');
+    const others = ['reject', 'duplicate', 'personal', null].map((d) => addUpload('2026-10-01', { decision: d }));
+    const later = addUpload('2026-10-01');
+    db.prepare(`INSERT INTO reviews (id, document_id, version, txn_date, amount, vendor, decision, decided_at) VALUES (?, ?, 2, NULL, NULL, NULL, 'reject', ?)`).run(ulid(), later, T0.toISOString());
+    enqueueDaily(db, T0);
+    await run({ provider: () => createFakeProvider(), refreshToken: null });
+    assert.equal(status(ok), 'needs_attention');
+    for (const id of [...others, later]) assert.equal(status(id), 'needs_review', id);
+    assert.deepEqual(setting(DAILY_REPORT_KEY).meta_deadline.passed, [{ document_id: ok, meta_deadline_on: '2026-10-01' }]);
+  });
+
+  test('部分失敗: 失敗した段だけを再試行し、同じ日に成功済みの段は飛ばす。reconcile_deals も積み増さない', async () => {
+    const fake = createFakeProvider();
+    let refreshed = 0;
+    let mastersFail = true;
+    const provider = () => {
+      if (mastersFail) throw new Error('masters down');
+      return fake;
+    };
+    const deps: DailyDeps = {
+      provider,
+      refreshToken: async () => {
+        refreshed++;
+        return { refreshed: false, refreshTokenExpiresAt: T0.getTime() / 1000 + 90 * 86400 };
+      },
+    };
+    const job = enqueueDaily(db, T0).id;
+    assert.deepEqual(await run(deps), { done: 1, failed: 1 });
+    let r = setting(DAILY_REPORT_KEY);
+    assert.deepEqual(r.errors.map((e: { step: string }) => e.step), ['masters']);
+    assert.deepEqual(r.skipped_steps, []);
+    assert.equal(getJob(db, job)!.state, 'queued');
+    assert.equal(setting('daily_last_step_token'), '2026-10-17');
+    assert.equal(jobsOf('reconcile_deals').length, 1);
+
+    // 再試行（1 分後）: masters だけ動き、他は飛ばす。
+    mastersFail = false;
+    const t1 = new Date(T0.getTime() + 60_000);
+    assert.deepEqual(await run(deps, t1), { done: 1, failed: 0 });
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.equal(refreshed, 1);
+    assert.equal(fake.calls.filter((c) => c.method === 'syncMasters').length, 1);
+    assert.equal(jobsOf('reconcile_deals').length, 1);
+    r = setting(DAILY_REPORT_KEY);
+    assert.deepEqual(r.errors, []);
+    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'paper_status', 'remote_verify']);
+
+    // 翌日は全部動く。
+    const t2 = new Date(T0.getTime() + 86_400_000);
+    enqueueDaily(db, t2);
+    await run(deps, t2);
+    assert.equal(refreshed, 2);
+    assert.deepEqual(setting(DAILY_REPORT_KEY).skipped_steps, []);
+  });
+
+  test('再認可の後は再認可待ちの upload_receipt を即時に起こす（再認可前は起こさない）', async () => {
+    const later = new Date(T0.getTime() + 30 * 3_600_000).toISOString();
+    db.prepare(`INSERT INTO jobs (kind, ref_id, state, attempts, max_attempts, run_after, last_error, created_at, updated_at) VALUES ('upload_receipt', 'D1', 'queued', 0, 6, ?, ?, ?, ?)`).run(
+      later,
+      `reauth_pending since=${T0.toISOString()}: auth_invalid_grant: x`,
+      T0.toISOString(),
+      T0.toISOString(),
+    );
+    const up = () => (db.prepare(`SELECT run_after FROM jobs WHERE kind = 'upload_receipt'`).get() as { run_after: string }).run_after;
+    setReauthRequired(db, true, T0);
+    enqueueDaily(db, T0);
+    await runUntilEmpty(db, { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {} }, { now: () => T0 });
+    assert.equal(up(), later);
+    assert.equal(setting(DAILY_REPORT_KEY).reauth_woken, 0);
+
+    setReauthRequired(db, false, T0);
+    const t2 = new Date(T0.getTime() + 86_400_000);
+    enqueueDaily(db, t2);
+    let woken = false;
+    await runUntilEmpty(
+      db,
+      { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {}, upload_receipt: async () => void (woken = true) },
+      { now: () => t2 },
+    );
+    assert.equal(setting(DAILY_REPORT_KEY).reauth_woken, 1);
+    assert.equal(woken, true);
+  });
+});
+
 describe('daily: 照合・紙原本・証憑の照合', () => {
   test('reconcile_deals を積む（未実行のものがあれば積み増さない）', async () => {
     enqueueDaily(db, T0);
     await run({ provider: () => createFakeProvider(), refreshToken: null });
     assert.equal(jobsOf('reconcile_deals').length, 1);
     assert.equal(setting(DAILY_REPORT_KEY).reconcile.created, true);
-    const queued = enqueue(db, 'reconcile_deals', null, { now: T0, runAfter: new Date(T0.getTime() + 86_400_000) });
-    enqueueDaily(db, T0);
-    await run({ provider: () => createFakeProvider(), refreshToken: null });
+    const next = new Date(T0.getTime() + 86_400_000);
+    const queued = enqueue(db, 'reconcile_deals', null, { now: T0, runAfter: new Date(T0.getTime() + 2 * 86_400_000) });
+    enqueueDaily(db, next);
+    await run({ provider: () => createFakeProvider(), refreshToken: null }, next);
     assert.equal(jobsOf('reconcile_deals').length, 2);
     assert.deepEqual(setting(DAILY_REPORT_KEY).reconcile, { job_id: queued, created: false });
   });
@@ -210,7 +302,7 @@ describe('keihi-daily の enqueue（src/jobs/trigger.ts）', () => {
     const timer = await readFile(path.join(dir, 'keihi-daily.timer'), 'utf8');
     assert.match(svc, /^Type=oneshot$/m);
     assert.match(svc, /^ExecStart=.*src\/jobs\/trigger\.ts daily$/m);
-    assert.match(timer, /^OnCalendar=\*-\*-\* 03:30:00$/m);
+    assert.match(timer, /^OnCalendar=\*-\*-\* 03:30:00 Asia\/Tokyo$/m);
     assert.match(timer, /^Persistent=true$/m);
   });
 });
