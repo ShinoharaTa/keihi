@@ -19,7 +19,7 @@ import { FreeeGuardError, createFreeeClient } from '../../src/providers/freee/cl
 import {
   CreatedLog,
   createDryRunFetch,
-  main,
+  main as pocMain,
   padJpegTo,
   resultsTemplate,
   shapeOf,
@@ -34,7 +34,62 @@ const PROD = 222;
 const CLIENT_SECRET = 'cs-TEST-not-a-real-secret-0123456789';
 const ACCESS = 'at-TEST-old-access-0123456789';
 const REFRESH = 'rt-TEST-old-refresh-0123456789';
-const FIXTURES = 'test/fixtures/receipts';
+// PoC が読むダミーの領収書。生成済みの test/fixtures/receipts（gitignore）に頼らず、before で一時ディレクトリに最小のものを作る。
+const FIXTURE_FILES = [
+  'r01_receipt58.jpg',
+  'r02_receipt58.png',
+  'r03_receipt58_reduced-rate-mix.jpg',
+  'r04_receipt58_wareki.jpg',
+  'r05_receipt58_no-registration-number.jpg',
+  'r07_receipt58_grayscale.jpg',
+  'r08_receipt58_injected-instruction.png',
+  'r11_receipt80.jpg',
+  'r15_receipt80_no-registration-number.jpg',
+  'r16_receipt80_under-200dpi.jpg',
+  'r17_receipt80_grayscale.jpg',
+  'r20_receipt80_reduced-rate-mix_no-registration-number.png',
+  'r23_invoice-a4.pdf',
+];
+// テストが本文を確かめる r02（F4b のメタデータ）と r05（F8 の金額）だけ値を合わせる。
+const TRUTH_OVERRIDES: Record<string, Record<string, unknown>> = {
+  r02_receipt58: { vendor: 'ダミー酒場', date: '2026-09-10', total: 19010, registration_number: 'T9990600670836' },
+  'r05_receipt58_no-registration-number': { vendor: 'テスト電器', date: '2026-01-04', total: 4750, registration_number: null },
+};
+let FIXTURES: string;
+
+async function makeFixtures(dir: string): Promise<void> {
+  await mkdir(dir);
+  const img = () => sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 255, g: 255, b: 255 } } });
+  for (const file of FIXTURE_FILES) {
+    const ext = path.extname(file);
+    const base = file.slice(0, -ext.length);
+    const bytes =
+      ext === '.jpg' ? await img().jpeg().toBuffer() : ext === '.png' ? await img().png().toBuffer() : Buffer.from('%PDF-1.4\n%%EOF\n');
+    await writeFile(path.join(dir, file), bytes);
+    const truth = {
+      schema: 'keihi.fixture.receipt.v1',
+      file,
+      seed: 0,
+      kind: ext === '.pdf' ? 'invoice_a4' : 'receipt58',
+      variations: [],
+      date: '2026-09-01',
+      date_printed: '2026年09月01日',
+      total: 1000,
+      tax_breakdown: [{ rate: 10, amount_incl_tax: 1000, tax: 90 }],
+      vendor: 'ダミー商店',
+      registration_number: null,
+      expected_account: '消耗品費',
+      items: [],
+      watermark: 'DUMMY',
+      injected_instruction: null,
+      image: { format: ext.slice(1), width_px: 8, height_px: 8, dpi: 200, paper_width_mm: 58, grayscale: false },
+      ...TRUTH_OVERRIDES[base],
+    };
+    await writeFile(path.join(dir, `${base}.truth.json`), JSON.stringify(truth));
+  }
+}
+
+const main = (argv: string[], deps?: Parameters<typeof pocMain>[1]) => pocMain([...argv, '--fixtures', FIXTURES], deps);
 const NOW = () => Math.floor(Date.now() / 1000);
 
 let work: string;
@@ -102,6 +157,8 @@ function sink() {
 
 before(async () => {
   work = await mkdtemp(path.join(tmpdir(), 'keihi-freee-poc-'));
+  FIXTURES = path.join(work, 'fixtures');
+  await makeFixtures(FIXTURES);
 });
 
 after(async () => {
