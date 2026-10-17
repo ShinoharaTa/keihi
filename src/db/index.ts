@@ -28,7 +28,9 @@ export function integrityCheck(db: Db): string[] {
 }
 
 // fn を 1 つのトランザクションで実行する（BEGIN IMMEDIATE で書き込みロックを先に取る）。
+// 既にトランザクションの中なら、その中でそのまま実行する（外側がまとめて COMMIT / ROLLBACK する）。
 export function tx<T>(db: Db, fn: () => T): T {
+  if (db.isTransaction) return fn();
   db.exec('BEGIN IMMEDIATE');
   try {
     const r = fn();
