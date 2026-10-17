@@ -1,0 +1,21 @@
+# ~/.config/keihi/config.toml の例（docs/mvp-plan.md T1-2）。シークレットはここに書かない（secrets.env へ）。
+
+[paths]
+# data_dir = "/home/<user>/.local/share/keihi"   # 既定。keihi.db・objects/・freee-token.json を置く
+
+[gemini]
+# model = "gemini-3.8-flash"
+# Cloud Billing を有効にした keihi 専用プロジェクトのキーであることを確かめてから true にする。
+paid_tier_confirmed = false
+
+[freee]
+# テスト事業所と本番事業所は別の名前で持つ。
+# poc_company_id = 1234567
+# prod_company_id = 7654321
+
+[ingest]
+# max_upload_bytes = 20971520   # 20MB
+
+[calendar]
+# deadline_mode = "early"       # "early"（受領から 7 営業日）/ "cycle"（2 か月 + 7 営業日。規程がある場合だけ）
+# year_end_holidays = false     # true で 12/29〜1/3 を休業日に含める
