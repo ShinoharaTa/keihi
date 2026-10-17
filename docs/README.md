@@ -7,6 +7,7 @@
 |---|---|
 | [legal.md](legal.md) | 電帳法・青色申告・申告経路・インボイス（出典 URL、税理士確認事項、実装要件 R1〜R22） |
 | [architecture.md](architecture.md) | MF/freee API 比較、スコープ案、パイプライン、保存・バックアップ、未決 Q1〜Q9 |
+| [transactions.md](transactions.md) | MF に自動取得した入出金明細の API/MCP 対応、自然言語での振り分け（U10）、明細と領収書の照合、M6/M7 案、未決 P1〜P10 |
 | [plans-comparison.md](plans-comparison.md) | MF / freee 個人プラン別の API・証憑上限・電帳法対応・料金改定・解約後の保持、移行比較（推薦: MF 継続） |
 | [mvp-plan.md](mvp-plan.md) | MVP のマイルストーン M0〜M5・タスク T0-1〜T5-5、未決と決める時期の対応表、置いた判断 D1〜D13、PoC 結果による分岐 |
 | [a2ui-review-ui.md](a2ui-review-ui.md) | A2UI の現状、確認カード + Gemini 質問カードの設計、対話の状態管理・費用・監査ログ・プライバシー、未決 U1〜U9 |
@@ -40,6 +41,7 @@ architecture.md は法令調査より前に書いたため、以下は本節を�
 - 会計サービス: **現在は MF を使用中、freee への移行も検討**。→ 送信先は Provider で抽象化する（architecture.md Q9 は「抽象化を残す」で決定）。移行する場合も、MF 側に保存した過去分の証憑は保存期間中アカウントを残して保持する（legal.md §0-6）。移行するなら年の区切りで行う想定
 - OCR: **Gemini 3.8 Flash（有料 tier）**。料金は 2026-12-31 まで入力 $0.75 / 出力 $3.75 per 1M、2027-01-01 から倍（classification-ocr.md §B-1）。月 100 枚なら数十〜百円程度の見込み（推定）
 - MF の契約: **Web 版パーソナルミニ**（2026-10-17 回答）。当面 MF を継続し、PoC で API の可否を確認（plans-comparison.md の推薦どおり）。Box の累計 1,000 件上限に近づいたらパーソナルへ
+- PoC は本人の本番アカウントで行ってよい（別事業者なし）。目的は「MF/freee を帳票の保存先にしつつ、経費精算・確定申告を自動化」。入出金明細を自然言語で振り分けたい（2026-10-17）→ transactions.md
 - 実行形態: **サーバー（Tailscale 内のみ）+ PWA**。ネイティブアプリは作らない
 - 確認 UI: **Gemini と必要に応じて対話でき、科目などは画面上で選べる。A2UI の概念を取り込む** → 設計は a2ui-review-ui.md（**B 案で決定**。U2 自由文での AI 相談は MVP に入れない。U6 AI ログ・応答原文の保存は 7 年）
 - スマホ: **iOS / Android の両方に対応**。PWA のカメラ撮影は両 OS で動く。共有シートは Android が Web Share Target、iOS がショートカットで POST（architecture.md §3.1）
