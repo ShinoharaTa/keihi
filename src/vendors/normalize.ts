@@ -14,7 +14,7 @@ const CORP_JA = [
 // NFKC 後の括弧付きの略記（㈱ → (株) など）。
 const CORP_ABBR = ['株', '有', '合', '同', '名', '資', '社', '財', '医', '学', '特非'];
 
-const HYPHENS = /[‐-―−]/g; // ‐‑‒–—―−（長音「ー」は含めない）
+const HYPHENS = /[\u2010-\u2015\u2212]/g; // ‐‑‒–—―−（長音「ー」は含めない）
 const CORP_JA_RE = new RegExp(CORP_JA.join('|'), 'g');
 const CORP_ABBR_RE = new RegExp(`\\((?:${CORP_ABBR.join('|')})\\)`, 'g');
 // 英語の法人格。語の区切り（空白・カンマ・ピリオド・端）に挟まれたものだけ。
