@@ -334,6 +334,9 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
         details: input.details.map(detailBody),
       };
       if (input.receiptIds?.length) body.receipt_ids = [...new Set(input.receiptIds)];
+      if (input.payments?.length) {
+        body.payments = input.payments.map((x) => ({ date: x.date, amount: x.amount, from_walletable_type: x.fromWalletableType, from_walletable_id: x.fromWalletableId }));
+      }
       if (input.partnerName !== undefined) body.partner_id = await findPartnerId(input.partnerName);
       const res = await call('createExpenseDeal', 'POST', '/api/1/deals', { json: body });
       return dealFrom(obj(obj(res.json).deal));

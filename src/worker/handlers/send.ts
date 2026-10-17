@@ -85,7 +85,7 @@ export function createSendDealHandler(getDeps: () => SendDealDeps): Handler {
     try {
       const resolveTax = deps.resolveTax ?? taxResolver(db, PROVIDER);
       const input = reviewForDeal(review, receiptIds, resolveTax);
-      draft = buildDeal(input, resolveBuildOptions(db, PROVIDER, resolveTax, input.txnDate));
+      draft = buildDeal(input, resolveBuildOptions(db, PROVIDER, resolveTax, input.txnDate, input.payment));
     } catch (e) {
       if (!(e instanceof DealBuildError)) throw e;
       // 行が無いと要対応に出せないので、内容の無い下書きで行を作ってから needs_attention にする。
@@ -124,6 +124,7 @@ export function createSendDealHandler(getDeps: () => SendDealDeps): Handler {
             details: sendDraft.details,
             partnerName: sendDraft.partnerName,
             receiptIds: nowReceipts.length ? nowReceipts : undefined,
+            payments: sendDraft.payments,
           });
         }
         row = afterCreate(db, getDealRow(db, row.id)!, deal, nowReceipts, now, adopted);

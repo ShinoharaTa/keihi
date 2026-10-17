@@ -94,7 +94,15 @@ export type DealDetail = {
   description?: string;
 };
 
-// 支出・未決済（payments なし）の取引。
+// 決済（freee の deals.payments）。現金は wallet、事業主借は private_account_item（id は勘定科目の ID）。
+export type DealPayment = {
+  date: string; // YYYY-MM-DD
+  amount: number;
+  fromWalletableType: 'wallet' | 'private_account_item';
+  fromWalletableId: number;
+};
+
+// 支出の取引。payments が無ければ未決済（連携カード。Y5）、あれば決済済み（現金・事業主借）。
 export type CreateExpenseDealInput = {
   issueDate: string; // YYYY-MM-DD
   // 照合キー（freee の ref_number）。
@@ -102,6 +110,7 @@ export type CreateExpenseDealInput = {
   details: DealDetail[];
   partnerName?: string;
   receiptIds?: number[];
+  payments?: DealPayment[];
 };
 
 export type Deal = {

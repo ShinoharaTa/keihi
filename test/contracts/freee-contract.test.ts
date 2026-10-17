@@ -53,6 +53,18 @@ describe('Provider の送るリクエスト', () => {
     await p.findReceiptsByKey('kh-01TEST', { startDate: '2026-10-01', endDate: '2026-10-18' });
     await p.createExpenseDeal({ issueDate: '2026-10-01', refNumber: 'kh-REF', details: [{ accountItemId: 101, taxCode: 136, amount: 1100, description: 'x' }], receiptIds: [1] });
     await p.createExpenseDeal({ issueDate: '2026-10-01', refNumber: 'kh-REF2', details: [{ accountItemId: 101, taxCode: 136, amount: 1100 }], partnerName: 'ダミー商店' });
+    await p.createExpenseDeal({
+      issueDate: '2026-10-01',
+      refNumber: 'kh-REF3',
+      details: [{ accountItemId: 101, taxCode: 136, amount: 1100 }],
+      payments: [{ date: '2026-10-01', amount: 1100, fromWalletableType: 'wallet', fromWalletableId: 9 }],
+    });
+    await p.createExpenseDeal({
+      issueDate: '2026-10-01',
+      refNumber: 'kh-REF4',
+      details: [{ accountItemId: 101, taxCode: 136, amount: 1100 }],
+      payments: [{ date: '2026-10-01', amount: 1100, fromWalletableType: 'private_account_item', fromWalletableId: 105 }],
+    });
     await p.attachReceipts(501, [2]);
     await p.getDeal(501);
     await p.listDeals({ startIssueDate: '2026-10-01', endIssueDate: '2026-10-31', limit: 10, offset: 0 });
@@ -75,6 +87,12 @@ describe('Provider の送るリクエスト', () => {
     assert.deepEqual(new Uint8Array(await (up.get('receipt') as Blob).arrayBuffer()), new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
     assert.equal(up.get('description'), 'kh-01TEST');
     assert.equal(up.has('receipt_metadatum_partner_name'), false);
+    // 現金・事業主借は payments 付き（決済済み）、連携カード（payments なし）は未決済で送る。
+    const posts = env.mock.reqs.filter((r) => r.method === 'POST' && r.url.pathname === '/api/1/deals').map((r) => JSON.parse(String(r.body)));
+    assert.deepEqual(
+      posts.map((b) => b.payments),
+      [undefined, undefined, [{ date: '2026-10-01', amount: 1100, from_walletable_type: 'wallet', from_walletable_id: 9 }], [{ date: '2026-10-01', amount: 1100, from_walletable_type: 'private_account_item', from_walletable_id: 105 }]],
+    );
     // attachReceipts は details を全部送り直し、既存の証憑を残す。
     const put = JSON.parse(String(env.mock.reqs.find((r) => r.method === 'PUT' && r.url.pathname === '/api/1/deals/501')!.body));
     assert.deepEqual(put.receipt_ids, [7, 2]);

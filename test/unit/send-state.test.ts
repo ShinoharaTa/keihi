@@ -34,6 +34,7 @@ after(async () => {
 beforeEach(() => {
   db = openTestDb(path.join(root, `${n++}.db`));
   applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }], T0.toISOString());
+  applyMasterItems(db, 'freee', 'walletable', [{ remoteId: 'wallet:9', name: '現金', data: { id: 9, type: 'wallet', name: '現金' } }], T0.toISOString());
   fake = createFakeProvider();
   clock = T0;
 });
@@ -86,7 +87,7 @@ describe('状態機械', () => {
 });
 
 describe('send_deal', () => {
-  test('成功: 証憑付きで 1 回作り receipt_linked。未決済・ref_number・監査ログ', async () => {
+  test('成功: 証憑付きで 1 回作り receipt_linked。現金は決済済み・ref_number・監査ログ', async () => {
     const { doc, upload } = setup();
     const rid = await upload;
     enqueue(db, SEND, doc, { now: T0 });
@@ -94,7 +95,9 @@ describe('send_deal', () => {
     assert.deepEqual(methods(), ['createExpenseDeal:ok']);
     const d = fake.state.deals.get(1)!;
     assert.equal(d.refNumber, `kh-${doc}`);
-    assert.equal(d.settled, false);
+    assert.equal(d.settled, true);
+    const sent = fake.calls.find((c) => c.method === 'createExpenseDeal')!.args[0] as { payments?: unknown };
+    assert.deepEqual(sent.payments, [{ date: '2026-10-15', amount: 1100, fromWalletableType: 'wallet', fromWalletableId: 9 }]);
     assert.deepEqual(d.receiptIds, [rid]);
     assert.deepEqual(d.details, [{ accountItemId: 101, taxCode: 1, amount: 1100 }]);
     const row = deal(doc);
@@ -262,6 +265,20 @@ describe('send_deal', () => {
     await runAt(0);
     assert.deepEqual(methods(), []);
     assert.equal(deal(doc).attention_reason, 'build_failed');
+  });
+
+  test('連携カードは未決済（payments を送らない）。事業主借が無いのに owner は build_failed', async () => {
+    const card = addDocument(db);
+    addReview(db, card, { amount: 1100, taxId: '1', creditAccount: 'card:credit_card:1' });
+    enqueue(db, SEND, card, { now: T0 });
+    await runAt(0);
+    assert.equal(fake.state.deals.get(1)!.settled, false);
+    assert.equal((fake.calls[0].args[0] as { payments?: unknown }).payments, undefined);
+    const owner = addDocument(db);
+    addReview(db, owner, { amount: 1100, taxId: '1', creditAccount: 'owner' });
+    enqueue(db, SEND, owner, { now: T0 });
+    await runAt(0);
+    assert.equal(deal(owner).attention_reason, 'build_failed');
   });
 
   test('同じ文書のジョブを 2 回積んでも取引は 1 件', async () => {

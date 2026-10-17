@@ -1,13 +1,16 @@
 // 取引ビルダ（docs/mvp-plan.md T4-1、§3.2 Y5・U4'）。確定版の review → freee に送る取引の下書き（DealDraft）。
-// - 支出・未決済（payments を持たない）。連携カードの支払いも未決済で作り、消込は freee の画面で行う（Y5 の既定）。
-//   支払手段は取引の内容を変えない。記録として DealDraft.payment に残すだけ。
+// - 支払手段（reviews.credit_account）で決済を分ける。
+//   連携カード（card:<walletable_remote_id>）: 未決済（payments を持たない）。消込は freee の画面で行う（Y5 の既定）。
+//   現金（cash）: 決済済み。payments に取引日・合計で、口座は名前が「現金」の wallet（同期済みのマスタ）。
+//   事業主借（owner）: 決済済み。payments の from_walletable_type は private_account_item、id は勘定科目「事業主借」。
+//   マスタに見つからなければ DealBuildError（send_deal は build_failed にする）。
 // - 按分は 1 枚ごとに分ける（U4' の既定）。按分率（事業分の %）は review の値。事業分 = 行の金額 × 率 / 100 の切り捨て、
 //   残りは事業主貸（税区分は対象外）にまとめて 1 行にする。
 // - 軽減税率の混在など、税率の区分ごとの内訳があれば行を分ける（内訳の税込額の和は合計と一致すること）。
 // - ref_number は照合キー kh-<document_id>（証憑の description と同じ）。
 // 入力は DB から独立した型（ReviewForDeal）。DB からの読み出しは loadReviewForDeal。
 import type { Db } from '../db/index.ts';
-import type { DealDetail } from '../providers/types.ts';
+import type { DealDetail, DealPayment } from '../providers/types.ts';
 import { toTaxCode } from '../ai/validate.ts';
 import { loadTaxMap, TAX_CATEGORIES, type TaxCategory, type TaxMap } from '../masters/tax-map.ts';
 import { currentMasters } from '../masters/sync.ts';
@@ -33,6 +36,8 @@ export type ReviewForDeal = {
 export type BuildOptions = {
   ownerDrawAccountItemId: number; // 事業主貸
   outOfScopeTaxCode: number; // 対象外
+  cashWalletableId?: number; // 現金（wallet）の口座。payment が cash のとき要る
+  ownerLoanAccountItemId?: number; // 事業主借。payment が owner のとき要る
 };
 
 export type DealDraft = {
@@ -41,7 +46,8 @@ export type DealDraft = {
   partnerName?: string;
   details: DealDetail[];
   receiptIds: number[];
-  payment: Payment; // 送らない（未決済）。記録用
+  payment: Payment; // 支払手段の記録（送るのは payments）
+  payments?: DealPayment[]; // 現金・事業主借のときだけ（連携カードは未決済なので持たない）
 };
 
 export class DealBuildError extends Error {
@@ -86,6 +92,13 @@ export function buildDeal(r: ReviewForDeal, opts: BuildOptions): DealDraft {
     payment: r.payment,
   };
   if (r.vendor) draft.partnerName = r.vendor;
+  if (r.payment.kind === 'cash') {
+    if (opts.cashWalletableId === undefined) throw new DealBuildError('現金の口座（wallet）が無い');
+    draft.payments = [{ date: r.txnDate, amount: r.amount, fromWalletableType: 'wallet', fromWalletableId: opts.cashWalletableId }];
+  } else if (r.payment.kind === 'owner') {
+    if (opts.ownerLoanAccountItemId === undefined) throw new DealBuildError('勘定科目「事業主借」が無い');
+    draft.payments = [{ date: r.txnDate, amount: r.amount, fromWalletableType: 'private_account_item', fromWalletableId: opts.ownerLoanAccountItemId }];
+  }
   return draft;
 }
 
@@ -148,10 +161,22 @@ export function taxResolver(db: Db, provider: string, map: TaxMap = loadTaxMap()
 }
 
 // 事業主貸の勘定科目と対象外の税区分（同期済みのマスタを名前で引く）。
-export function resolveBuildOptions(db: Db, provider: string, resolveTax: TaxResolver, txnDate: string): BuildOptions {
-  const owner = currentMasters(db, provider, 'account').filter((m) => m.name === '事業主貸');
+// 支払手段が現金なら「現金」の wallet、事業主借なら勘定科目「事業主借」も引く（1 件でなければ DealBuildError）。
+export function resolveBuildOptions(db: Db, provider: string, resolveTax: TaxResolver, txnDate: string, payment?: Payment): BuildOptions {
+  const accounts = currentMasters(db, provider, 'account');
+  const owner = accounts.filter((m) => m.name === '事業主貸');
   if (owner.length !== 1) throw new DealBuildError(`勘定科目「事業主貸」が同期済みのマスタに ${owner.length} 件`);
-  return { ownerDrawAccountItemId: Number(owner[0].remoteId), outOfScopeTaxCode: resolveTax('out_of_scope', txnDate, false) };
+  const opts: BuildOptions = { ownerDrawAccountItemId: Number(owner[0].remoteId), outOfScopeTaxCode: resolveTax('out_of_scope', txnDate, false) };
+  if (payment?.kind === 'cash') {
+    const cash = currentMasters(db, provider, 'walletable').filter((m) => m.data.type === 'wallet' && m.name === '現金');
+    if (cash.length !== 1) throw new DealBuildError(`口座「現金」（wallet）が同期済みのマスタに ${cash.length} 件`);
+    opts.cashWalletableId = Number(cash[0].data.id);
+  } else if (payment?.kind === 'owner') {
+    const loan = accounts.filter((m) => m.name === '事業主借');
+    if (loan.length !== 1) throw new DealBuildError(`勘定科目「事業主借」が同期済みのマスタに ${loan.length} 件`);
+    opts.ownerLoanAccountItemId = Number(loan[0].remoteId);
+  }
+  return opts;
 }
 
 export function reviewForDeal(row: ReviewRow, receiptIds: number[], resolveTax: TaxResolver): ReviewForDeal {

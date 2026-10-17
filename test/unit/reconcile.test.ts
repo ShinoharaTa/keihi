@@ -35,6 +35,7 @@ after(async () => {
 beforeEach(() => {
   db = openTestDb(path.join(root, `${n++}.db`));
   applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }], T0.toISOString());
+  applyMasterItems(db, 'freee', 'walletable', [{ remoteId: 'wallet:9', name: '現金', data: { id: 9, type: 'wallet', name: '現金' } }], T0.toISOString());
   fake = createFakeProvider();
   clock = T0;
 });

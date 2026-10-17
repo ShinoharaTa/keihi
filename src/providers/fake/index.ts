@@ -211,7 +211,7 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
           issueDate: input.issueDate,
           refNumber: input.refNumber,
           type: 'expense',
-          settled: false,
+          settled: (input.payments?.length ?? 0) > 0,
           amount: input.details.reduce((s, x) => s + x.amount, 0),
           details: structuredClone(input.details),
           partnerName: input.partnerName ?? null,

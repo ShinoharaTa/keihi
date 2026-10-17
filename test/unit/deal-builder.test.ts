@@ -1,4 +1,4 @@
-// 取引ビルダ（docs/mvp-plan.md T4-1）。表駆動: 支払手段（現金・事業主借・カード）、按分 0/50/100、軽減税率の混在で 2 行。
+// 取引ビルダ（docs/mvp-plan.md T4-1）。表駆動: 支払手段（現金・事業主借は決済済み、連携カードは未決済）、按分 0/50/100、軽減税率の混在で 2 行。
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -17,9 +17,10 @@ import {
   type ReviewForDeal,
   type TaxResolver,
 } from '../../src/deals/builder.ts';
+import type { DealPayment } from '../../src/providers/types.ts';
 import { addDocument, addReview, openTestDb } from './deals-helpers.ts';
 
-const OPTS = { ownerDrawAccountItemId: 104, outOfScopeTaxCode: 3 };
+const OPTS = { ownerDrawAccountItemId: 104, outOfScopeTaxCode: 3, cashWalletableId: 9, ownerLoanAccountItemId: 105 };
 const base = (o: Partial<ReviewForDeal> = {}): ReviewForDeal => ({
   documentId: 'DOC1',
   reviewId: 'R1',
@@ -35,16 +36,17 @@ const base = (o: Partial<ReviewForDeal> = {}): ReviewForDeal => ({
 });
 
 describe('buildDeal', () => {
-  const payments: [string, Payment][] = [
-    ['現金', { kind: 'cash' }],
-    ['事業主借', { kind: 'owner' }],
-    ['連携カード', { kind: 'card', walletableRemoteId: 'credit_card:1' }],
+  const payments: [string, Payment, DealPayment[] | undefined][] = [
+    ['現金', { kind: 'cash' }, [{ date: '2026-10-15', amount: 1100, fromWalletableType: 'wallet', fromWalletableId: 9 }]],
+    ['事業主借', { kind: 'owner' }, [{ date: '2026-10-15', amount: 1100, fromWalletableType: 'private_account_item', fromWalletableId: 105 }]],
+    ['連携カード', { kind: 'card', walletableRemoteId: 'credit_card:1' }, undefined],
   ];
-  for (const [name, payment] of payments) {
-    test(`支払手段 ${name}: 未決済（payments を持たない）で、内容は支払手段によらない`, () => {
+  for (const [name, payment, want] of payments) {
+    test(`支払手段 ${name}: ${want ? '決済済み（取引日・合計の payments）' : '未決済（payments を持たない）'}。明細は支払手段によらない`, () => {
       const d = buildDeal(base({ payment }), OPTS);
       assert.deepEqual(d.details, [{ accountItemId: 101, taxCode: 1, amount: 1100 }]);
-      assert.equal('payments' in d, false);
+      assert.deepEqual(d.payments, want);
+      assert.equal('payments' in d, want !== undefined);
       assert.deepEqual(d.payment, payment);
       assert.equal(d.refNumber, 'kh-DOC1');
       assert.equal(d.issueDate, '2026-10-15');
@@ -52,6 +54,18 @@ describe('buildDeal', () => {
       assert.deepEqual(d.receiptIds, [7]);
     });
   }
+
+  test('按分しても payments は合計（事業主貸の行も含めて支払う）', () => {
+    const d = buildDeal(base({ prorationPct: 50 }), OPTS);
+    assert.deepEqual(d.payments, [{ date: '2026-10-15', amount: 1100, fromWalletableType: 'wallet', fromWalletableId: 9 }]);
+  });
+
+  test('現金の口座・事業主借が無ければ DealBuildError', () => {
+    const { cashWalletableId: _c, ownerLoanAccountItemId: _o, ...rest } = OPTS;
+    assert.throws(() => buildDeal(base({ payment: { kind: 'cash' } }), rest), /現金/);
+    assert.throws(() => buildDeal(base({ payment: { kind: 'owner' } }), rest), /事業主借/);
+    assert.equal(buildDeal(base({ payment: { kind: 'card', walletableRemoteId: 'credit_card:1' } }), rest).payments, undefined);
+  });
 
   const cases: { name: string; pct: number; lines: { taxCode: number; amount: number }[]; want: { accountItemId: number; taxCode: number; amount: number }[] }[] = [
     { name: '按分 100', pct: 100, lines: [{ taxCode: 1, amount: 1100 }], want: [{ accountItemId: 101, taxCode: 1, amount: 1100 }] },
@@ -201,5 +215,35 @@ describe('DB からの読み出し', () => {
     assert.throws(() => resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15'), DealBuildError);
     applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }], '2026-10-16T00:00:00.000Z');
     assert.deepEqual(resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15'), { ownerDrawAccountItemId: 104, outOfScopeTaxCode: 3 });
+  });
+
+  test('現金は名前が「現金」の wallet、事業主借は勘定科目「事業主借」をマスタから引く。無ければ DealBuildError', () => {
+    const at = '2026-10-16T00:00:00.000Z';
+    applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }], at);
+    assert.throws(() => resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15', { kind: 'cash' }), /現金/);
+    assert.throws(() => resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15', { kind: 'owner' }), /事業主借/);
+    assert.equal(resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15', { kind: 'card', walletableRemoteId: 'credit_card:1' }).cashWalletableId, undefined);
+    applyMasterItems(
+      db,
+      'freee',
+      'walletable',
+      [
+        { remoteId: 'credit_card:8', name: '現金', data: { id: 8, type: 'credit_card', name: '現金' } },
+        { remoteId: 'wallet:9', name: '現金', data: { id: 9, type: 'wallet', name: '現金' } },
+      ],
+      at,
+    );
+    applyMasterItems(
+      db,
+      'freee',
+      'account',
+      [
+        { remoteId: '104', name: '事業主貸', data: {} },
+        { remoteId: '105', name: '事業主借', data: {} },
+      ],
+      at,
+    );
+    assert.equal(resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15', { kind: 'cash' }).cashWalletableId, 9);
+    assert.equal(resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15', { kind: 'owner' }).ownerLoanAccountItemId, 105);
   });
 });
