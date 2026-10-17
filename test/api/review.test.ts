@@ -28,6 +28,7 @@ let n = 0;
 let db: Db;
 let objectsDir: string;
 let app: Hono;
+let trigger: () => void = () => {};
 
 function make() {
   objectsDir = path.join(root, `objects-${n}`);
@@ -58,7 +59,7 @@ function make() {
       deadline: { countFrom: 'receipt_day' },
     },
     auth: allow,
-    triggerWorker: () => {},
+    triggerWorker: () => trigger(),
     now: () => NOW,
   });
 }
@@ -470,5 +471,30 @@ describe('GET /api/documents（T2-11）', () => {
     const counts = await (await app.request('/api/documents/counts')).json();
     assert.deepEqual(counts, { review: 3, attention: 1, urgent: 2 });
     assert.equal((await app.request('/api/documents?status=bogus')).status, 400);
+  });
+});
+
+describe('確定で worker を起動する', () => {
+  test('approve の後に triggerWorker を呼ぶ。失敗しても 200。reject では呼ばない', async () => {
+    let calls = 0;
+    trigger = () => {
+      calls++;
+      throw new Error('systemctl が無い');
+    };
+    try {
+      const a = addDoc();
+      addExtraction(a, {}, [GEMINI]);
+      const ca = (await getCard(a)).json;
+      const r = await act(a, 'approve', { card_id: ca.card_id, expected_version: 0, values: { account_id: ACC.supplies, payment: 'cash' } });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(calls, 1);
+      const b = addDoc();
+      addExtraction(b, {}, [GEMINI]);
+      const cb = (await getCard(b)).json;
+      assert.equal((await act(b, 'reject', { card_id: cb.card_id, expected_version: 0 })).status, 200);
+      assert.equal(calls, 1);
+    } finally {
+      trigger = () => {};
+    }
   });
 });

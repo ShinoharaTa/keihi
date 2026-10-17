@@ -16,7 +16,7 @@ import { USER_HEADER } from '../auth.ts';
 export const THUMB_MAX_EDGE = 640;
 const ACTIONS: Record<string, Decision> = { approve: 'approve', reject: 'reject', mark_private: 'personal', mark_duplicate: 'duplicate' };
 
-export function reviewRoutes(deps: Pick<AppDeps, 'db' | 'objectsDir' | 'config' | 'now'>): Hono {
+export function reviewRoutes(deps: Pick<AppDeps, 'db' | 'objectsDir' | 'config' | 'now' | 'triggerWorker'>): Hono {
   const r = new Hono();
   const now = () => (deps.now ? deps.now() : new Date());
   const calendar = () => ({ yearEndHolidays: deps.config.calendar.yearEndHolidays });
@@ -55,6 +55,14 @@ export function reviewRoutes(deps: Pick<AppDeps, 'db' | 'objectsDir' | 'config' 
       }
       try {
         const res = decide(deps.db, { documentId: c.req.param('id'), decision, body, user: c.req.header(USER_HEADER) ?? null, now: now() });
+        // 確定で積んだジョブ（検索項目・取引）を動かす。起動に失敗しても確定は済んでいる（keihi-worker.timer が拾う）。
+        if (decision === 'approve') {
+          try {
+            deps.triggerWorker();
+          } catch {
+            // 握りつぶす（ingest.ts と同じ）
+          }
+        }
         return c.json(res);
       } catch (e) {
         if (e instanceof ReviewError) return c.json({ reason: e.reason, ...e.detail }, e.status);
