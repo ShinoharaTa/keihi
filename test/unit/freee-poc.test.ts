@@ -431,6 +431,18 @@ describe('cleanup', () => {
     // F13 は紐付き中の証憑以外を全部消すので、残るのは（モックでは消せた扱いなので）無し
     assert.equal((await log.outstanding(POC)).length, 0);
   });
+
+  test('F11 の再実行は、前回の取引が無くても前回の明細があれば作らずに読むだけ', async () => {
+    const dir = await makeConfigDir();
+    const created = path.join(work, `c${n++}.jsonl`);
+    const e: CreatedEntry = { op: 'created', type: 'wallet_txn', id: 4242, company_id: POC, step: 'F11', at: '2026-10-01T00:00:00.000Z' };
+    await writeFile(created, JSON.stringify(e) + '\n');
+    const m = mockFetch();
+    const s = sink();
+    assert.equal(await main(['--only', 'F11', '--config-dir', dir, '--results', path.join(work, `r${n++}.md`), '--created', created], { fetch: m.fetch, ...s }), 0, s.lines.join('\n'));
+    const api = m.reqs.filter((r) => r.url.href !== TOKEN_URL);
+    assert.deepEqual(api.map((r) => `${r.method} ${r.url.pathname}`), ['GET /api/1/wallet_txns/4242']);
+  });
 });
 
 describe('補助', () => {

@@ -679,11 +679,16 @@ const step: Record<StepId, (ctx: Ctx) => Promise<void>> = {
     const q = { query: { company_id: ctx.companyId } };
     const prev = ctx.dryRun ? [] : (await ctx.created.outstanding(ctx.companyId)).filter((e) => e.step === 'F11');
     const prevDeal = prev.filter((e) => e.type === 'deal').at(-1);
-    if (prevDeal) {
-      // 2 回目以降: 画面で確定した後の状態を読むだけ（新しく作らない）。
-      const deal = obj(obj((await call(ctx, 'get deal', 'GET', `/api/1/deals/${prevDeal.id}`, q)).json).deal);
-      note(ctx, `前回の取引 id=${prevDeal.id}: status=${String(deal.status)} due_amount=${String(deal.due_amount)}`);
-      for (const w of prev.filter((e) => e.type === 'wallet_txn')) {
+    const prevTxns = prev.filter((e) => e.type === 'wallet_txn');
+    if (prevDeal || prevTxns.length > 0) {
+      // 2 回目以降: 画面で確定した後の状態を読むだけ（新しく作らない）。前回の取引が無くても明細があれば作らない。
+      if (prevDeal) {
+        const deal = obj(obj((await call(ctx, 'get deal', 'GET', `/api/1/deals/${prevDeal.id}`, q)).json).deal);
+        note(ctx, `前回の取引 id=${prevDeal.id}: status=${String(deal.status)} due_amount=${String(deal.due_amount)}`);
+      } else {
+        note(ctx, '前回の取引の記録が無い（明細だけ読む）');
+      }
+      for (const w of prevTxns) {
         const wt = obj(obj((await call(ctx, 'get txn', 'GET', `/api/1/wallet_txns/${w.id}`, q)).json).wallet_txn);
         note(ctx, `前回の明細 id=${w.id}: status=${String(wt.status)} due_amount=${String(wt.due_amount)}`);
       }
