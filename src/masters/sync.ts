@@ -4,6 +4,7 @@
 // - partners は Masters の型にまだ無い（src/providers/types.ts）。返ってきたときだけ同期し、無ければ既存の版に触らない。
 // - walletables は type と id の組を remote_id にする（`credit_card:1`）。別名は walletable_aliases に keihi 側で付ける。
 import { createHash } from 'node:crypto';
+import { canonicalJson } from '../audit.ts';
 import { tx, type Db } from '../db/index.ts';
 import type { Masters, Provider } from '../providers/types.ts';
 
@@ -28,15 +29,10 @@ export type SyncResult = Partial<Record<MasterKind, KindResult>>;
 
 type Partner = { id: number; name: string };
 
-// キーを並べ替えた JSON（内容の比較に使う）。
-export function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
-  if (v !== null && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).sort().filter((k) => o[k] !== undefined).map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
-}
+// キーを並べ替えた JSON（内容の比較に使う）は監査ログと同じもの（src/audit.ts）。
+// 旧実装との差は「配列の中の undefined（旧: 空、新: null）」と「有限でない数（旧: null、新: 例外）」だけで、
+// freee の JSON から作るマスタには現れないので data_sha256 は変わらない（test/unit/masters.test.ts）。
+export { canonicalJson };
 
 // Masters を種類ごとの MasterItem に直す。partners が無ければその種類は含めない（同期しない）。
 export function itemsFromMasters(m: Masters & { partners?: Partner[] }): Partial<Record<MasterKind, MasterItem[]>> {

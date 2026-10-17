@@ -1,5 +1,6 @@
 // T2-1 マスタ同期（docs/mvp-plan.md）。fake の Provider で同期し、再同期で差分だけ追記されることを確かめる。
 import { describe, test } from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -111,6 +112,20 @@ describe('syncMasters', () => {
 
   test('canonicalJson はキーの順に依らない', () => {
     assert.equal(canonicalJson({ b: 1, a: [{ d: 2, c: 3 }] }), canonicalJson({ a: [{ c: 3, d: 2 }], b: 1 }));
+  });
+
+  // 監査ログの canonicalJson に揃えた前後で data_sha256 が変わらないこと（値は旧実装で求めたもの）。
+  test('data_sha256 は旧実装と同じ', async () => {
+    const db = freshDb();
+    await sync(db, { ...DEFAULT_MASTERS, partners: [{ id: 9, name: 'p' }] });
+    const sha = (kind: string, id: string) =>
+      (db.prepare('SELECT data_sha256 FROM provider_master_versions WHERE kind = ? AND remote_id = ?').get(kind, id) as { data_sha256: string }).data_sha256;
+    assert.equal(sha('account', '104'), 'a35bc573fd2bc95bb1af41c992a28ce5c9071e47d8b1784e487ccf6558a60e22');
+    assert.equal(sha('tax', '1'), '6a1e01565ea3f5f43bee4e18cc6af9c4a0fabb1e16648f4350b33912f4e3890a');
+    assert.equal(sha('partner', '9'), '4c8323cbecde32f52b02522528b81fd4ed5572e617ff1903649dee5eff202cd5');
+    assert.equal(sha('walletable', 'credit_card:1'), '7ea97f4912b1dc952c7f8522ed7b1c42335b4f22f9754829fb831ab825144c82');
+    const nested = { name: '事業主貸', id: 104, nested: { z: [1, 'x', null, { b: false, a: -0.5 }], a: '"q"\n' }, skip: undefined };
+    assert.equal(createHash('sha256').update(canonicalJson(nested)).digest('hex'), 'ee97c1bb3a82f5dcf7da9e7f545c094fda231305e2a683ef1e6f7dad5294d4e9');
   });
 });
 
