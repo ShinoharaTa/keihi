@@ -30,6 +30,8 @@ export const DEFAULT_READ_DATA_SUBSET = '5%';
 export const DEFAULT_REMOTE_VERIFY_MODE: RemoteVerifyMode = 'download_only';
 // [worker]（src/jobs/worker.ts）。キューが空になってからもう一度 claim するまでの猶予。
 export const DEFAULT_WORKER_LINGER_MS = 1500;
+// 再認可待ち（invalid_grant）のアップロードを待つ上限の日数。過ぎたら needs_attention にしてジョブを終える。
+export const DEFAULT_REAUTH_WAIT_DAYS = 7;
 // [retention]（docs/ops/retention.md の案。税理士確認 #8 で確定する）。
 export const DEFAULT_RETENTION_YEARS = 7;
 export const DEFAULT_RETENTION_EXTRA_YEARS = 1;
@@ -86,7 +88,8 @@ export type Config = {
   };
   retention: { years: number; extraYears: number; start: RetentionStart };
   // lingerMs: キューが空と判断した後に待ってもう一度 claim する時間（start --no-block が動作中の oneshot に畳まれる対策）。
-  worker: { lingerMs: number };
+  // reauthWaitDays: 再認可待ちのアップロードを待つ上限の日数（src/worker/handlers/uploadReceipt.ts）。
+  worker: { lingerMs: number; reauthWaitDays: number };
   secrets: Secrets;
 };
 
@@ -128,7 +131,7 @@ const KNOWN: Record<string, string[]> = {
   mcp: ['port'],
   backup: ['repository', 'keep_snapshots', 'check_interval_days', 'read_data_subset', 'drill_dir', 'remote_verify_mode'],
   retention: ['years', 'extra_years', 'start'],
-  worker: ['linger_ms'],
+  worker: ['linger_ms', 'reauth_wait_days'],
 };
 
 function readConfigToml(file: string): Table {
@@ -292,7 +295,10 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       extraYears: optNonNegativeInt(t, 'retention', 'extra_years') ?? DEFAULT_RETENTION_EXTRA_YEARS,
       start: optEnum(t, 'retention', 'start', ['next_year_0316'] as const) ?? DEFAULT_RETENTION_START,
     },
-    worker: { lingerMs: optNonNegativeInt(t, 'worker', 'linger_ms') ?? DEFAULT_WORKER_LINGER_MS },
+    worker: {
+      lingerMs: optNonNegativeInt(t, 'worker', 'linger_ms') ?? DEFAULT_WORKER_LINGER_MS,
+      reauthWaitDays: optPositiveInt(t, 'worker', 'reauth_wait_days') ?? DEFAULT_REAUTH_WAIT_DAYS,
+    },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }

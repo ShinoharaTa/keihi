@@ -10,7 +10,7 @@ import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { BACKOFF_MINUTES, MAX_ATTEMPTS, claim, enqueue, getJob } from '../../src/jobs/queue.ts';
 import { TRIGGER_ARGS, triggerWorker, type SpawnLike } from '../../src/jobs/trigger.ts';
-import { runUntilEmpty } from '../../src/jobs/worker.ts';
+import { DeferJob, runUntilEmpty } from '../../src/jobs/worker.ts';
 import { JOBS_ON_APPROVE } from '../../src/review/confirm.ts';
 import { HANDLERS } from '../../src/worker/main.ts';
 
@@ -125,6 +125,19 @@ describe('worker', () => {
     assert.deepEqual(s, { done: 2, failed: 0 });
     // D2 の後にもう一度だけ待って、何も無いので返る。
     assert.deepEqual(sleeps, [1500, 1500]);
+    db.close();
+  });
+
+  test('DeferJob は回数を数えずに run_after まで延期し、note を last_error に残す（done にも failed にも数えない）', async () => {
+    const id = enqueue(db, 'extract', 'D1', { now: T0 });
+    const s = await runUntilEmpty(db, { extract: async () => { throw new DeferJob(at(10), 'waiting'); } }, { now: () => T0 });
+    assert.deepEqual(s, { done: 0, failed: 0 });
+    const j = getJob(db, id)!;
+    assert.equal(j.state, 'queued');
+    assert.equal(j.attempts, 0);
+    assert.equal(j.run_after, at(10).toISOString());
+    assert.equal(j.last_error, 'waiting');
+    assert.equal(j.locked_at, null);
     db.close();
   });
 

@@ -152,10 +152,10 @@ test('dumpConfig はシークレットを *** にする', async () => {
 });
 
 describe('[worker]', () => {
-  test('linger_ms の既定は 1500、0 も指定できる、負・知らないキーは拒否', () => {
-    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).worker, { lingerMs: 1500 });
-    assert.deepEqual(loadConfig({ configDir: dir2('[worker]\nlinger_ms = 0\n'), dataDir: '/data/keihi' }).worker, { lingerMs: 0 });
-    for (const bad of ['[worker]\nlinger_ms = -1', '[worker]\nlinger = 1']) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  test('linger_ms の既定は 1500（0 も可）、reauth_wait_days の既定は 7。負・0 日・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).worker, { lingerMs: 1500, reauthWaitDays: 7 });
+    assert.deepEqual(loadConfig({ configDir: dir2('[worker]\nlinger_ms = 0\nreauth_wait_days = 3\n'), dataDir: '/data/keihi' }).worker, { lingerMs: 0, reauthWaitDays: 3 });
+    for (const bad of ['[worker]\nlinger_ms = -1', '[worker]\nreauth_wait_days = 0', '[worker]\nlinger = 1']) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
   });
 });
 

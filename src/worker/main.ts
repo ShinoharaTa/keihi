@@ -82,7 +82,12 @@ function runtime(): WorkerRuntime {
 export const HANDLERS: Handlers = {
   upload_receipt: createUploadReceiptHandler(() => {
     const rt = runtime();
-    return { provider: rt.provider(), objectsDir: rt.cfg.objectsDir, calendar: { yearEndHolidays: rt.cfg.calendar.yearEndHolidays } };
+    return {
+      provider: rt.provider(),
+      objectsDir: rt.cfg.objectsDir,
+      calendar: { yearEndHolidays: rt.cfg.calendar.yearEndHolidays },
+      reauthWaitDays: rt.cfg.worker.reauthWaitDays,
+    };
   }),
   extract: createExtractHandler(() => {
     const rt = runtime();

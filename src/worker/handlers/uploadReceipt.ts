@@ -4,15 +4,21 @@
 // - 冪等キーが無いので、2 回目以降の試行では送る前に findReceiptsByKey（GET /receipts?category=without_deal、
 //   アップロード日が受領日の前日〜明日）で照合キーを探し、あればそれを採用する（タイムアウト後に実は成功していたケース）。
 // - 成功したら provider_uploads を state=uploaded・remote_receipt_id にし、監査ログに残す（同じトランザクション）。
-// - 失敗したら例外を投げて再試行に回す（jobs のバックオフ）。その際、次のどれかなら documents.status を needs_attention にする:
-//   期限（deadline_on）の 2 営業日前を過ぎた / 自動では直らない失敗（再認可が要る・4xx・大きすぎる）/ 最後の試行。
+// - 再試行で直る失敗は例外を投げて再試行に回す（jobs のバックオフ）。期限（deadline_on）の 2 営業日前を過ぎた、
+//   または最後の試行なら documents.status を needs_attention にする。
+// - 自動では直らない失敗（4xx・大きすぎる）は needs_attention（upload_rejected）にしてジョブを終える（再スローしない。予算を使わない）。
+// - 再認可待ち（auth_invalid_grant、または settings.freee_reauth_required = 1）は documents.status を変えず、
+//   回数を数えずに 6 時間後へ延期する（jobs.last_error = "reauth_pending since=<ISO>: ..."）。待ちが [worker] reauth_wait_days
+//   （既定 7 日）を超えたら needs_attention（upload_reauth_expired）にしてジョブを終える。再認可の後は daily が
+//   wakeReauthPending で即時に起こす。
 // - Provider は呼び出し側が渡す（予算を通したもの）。worker/main.ts が設定から組み立てて渡す。
 import { describeError, markNeedsAttention } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
 import { addDays, subtractBusinessDays, todayInTokyo, type CalendarOptions } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { ulid } from '../../db/ids.ts';
-import type { Handler } from '../../jobs/worker.ts';
+import { DeferJob, type Handler } from '../../jobs/worker.ts';
+import { isReauthRequired } from '../../providers/freee/state.ts';
 import { ProviderError, type Provider, type Receipt } from '../../providers/types.ts';
 import { readObject, sha256Hex } from '../../storage/objects.ts';
 
@@ -20,6 +26,9 @@ export const PROVIDER = 'freee';
 export const WARN_BUSINESS_DAYS = 2;
 // 検索項目を入れる期限（保存から 70 日。R11、mvp-plan.md T1-3）。
 export const META_DEADLINE_DAYS = 70;
+export const REAUTH_PENDING = 'reauth_pending';
+export const REAUTH_RETRY_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_REAUTH_WAIT_DAYS = 7;
 
 export type DateRange = { startDate: string; endDate: string };
 
@@ -32,6 +41,8 @@ export type UploadReceiptDeps = {
   provider: UploadProvider;
   objectsDir: string;
   calendar?: Pick<CalendarOptions, 'yearEndHolidays'>;
+  // 再認可待ちの上限の日数（[worker] reauth_wait_days）。
+  reauthWaitDays?: number;
 };
 
 type DocRow = {
@@ -63,10 +74,23 @@ function ensureUploadRow(db: Db, documentId: string, now: Date): UploadRow {
   return db.prepare('SELECT id, state, attempts, remote_receipt_id FROM provider_uploads WHERE document_id = ? AND provider = ?').get(documentId, PROVIDER) as UploadRow;
 }
 
-// 自動の再試行では直らない失敗。
-function needsHuman(e: unknown): string | null {
-  if (e instanceof ProviderError && !e.retryable) return e.kind === 'auth_invalid_grant' ? 'freee_reauth_required' : 'upload_rejected';
-  return null;
+// 再認可待ちの開始時刻（前の延期の note から読む）。
+function reauthSince(lastError: string | null): Date | null {
+  const m = new RegExp(`^${REAUTH_PENDING} since=(\\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z)`).exec(lastError ?? '');
+  if (!m) return null;
+  const t = new Date(m[1]);
+  return Number.isNaN(t.getTime()) ? null : t;
+}
+
+// 再認可の後（settings.freee_reauth_required が 1 でない）に、再認可待ちで延期中の upload_receipt を今すぐ動くようにする。起こした件数。
+export function wakeReauthPending(db: Db, now: Date): number {
+  if (isReauthRequired(db)) return 0;
+  const iso = now.toISOString();
+  return Number(
+    db
+      .prepare(`UPDATE jobs SET run_after = ?, updated_at = ? WHERE kind = 'upload_receipt' AND state = 'queued' AND run_after > ? AND last_error LIKE ?`)
+      .run(iso, iso, iso, `${REAUTH_PENDING} %`).changes,
+  );
 }
 
 export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Handler {
@@ -84,6 +108,8 @@ export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Ha
     const key = matchKey(doc.id);
     const isLastAttempt = job.attempts + 1 >= job.max_attempts;
     try {
+      // freee の Provider も同じ判定で呼ばずに返すが、原本を読む前に止める。
+      if (isReauthRequired(db)) throw new ProviderError('auth_invalid_grant', 'freee の再認可が要る（keihi freee auth）。呼び出さない');
       if (doc.bytes > deps.provider.capabilities().maxReceiptBytes) {
         throw new ProviderError('client', `freee の上限（${deps.provider.capabilities().maxReceiptBytes}B）を超える: ${doc.bytes}B`);
       }
@@ -134,8 +160,22 @@ export function createUploadReceiptHandler(getDeps: () => UploadReceiptDeps): Ha
       const msg = describeError(e).slice(0, 1000);
       db.prepare(`UPDATE provider_uploads SET last_error = ? WHERE id = ?`).run(msg, up.id);
       const warnOn = subtractBusinessDays(doc.deadline_on, WARN_BUSINESS_DAYS, deps.calendar);
-      const reason = needsHuman(e) ?? (today >= warnOn ? 'upload_deadline_near' : isLastAttempt ? 'upload_retries_exhausted' : null);
-      if (reason) markNeedsAttention(db, doc.id, reason, { deadline_on: doc.deadline_on, warn_on: warnOn, error: msg }, { now });
+      const detail = { deadline_on: doc.deadline_on, warn_on: warnOn, error: msg };
+      if (e instanceof ProviderError && e.kind === 'auth_invalid_grant') {
+        const since = reauthSince(job.last_error) ?? now;
+        const waitDays = deps.reauthWaitDays ?? DEFAULT_REAUTH_WAIT_DAYS;
+        if (now.getTime() - since.getTime() >= waitDays * 86_400_000) {
+          markNeedsAttention(db, doc.id, 'upload_reauth_expired', { ...detail, reauth_pending_since: since.toISOString() }, { now });
+          return;
+        }
+        throw new DeferJob(new Date(now.getTime() + REAUTH_RETRY_MS), `${REAUTH_PENDING} since=${since.toISOString()}: ${msg}`);
+      }
+      if (e instanceof ProviderError && !e.retryable) {
+        markNeedsAttention(db, doc.id, 'upload_rejected', detail, { now });
+        return;
+      }
+      const reason = today >= warnOn ? 'upload_deadline_near' : isLastAttempt ? 'upload_retries_exhausted' : null;
+      if (reason) markNeedsAttention(db, doc.id, reason, detail, { now });
       throw e;
     }
   };

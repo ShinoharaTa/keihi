@@ -13,7 +13,8 @@ import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { createFakeProvider, type FakeProvider } from '../../src/providers/fake/index.ts';
 import { createBudget, withBudget } from '../../src/providers/freee/budget.ts';
 import { objectPath, putObject, sha256Hex } from '../../src/storage/objects.ts';
-import { createUploadReceiptHandler, matchKey } from '../../src/worker/handlers/uploadReceipt.ts';
+import { setReauthRequired } from '../../src/providers/freee/state.ts';
+import { createUploadReceiptHandler, matchKey, REAUTH_PENDING, wakeReauthPending } from '../../src/worker/handlers/uploadReceipt.ts';
 
 const T0 = new Date('2026-10-16T03:00:00.000Z'); // JST 2026-10-16(金) 12:00
 const at = (min: number) => new Date(T0.getTime() + min * 60_000);
@@ -147,19 +148,80 @@ describe('upload_receipt', () => {
     assert.equal(status(id), 'received');
   });
 
-  test('401 invalid_grant: 自動では直らないので needs_attention にし、ジョブは失敗として残す', async () => {
+  test('401 invalid_grant: 再認可待ち。status を変えず、回数を数えずに 6 時間後へ延期する', async () => {
     const id = await addDocument();
     fake.failNext('auth_invalid_grant');
     const job = enqueue(db, 'upload_receipt', id, { now: T0 });
-    assert.deepEqual(await runAt(0), { done: 0, failed: 1 });
-    assert.equal(status(id), 'needs_attention');
-    const a = audits().at(-1)!;
-    assert.equal(a.action, 'document.needs_attention');
-    assert.equal(a.payload.reason, 'freee_reauth_required');
-    assert.equal(a.payload.from, 'received');
-    assert.match(getJob(db, job)!.last_error!, /auth_invalid_grant/);
-    assert.equal(upload(id).state, 'queued');
+    assert.deepEqual(await runAt(0), { done: 0, failed: 0 });
+    const j = getJob(db, job)!;
+    assert.equal(j.state, 'queued');
+    assert.equal(j.attempts, 0);
+    assert.equal(j.run_after, at(360).toISOString());
+    assert.match(j.last_error!, new RegExp(`^${REAUTH_PENDING} since=${T0.toISOString()}: auth_invalid_grant`));
+    assert.equal(status(id), 'received');
+    assert.equal(audits().filter((x) => x.action === 'document.needs_attention').length, 0);
+    assert.deepEqual(await runAt(359), { done: 0, failed: 0 });
+    assert.deepEqual(await runAt(360), { done: 1, failed: 0 });
+    assert.equal(upload(id).state, 'uploaded');
     assert.ok(verifyAudit(db).ok);
+  });
+
+  test('freee_reauth_required 中は呼ばずに延期し、開始時刻を引き継ぐ。再認可後は wakeReauthPending で即時に動く', async () => {
+    const id = await addDocument();
+    setReauthRequired(db, true, T0);
+    const job = enqueue(db, 'upload_receipt', id, { now: T0 });
+    await runAt(0);
+    await runAt(360);
+    assert.deepEqual(methods(), []);
+    assert.equal(getJob(db, job)!.attempts, 0);
+    assert.match(getJob(db, job)!.last_error!, new RegExp(`since=${T0.toISOString()}:`));
+    assert.equal(getJob(db, job)!.run_after, at(720).toISOString());
+    assert.equal(wakeReauthPending(db, at(400)), 0); // まだ再認可されていない
+    setReauthRequired(db, false, at(400));
+    assert.equal(wakeReauthPending(db, at(400)), 1);
+    assert.deepEqual(await runAt(400), { done: 1, failed: 0 });
+    assert.deepEqual(methods(), ['uploadReceipt:ok']);
+    assert.equal(status(id), 'received');
+  });
+
+  test('再認可待ちが reauth_wait_days を超えたら needs_attention（upload_reauth_expired）にしてジョブを終える', async () => {
+    const id = await addDocument({ deadlineOn: '2026-12-25' });
+    setReauthRequired(db, true, T0);
+    const job = enqueue(db, 'upload_receipt', id, { now: T0 });
+    const h = { upload_receipt: createUploadReceiptHandler(() => ({ provider: fake, objectsDir, reauthWaitDays: 1 })) };
+    await runUntilEmpty(db, h, { now: () => T0 });
+    clock = at(24 * 60);
+    await runUntilEmpty(db, h, { now: () => clock });
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.equal(status(id), 'needs_attention');
+    const a = audits().filter((x) => x.action === 'document.needs_attention');
+    assert.equal(a.length, 1);
+    assert.equal(a[0].payload.reason, 'upload_reauth_expired');
+    assert.equal(a[0].payload.reauth_pending_since, T0.toISOString());
+  });
+
+  test('4xx は needs_attention（upload_rejected）にして 1 回で終える（再スローしない）', async () => {
+    const id = await addDocument();
+    fake.failNext('client');
+    const job = enqueue(db, 'upload_receipt', id, { now: T0 });
+    assert.deepEqual(await runAt(0), { done: 1, failed: 0 });
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.equal(status(id), 'needs_attention');
+    assert.equal(audits().at(-1)!.payload.reason, 'upload_rejected');
+    assert.match(String(upload(id).last_error), /^client/);
+    assert.deepEqual(await runAt(60), { done: 0, failed: 0 });
+    assert.deepEqual(methods(), ['uploadReceipt:client']);
+  });
+
+  test('サイズ超過は送らずに needs_attention（upload_rejected）で終える', async () => {
+    const id = await addDocument();
+    const big = { ...fake, capabilities: () => ({ ...fake.capabilities(), maxReceiptBytes: 4 }) };
+    const job = enqueue(db, 'upload_receipt', id, { now: T0 });
+    const s = await runUntilEmpty(db, { upload_receipt: createUploadReceiptHandler(() => ({ provider: big, objectsDir })) }, { now: () => T0 });
+    assert.deepEqual(s, { done: 1, failed: 0 });
+    assert.equal(getJob(db, job)!.state, 'done');
+    assert.equal(audits().at(-1)!.payload.reason, 'upload_rejected');
+    assert.deepEqual(methods(), []);
   });
 
   test('期限の 2 営業日前を過ぎて未送信なら needs_attention（その前は付けない）', async () => {

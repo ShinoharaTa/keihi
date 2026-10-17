@@ -3,11 +3,21 @@
 //   `systemctl --user start --no-block` は動作中（activating）の oneshot に畳まれるので、最後の claim の直後に積まれた
 //   ジョブを取りこぼさないための猶予。取りこぼしても keihi-worker.timer（2 分ごと）が拾う。
 import type { Db } from '../db/index.ts';
-import { claim, complete, fail, type Job } from './queue.ts';
+import { claim, complete, defer, fail, type Job } from './queue.ts';
 
 export type HandlerContext = { db: Db; now: () => Date };
 export type Handler = (job: Job, ctx: HandlerContext) => Promise<void>;
 export type Handlers = Record<string, Handler>;
+
+// ハンドラが投げると、失敗として数えずに runAfter まで待たせる（queue.ts の defer）。RunSummary には数えない。
+export class DeferJob extends Error {
+  readonly runAfter: Date;
+  constructor(runAfter: Date, note: string) {
+    super(note);
+    this.name = 'DeferJob';
+    this.runAfter = runAfter;
+  }
+}
 
 export type RunSummary = { done: number; failed: number };
 
@@ -39,6 +49,11 @@ export async function runUntilEmpty(db: Db, handlers: Handlers, opts: RunOptions
       summary.done++;
       log(`job ${job.id} ${job.kind}: done`);
     } catch (e) {
+      if (e instanceof DeferJob) {
+        defer(db, job.id, e.runAfter, e.message, now());
+        log(`job ${job.id} ${job.kind}: 延期（${e.runAfter.toISOString()} まで）: ${e.message}`);
+        continue;
+      }
       const msg = e instanceof Error ? e.message : String(e);
       fail(db, job.id, msg, now());
       summary.failed++;

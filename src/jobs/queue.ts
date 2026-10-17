@@ -2,6 +2,7 @@
 // - claim はトランザクションの中で 1 件を running にする。locked_at が 15 分より古い running は取り直す
 //   （落ちたまま再取得を繰り返さないよう、取り直しも 1 回の失敗として attempts に数える）。
 // - 失敗したら attempts を増やし、指数バックオフ（1 → 5 → 30 → 120 分、以降 120 分）で run_after を進める。6 回で failed。
+// - defer は失敗ではない待ち（再認可待ち・証憑のアップロード待ち）。attempts を数えずに run_after を進めて queued に戻す。
 import { tx, type Db } from '../db/index.ts';
 
 export const BACKOFF_MINUTES = [1, 5, 30, 120] as const;
@@ -76,6 +77,16 @@ export function fail(db: Db, id: number, error: string, now: Date = new Date()):
     const job = db.prepare(`SELECT * FROM jobs WHERE id = ? AND state = 'running'`).get(id) as Job | undefined;
     if (job) recordFailure(db, job, error.slice(0, 2000), now);
   });
+}
+
+// 回数を数えずに runAfter まで待たせる。note は last_error に残す（理由と、待ちの開始時刻などをハンドラが読み返す）。
+export function defer(db: Db, id: number, runAfter: Date, note: string, now: Date = new Date()): void {
+  db.prepare(`UPDATE jobs SET state = 'queued', run_after = ?, locked_at = NULL, last_error = ?, updated_at = ? WHERE id = ? AND state = 'running'`).run(
+    runAfter.toISOString(),
+    note.slice(0, 2000),
+    now.toISOString(),
+    id,
+  );
 }
 
 export function getJob(db: Db, id: number): Job | null {
