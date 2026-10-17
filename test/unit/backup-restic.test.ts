@@ -121,7 +121,7 @@ beforeEach(async () => {
 });
 
 describe('settings', () => {
-  test('[backup] の既定値。他のセクションは無視し、restic に渡すのは決めた名前のシークレットだけ', async () => {
+  test('[backup] の既定値（config.ts 経由）。restic に渡すのは決めた名前のシークレットだけ', async () => {
     const s = settings();
     assert.equal(s.keepSnapshots, 2);
     assert.equal(s.checkIntervalDays, 7);

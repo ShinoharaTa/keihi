@@ -150,3 +150,34 @@ test('dumpConfig はシークレットを *** にする', async () => {
   assert.deepEqual(o.secrets, { geminiApiKey: '***', freeeClientId: '***', freeeClientSecret: '***' });
   assert.equal(o.freee.pocCompanyId, 123);
 });
+
+describe('[backup] / [retention]', () => {
+  test('既定値（drill_dir は <data_dir>/drill）', () => {
+    const c = loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' });
+    assert.deepEqual(c.backup, { repository: null, keepSnapshots: 7, checkIntervalDays: 7, readDataSubset: '5%', drillDir: '/data/keihi/drill', remoteVerifyMode: 'download_only' });
+    assert.deepEqual(c.retention, { years: 7, extraYears: 1, start: 'next_year_0316' });
+  });
+
+  test('指定を読む', () => {
+    const c = loadConfig({
+      configDir: dir2(`[backup]\nrepository = "b2:x:y"\nkeep_snapshots = 3\ncheck_interval_days = 14\nread_data_subset = "10%"\ndrill_dir = "/tmp/d"\nremote_verify_mode = "sha256"\n[retention]\nyears = 5\nextra_years = 0\nstart = "next_year_0316"\n`),
+    });
+    assert.deepEqual(c.backup, { repository: 'b2:x:y', keepSnapshots: 3, checkIntervalDays: 14, readDataSubset: '10%', drillDir: '/tmp/d', remoteVerifyMode: 'sha256' });
+    assert.deepEqual(c.retention, { years: 5, extraYears: 0, start: 'next_year_0316' });
+  });
+
+  test('知らないキー・不正な値は拒否', () => {
+    for (const bad of [
+      '[backup]\nkeep = 1',
+      '[backup]\nremote_verify_mode = "full"',
+      '[backup]\nread_data_subset = "5"',
+      '[backup]\ndrill_dir = "rel"',
+      '[retention]\nyears = 0',
+      '[retention]\nextra_years = -1',
+      '[retention]\nstart = "fiscal_year_end"',
+      '[retention]\nkeep = 1',
+    ]) {
+      assert.throws(() => loadConfig({ configDir: dir2(bad) }), ConfigError, bad);
+    }
+  });
+});

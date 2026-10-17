@@ -42,3 +42,18 @@ paid_tier_confirmed = false
 
 [mcp]
 # port = 8796                   # M7（keihi MCP）用の予約。M7 までは開かない
+
+[backup]
+# restic の保存先。無ければ secrets.env の RESTIC_REPOSITORY（docs/ops/backup.md）
+# repository = "b2:<bucket>:keihi"
+# keep_snapshots = 7            # DB のスナップショット（snapshots/）を残す数
+# check_interval_days = 7       # restic check の間隔
+# read_data_subset = "5%"       # restic check --read-data-subset
+# drill_dir = "/home/<user>/.local/share/keihi/drill"   # 既定 <data_dir>/drill。リストア訓練の復元先
+# remote_verify_mode = "download_only"   # "download_only" / "sha256"（F6 の確認後）
+
+[retention]
+# docs/ops/retention.md の案。税理士確認 #8 で確定する
+# years = 7                     # 法定の期間（一律）
+# extra_years = 1               # 余裕
+# start = "next_year_0316"      # 起算日。受領日の年分の翌年 3/16（確定申告期限の翌日）

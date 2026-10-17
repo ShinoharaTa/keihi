@@ -22,6 +22,16 @@ export const WEB_HOST = '127.0.0.1';
 export const DEFAULT_WEB_PORT = 8795;
 // M7（keihi MCP）用に予約するだけ。M7 までは何も開かない。
 export const DEFAULT_MCP_PORT = 8796;
+// [backup]（docs/ops/backup.md、src/backup/*）。
+export const DEFAULT_KEEP_SNAPSHOTS = 7;
+export const DEFAULT_CHECK_INTERVAL_DAYS = 7;
+export const DEFAULT_READ_DATA_SUBSET = '5%';
+// F6（freee が再圧縮するか）が未確認なので、既定は「ダウンロードできること」の確認だけ。
+export const DEFAULT_REMOTE_VERIFY_MODE: RemoteVerifyMode = 'download_only';
+// [retention]（docs/ops/retention.md の案。税理士確認 #8 で確定する）。
+export const DEFAULT_RETENTION_YEARS = 7;
+export const DEFAULT_RETENTION_EXTRA_YEARS = 1;
+export const DEFAULT_RETENTION_START: RetentionStart = 'next_year_0316';
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -32,6 +42,9 @@ export type ProviderKind = 'freee' | 'fake';
 export type ThinkingLevel = 'low' | 'medium' | 'high';
 export type MediaResolution = 'low' | 'medium' | 'high';
 const LEVELS = ['low', 'medium', 'high'] as const;
+export type RemoteVerifyMode = 'sha256' | 'download_only';
+// 起算日の規則。next_year_0316 = 受領日の年分の翌年 3/16（国税庁: 保存期間は確定申告期限の翌日から起算。docs/legal.md §1.5）。
+export type RetentionStart = 'next_year_0316';
 
 export type Secrets = {
   geminiApiKey: string | null;
@@ -59,6 +72,17 @@ export type Config = {
   // allowedHosts は Host ヘッダの許可リスト（`127.0.0.1:<port>` は常に含む。tailscale serve のホスト名は設定で足す）。
   web: { port: number; allowedUsers: string[]; allowedHosts: string[] };
   mcp: { port: number };
+  // repository は restic の保存先（無ければ secrets.env の RESTIC_REPOSITORY。src/backup/settings.ts）。
+  // drillDir はリストア訓練の復元先の親ディレクトリ（既定 <data_dir>/drill）。
+  backup: {
+    repository: string | null;
+    keepSnapshots: number;
+    checkIntervalDays: number;
+    readDataSubset: string;
+    drillDir: string;
+    remoteVerifyMode: RemoteVerifyMode;
+  };
+  retention: { years: number; extraYears: number; start: RetentionStart };
   secrets: Secrets;
 };
 
@@ -98,6 +122,8 @@ const KNOWN: Record<string, string[]> = {
   deadline: ['count_from'],
   web: ['port', 'allowed_users', 'allowed_hosts'],
   mcp: ['port'],
+  backup: ['repository', 'keep_snapshots', 'check_interval_days', 'read_data_subset', 'drill_dir', 'remote_verify_mode'],
+  retention: ['years', 'extra_years', 'start'],
 };
 
 function readConfigToml(file: string): Table {
@@ -156,6 +182,14 @@ function optPositiveInt(t: Table, sec: string, key: string): number | null {
   return v;
 }
 
+function optNonNegativeInt(t: Table, sec: string, key: string): number | null {
+  let v = section(t, sec)[key];
+  if (v === undefined) return null;
+  if (typeof v === 'bigint') v = Number(v);
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new ConfigError(`config.toml の ${sec}.${key} は 0 以上の整数で指定する`);
+  return v;
+}
+
 function optStringArray(t: Table, sec: string, key: string): string[] | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
@@ -210,6 +244,12 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     const v = h.toLowerCase();
     if (!allowedHosts.includes(v)) allowedHosts.push(v);
   }
+  const drillDir = optString(t, 'backup', 'drill_dir') ?? path.join(dataDir, 'drill');
+  if (!path.isAbsolute(drillDir)) throw new ConfigError('config.toml の backup.drill_dir は絶対パスで指定する');
+  const remoteVerifyMode = optString(t, 'backup', 'remote_verify_mode') ?? DEFAULT_REMOTE_VERIFY_MODE;
+  if (remoteVerifyMode !== 'sha256' && remoteVerifyMode !== 'download_only') throw new ConfigError('config.toml の backup.remote_verify_mode は "sha256" か "download_only"');
+  const readDataSubset = optString(t, 'backup', 'read_data_subset') ?? DEFAULT_READ_DATA_SUBSET;
+  if (!/^(?:\d{1,2}(?:\.\d+)?%|100%)$/.test(readDataSubset)) throw new ConfigError('config.toml の backup.read_data_subset は "5%" のような割合で指定する');
   return {
     configDir,
     dataDir,
@@ -234,6 +274,19 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     deadline: { countFrom },
     web: { port: webPort, allowedUsers: optStringArray(t, 'web', 'allowed_users') ?? [], allowedHosts },
     mcp: { port: mcpPort },
+    backup: {
+      repository: optString(t, 'backup', 'repository'),
+      keepSnapshots: optPositiveInt(t, 'backup', 'keep_snapshots') ?? DEFAULT_KEEP_SNAPSHOTS,
+      checkIntervalDays: optPositiveInt(t, 'backup', 'check_interval_days') ?? DEFAULT_CHECK_INTERVAL_DAYS,
+      readDataSubset,
+      drillDir,
+      remoteVerifyMode,
+    },
+    retention: {
+      years: optPositiveInt(t, 'retention', 'years') ?? DEFAULT_RETENTION_YEARS,
+      extraYears: optNonNegativeInt(t, 'retention', 'extra_years') ?? DEFAULT_RETENTION_EXTRA_YEARS,
+      start: optEnum(t, 'retention', 'start', ['next_year_0316'] as const) ?? DEFAULT_RETENTION_START,
+    },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }

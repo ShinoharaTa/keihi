@@ -76,8 +76,7 @@ B2_ACCOUNT_KEY=...            # B2 のアプリケーションキー
 | `drill_dir` | `<data_dir>/drill` | リストア訓練の復元先の親（空き容量に注意。全量が入る） |
 | `remote_verify_mode` | `"download_only"` | freee の証憑の照合（§7） |
 
-> 注意: `[backup]` は `src/config.ts` にまだ統合されていない。統合されるまでは、`config.toml` に `[backup]` を書くと
-> web / worker の `loadConfig` が「知らないセクション」で止まる。統合までは既定値で動かし、保存先は secrets.env に書く。
+`[backup]` は `src/config.ts` の `loadConfig` で読む（web / worker / tools/backup で同じ。知らないキーはエラー）。
 
 ## 4. 初期化と手動の実行
 
