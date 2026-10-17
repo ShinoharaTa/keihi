@@ -14,6 +14,7 @@ import { createFakeProvider } from '../providers/fake/index.ts';
 import { resetHourJstFor } from '../providers/freee/budget.ts';
 import { createFreeeProvider, freeeTokenPaths, type FreeeProvider } from '../providers/freee/provider.ts';
 import { createExtractHandler } from './handlers/extract.ts';
+import { createUpdateReceiptMetaHandler } from './handlers/updateReceiptMeta.ts';
 import { createUploadReceiptHandler } from './handlers/uploadReceipt.ts';
 
 export type WorkerRuntime = {
@@ -67,6 +68,7 @@ export const HANDLERS: Handlers = {
     const rt = runtime();
     return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir };
   }),
+  update_receipt_meta: createUpdateReceiptMetaHandler(() => ({ provider: runtime().provider() })),
 };
 
 // 実行環境を設定して HANDLERS を動かす（テストからも使う）。
