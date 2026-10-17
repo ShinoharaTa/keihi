@@ -9,7 +9,7 @@
 // - API キーは ~/.config/keihi/secrets.env（0600 以外は拒否）の GEMINI_API_KEY。ログ・CSV・例外に出さない。
 // - ~/.config/keihi/config.toml に `[gemini] paid_tier_confirmed = true` が無ければ実行しない。
 // - Gemini へは EXIF などのメタデータを除いた派生画像を inline で送る。Files API・キャッシュは使わない。
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -25,6 +25,7 @@ import {
   type Usage,
 } from '../../src/ai/gemini/client.ts';
 import type { Truth } from '../fixtures/gen-receipts.ts';
+import { assertSecretsFile, mimeOf } from './common.ts';
 
 // classification-ocr.md B-1 / a2ui-review-ui.md §1.4。モデル ID は config.toml の gemini.model で上書きできる。
 export const DEFAULT_MODEL = 'gemini-3.8-flash';
@@ -49,12 +50,26 @@ export const CONDITIONS: Condition[] = [
 
 // ---- 設定とシークレット ----
 
+// 行から # 以降のコメントを落とす。引用符の中の # はコメントにしない。
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '#') return line.slice(0, i);
+  }
+  return line;
+}
+
 // config.toml の最小パーサ（[section] と key = string|bool|number、# コメントのみ）。T1-2 で置き換える。
 export function parseTomlSubset(src: string): Record<string, Record<string, string | number | boolean>> {
   const out: Record<string, Record<string, string | number | boolean>> = { '': {} };
   let section = '';
   for (const [i, line0] of src.split(/\r?\n/).entries()) {
-    const line = line0.replace(/\s+#.*$/, '').trim();
+    const line = stripTomlComment(line0).trim();
     if (!line || line.startsWith('#')) continue;
     const sec = /^\[([A-Za-z0-9_.-]+)\]$/.exec(line);
     if (sec) {
@@ -76,6 +91,7 @@ export function parseTomlSubset(src: string): Record<string, Record<string, stri
 }
 
 // secrets.env の最小パーサ（KEY=VALUE、# コメント、両端の引用符）。値はエラーに含めない。
+// dotenv の慣例に合わせ、引用符なしの値では空白に続く # 以降をコメントとして落とす。引用符の中はそのまま。
 export function parseEnv(src: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line0 of src.split(/\r?\n/)) {
@@ -84,7 +100,10 @@ export function parseEnv(src: string): Record<string, string> {
     const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
     if (!m) continue;
     let v = m[2].trim();
-    if (/^(['"]).*\1$/.test(v)) v = v.slice(1, -1);
+    const q = v[0];
+    const close = q === '"' || q === "'" ? v.indexOf(q, 1) : -1;
+    if (close > 0) v = v.slice(1, close);
+    else v = v.replace(/(?:^|\s)#.*$/, '').trim();
     out[m[1]] = v;
   }
   return out;
@@ -122,17 +141,7 @@ export async function loadGeminiSettings(configDir: string): Promise<GeminiSetti
     );
   }
   const secretsPath = path.join(configDir, 'secrets.env');
-  let st;
-  try {
-    st = await stat(secretsPath);
-  } catch {
-    throw new Error(`${secretsPath} が無い`);
-  }
-  if (!st.isFile()) throw new Error(`${secretsPath} が通常のファイルではない`);
-  const mode = st.mode & 0o777;
-  if (mode !== 0o600) {
-    throw new Error(`${secretsPath} のパーミッションが 0600 ではない（現在 0${mode.toString(8)}）。chmod 600 してから実行する`);
-  }
+  await assertSecretsFile(secretsPath);
   const apiKey = parseEnv(await readFile(secretsPath, 'utf8')).GEMINI_API_KEY;
   if (!apiKey) throw new Error(`${secretsPath} に GEMINI_API_KEY が無い`);
   return { model: modelFrom(config), apiKey };
@@ -140,37 +149,50 @@ export async function loadGeminiSettings(configDir: string): Promise<GeminiSetti
 
 // ---- 送信用の派生画像（D13: EXIF などのメタデータを除く。画素は変えない） ----
 
-export function mimeOf(file: string): string {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-  if (ext === '.png') return 'image/png';
-  if (ext === '.pdf') return 'application/pdf';
-  throw new Error(`未対応の形式: ${ext}`);
-}
-
 // JPEG: APP1（Exif / XMP）、APP13（IPTC）、COM を落とす。JFIF・ICC（APP2）・Adobe（APP14）は残す。
 const JPEG_DROP = new Set([0xe1, 0xed, 0xfe]);
 // PNG: eXIf と文字列系チャンク、tIME を落とす。
 const PNG_DROP = new Set(['eXIf', 'tEXt', 'zTXt', 'iTXt', 'tIME']);
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-function stripJpeg(buf: Buffer): Buffer {
+// 長さを持たない単独マーカー（TEM・RST0〜7・SOI・EOI）。
+const isStandaloneMarker = (m: number) => m === 0x01 || (m >= 0xd0 && m <= 0xd9);
+
+type JpegSegment = { marker: number; start: number; end: number };
+
+// SOI の後のセグメントを順に返す。start は詰め物（連続する 0xFF）の先頭、end は次のセグメントの先頭。
+// SOS は end = 末尾で返して止まる（以降は画像データ）。壊れていれば例外。
+function* jpegSegments(buf: Buffer): Generator<JpegSegment> {
   if (buf[0] !== 0xff || buf[1] !== 0xd8) throw new Error('JPEG ではない');
-  const out: Buffer[] = [buf.subarray(0, 2)];
   let p = 2;
   while (p < buf.length) {
     if (buf[p] !== 0xff) throw new Error('JPEG のマーカーが壊れている');
     let q = p;
     while (buf[q] === 0xff) q++;
+    if (q >= buf.length) throw new Error('JPEG のマーカーが壊れている');
     const marker = buf[q];
     if (marker === 0xda) {
-      out.push(buf.subarray(p)); // SOS 以降（画像データ）はそのまま
-      break;
+      yield { marker, start: p, end: buf.length };
+      return;
     }
-    const len = buf.readUInt16BE(q + 1);
-    const end = q + 1 + len;
-    if (!JPEG_DROP.has(marker)) out.push(buf.subarray(p, end));
+    if (isStandaloneMarker(marker)) {
+      yield { marker, start: p, end: q + 1 };
+      p = q + 1;
+      continue;
+    }
+    if (q + 3 > buf.length) throw new Error('JPEG のマーカーが壊れている');
+    const end = q + 1 + buf.readUInt16BE(q + 1);
+    if (end > buf.length) throw new Error('JPEG のセグメントが途中で切れている');
+    yield { marker, start: p, end };
     p = end;
+  }
+}
+
+function stripJpeg(buf: Buffer): Buffer {
+  const out: Buffer[] = [buf.subarray(0, 2)];
+  for (const s of jpegSegments(buf)) {
+    // SOS 以降（画像データ）はそのまま
+    if (!JPEG_DROP.has(s.marker)) out.push(buf.subarray(s.start, s.end));
   }
   return Buffer.concat(out);
 }
@@ -580,12 +602,10 @@ const INLINE_LIMIT_BYTES = 20 * 1024 * 1024; // inline リクエストの目安�
 
 export function hasJpegExif(buf: Buffer): boolean {
   if (buf[0] !== 0xff || buf[1] !== 0xd8) return false;
-  let p = 2;
-  while (p + 4 <= buf.length && buf[p] === 0xff) {
-    const marker = buf[p + 1];
-    if (marker === 0xda) return false;
-    if (marker === 0xe1) return true;
-    p += 2 + buf.readUInt16BE(p + 2);
+  try {
+    for (const s of jpegSegments(buf)) if (s.marker === 0xe1) return true;
+  } catch {
+    // 壊れた JPEG は、読めた範囲に APP1 が無ければ false
   }
   return false;
 }
