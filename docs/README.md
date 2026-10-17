@@ -43,7 +43,8 @@ architecture.md は法令調査より前に書いたため、以下は本節を�
 - OCR: **Gemini 3.8 Flash（有料 tier）**。料金は 2026-12-31 まで入力 $0.75 / 出力 $3.75 per 1M、2027-01-01 から倍（classification-ocr.md §B-1）。月 100 枚なら数十〜百円程度の見込み（推定）
 - MF の契約: **Web 版パーソナルミニ**（2026-10-17 回答）。当面 MF を継続し、PoC で API の可否を確認（plans-comparison.md の推薦どおり）。Box の累計 1,000 件上限に近づいたらパーソナルへ
 - PoC は本人の本番アカウントで行ってよい（別事業者なし）。目的は「MF/freee を帳票の保存先にしつつ、経費精算・確定申告を自動化」。入出金明細を自然言語で振り分けたい（2026-10-17）→ transactions.md
-- **自然言語の指示は keihi に実装しない**（2026-10-17）。ユーザー自身のエージェント（Self agent）から操作するため、keihi は **MCP サーバー / freee API のプロキシ**を提供する方針。transactions.md の U10・M7、freee-codex.md の Codex 連携（`codex exec`）は不採用。M8 の「keihi MCP」を中核に格上げ（設計は未着手）
+- **自然言語の指示は keihi に実装しない**（2026-10-17）。ユーザー自身のエージェント（Self agent）から操作するため、keihi は **MCP サーバー / freee API のプロキシ**を提供する方針。transactions.md の U10・M7、freee-codex.md の Codex 連携（`codex exec`）は不採用。M8 の「keihi MCP」を中核に格上げ。**エージェントは同じサーバー上で動き、MCP は 127.0.0.1 のみ。書き込みは「エージェントが提案 → PWA の確認カードで本人が確定 → keihi が freee に書き込む」**
+- 会計サービス: **freee スタンダードへ切り替える（Y1 承認）**。帳簿は 2027-01-01 から。PoC は無料の開発用テスト事業所で先に行い、年払い契約は 12 月。2026 年分は MF で申告
 - 実行形態: **サーバー（Tailscale 内のみ）+ PWA**。ネイティブアプリは作らない
 - 確認 UI: **Gemini と必要に応じて対話でき、科目などは画面上で選べる。A2UI の概念を取り込む** → 設計は a2ui-review-ui.md（**B 案で決定**。U2 自由文での AI 相談は MVP に入れない。U6 AI ログ・応答原文の保存は 7 年）
 - スマホ: **iOS / Android の両方に対応**。PWA のカメラ撮影は両 OS で動く。共有シートは Android が Web Share Target、iOS がショートカットで POST（architecture.md §3.1）
