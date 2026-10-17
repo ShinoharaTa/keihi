@@ -57,6 +57,7 @@ describe('loadConfig', () => {
     assert.equal(cfg.gemini.paidTierConfirmed, false);
     assert.equal(cfg.ingest.maxBytes, DEFAULT_MAX_UPLOAD_BYTES);
     assert.deepEqual(cfg.calendar, { deadlineMode: 'early', yearEndHolidays: false });
+    assert.deepEqual(cfg.deadline, { countFrom: 'receipt_day' });
     assert.equal(cfg.secrets.geminiApiKey, null);
   });
 
@@ -76,6 +77,8 @@ describe('loadConfig', () => {
     assert.throws(() => loadConfig({ configDir: d3 }), /正の整数/);
     const d4 = await dir('[calendar]\ndeadline_mode = "2m"\n', null);
     assert.throws(() => loadConfig({ configDir: d4 }), /deadline_mode/);
+    const d6 = await dir('[deadline]\ncount_from = "first"\n', null);
+    assert.throws(() => loadConfig({ configDir: d6 }), /count_from/);
     const d5 = await dir('[other]\nx = 1\n', null);
     assert.throws(() => loadConfig({ configDir: d5 }), /知らないセクション/);
   });

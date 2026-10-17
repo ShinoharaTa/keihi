@@ -16,6 +16,7 @@ export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 export type DeadlineMode = 'early' | 'cycle';
+export type CountFrom = 'receipt_day' | 'next_day';
 export type FreeeTarget = 'poc' | 'prod';
 
 export type Secrets = {
@@ -35,6 +36,8 @@ export type Config = {
   ingest: { maxBytes: number };
   // R6。deadline_mode の既定は短い方（早期入力方式）。年末年始（12/29〜1/3）は既定で休業日に含めない（短い方に倒す）。
   calendar: { deadlineMode: DeadlineMode; yearEndHolidays: boolean };
+  // 7 営業日の数え始め。既定は早い方（受領日が営業日ならその日を 1 日目）。税理士確認 #3 の結果で変える前提。
+  deadline: { countFrom: CountFrom };
   secrets: Secrets;
 };
 
@@ -70,6 +73,7 @@ const KNOWN: Record<string, string[]> = {
   freee: ['poc_company_id', 'prod_company_id'],
   ingest: ['max_upload_bytes'],
   calendar: ['deadline_mode', 'year_end_holidays'],
+  deadline: ['count_from'],
 };
 
 function readConfigToml(file: string): Table {
@@ -147,6 +151,8 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   if (!path.isAbsolute(dataDir)) throw new ConfigError('config.toml の paths.data_dir は絶対パスで指定する');
   const mode = optString(t, 'calendar', 'deadline_mode') ?? 'early';
   if (mode !== 'early' && mode !== 'cycle') throw new ConfigError('config.toml の calendar.deadline_mode は "early" か "cycle"');
+  const countFrom = optString(t, 'deadline', 'count_from') ?? 'receipt_day';
+  if (countFrom !== 'receipt_day' && countFrom !== 'next_day') throw new ConfigError('config.toml の deadline.count_from は "receipt_day" か "next_day"');
   const pocCompanyId = optPositiveInt(t, 'freee', 'poc_company_id');
   const prodCompanyId = optPositiveInt(t, 'freee', 'prod_company_id');
   if (pocCompanyId !== null && pocCompanyId === prodCompanyId) throw new ConfigError('config.toml の freee.poc_company_id と prod_company_id が同じ');
@@ -163,6 +169,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     freee: { pocCompanyId, prodCompanyId },
     ingest: { maxBytes: optPositiveInt(t, 'ingest', 'max_upload_bytes') ?? DEFAULT_MAX_UPLOAD_BYTES },
     calendar: { deadlineMode: mode, yearEndHolidays: optBool(t, 'calendar', 'year_end_holidays') ?? false },
+    deadline: { countFrom },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }

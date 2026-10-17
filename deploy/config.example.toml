@@ -19,3 +19,6 @@ paid_tier_confirmed = false
 [calendar]
 # deadline_mode = "early"       # "early"（受領から 7 営業日）/ "cycle"（2 か月 + 7 営業日。規程がある場合だけ）
 # year_end_holidays = false     # true で 12/29〜1/3 を休業日に含める
+
+[deadline]
+# count_from = "receipt_day"    # "receipt_day"（受領日が営業日ならその日を 1 日目）/ "next_day"（翌日から数える）。税理士確認 #3 で変える前提
