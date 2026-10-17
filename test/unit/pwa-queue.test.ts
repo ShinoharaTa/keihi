@@ -64,6 +64,12 @@ describe('classify', () => {
   test('それ以外の 4xx は rejected', () => {
     for (const s of [400, 404, 413, 415, 422]) assert.equal(classify(s), 'rejected', String(s));
   });
+  test('403 のうちサーバーの設定エラー（forbidden・invalid_origin）は rejected、ほかの 403 は再送', () => {
+    assert.equal(classify(403, { reason: 'forbidden' }), 'rejected');
+    assert.equal(classify(403, { reason: 'invalid_origin' }), 'rejected');
+    assert.equal(classify(403, { reason: 'rate_limited' }), 'retry');
+    assert.equal(classify(403, null), 'retry');
+  });
 });
 
 describe('toFormData', () => {
@@ -127,6 +133,16 @@ describe('flush', () => {
     assert.equal(s.items.size, 1);
     assert.equal(s.items.get('1')!.state, 'rejected');
     assert.equal(s.items.get('1')!.lastError, 'resolution_too_low');
+  });
+  test('403 forbidden は rejected にして、後ろの項目を塞がない', async () => {
+    const s = await storeWith(item('1'), item('2'));
+    const { send } = sender([{ status: 403, body: { reason: 'forbidden' } }, 201]);
+    const r = await flush(s, send);
+    assert.equal(r.rejected, 1);
+    assert.equal(r.retryLater, 0);
+    assert.equal(s.items.size, 1);
+    assert.equal(s.items.get('1')!.state, 'rejected');
+    assert.equal(s.items.get('1')!.lastError, 'forbidden');
   });
   test('reason の無い応答は http_<status>', async () => {
     const s = await storeWith(item('1'));

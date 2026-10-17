@@ -3,6 +3,8 @@
 // - 状態: draft（種類などが未入力。共有シートから来たもの）/ pending（送信待ち）/ rejected（サーバーが受け付けなかった）。
 // - 送信は POST /api/documents（src/web/routes/ingest.ts の multipart）。201 と 409（重複 = 既に届いている）でキューから消す。
 // - 通信できない・5xx・401/403（Tailscale の切断など）・408・429 は残して次の機会に再送する。
+// - ただし 403 のうちサーバーの設定エラー（reason: forbidden | invalid_origin。src/web/auth.ts）は再送しても直らないので
+//   rejected にし、後ろの項目を塞がない。
 // - それ以外の 4xx は rejected にして残す（領収書を黙って捨てない）。消すのは利用者だけ。
 import { canSend, type Fields } from '../capture/form.ts';
 
@@ -33,9 +35,12 @@ export type Send = (body: FormData) => Promise<{ status: number; body: unknown }
 
 export type Outcome = 'done' | 'duplicate' | 'retry' | 'rejected';
 
-export function classify(status: number): Outcome {
+export const CONFIG_ERROR_REASONS: readonly string[] = ['forbidden', 'invalid_origin'];
+
+export function classify(status: number, body: unknown = null): Outcome {
   if (status === 200 || status === 201) return 'done';
   if (status === 409) return 'duplicate';
+  if (status === 403 && CONFIG_ERROR_REASONS.includes(reasonOf(status, body))) return 'rejected';
   if (status === 401 || status === 403 || status === 408 || status === 429) return 'retry';
   if (status >= 400 && status < 500) return 'rejected';
   return 'retry';
@@ -78,7 +83,7 @@ export async function flush(store: QueueStore, send: Send): Promise<FlushReport>
       report.retryLater = items.length - i;
       return report;
     }
-    const outcome = classify(res.status);
+    const outcome = classify(res.status, res.body);
     if (outcome === 'done' || outcome === 'duplicate') {
       await store.remove(item.id);
       report.sent.push({ itemId: item.id, name: item.name, outcome, body: res.body });

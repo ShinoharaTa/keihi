@@ -1,6 +1,7 @@
 // 一覧（docs/mvp-plan.md T2-11、mvp-plan-v0.1.md T2-11）。確認待ち・要対応・期限までの残り営業日。
 // - 確認待ち（review）: 確定の版（reviews）がまだ無く、needs_attention でもないもの。期限の近い順（2 営業日以内が先頭に来る）。
-// - 要対応（attention）: status = needs_attention。理由は監査ログの最後の document.needs_attention の reason。
+// - 要対応（attention）: status = needs_attention。理由は監査ログの最後の document.needs_attention の reason か、
+//   それより新しい deal.needs_attention があればその deals.attention_reason（src/review/attention.ts と同じ選び方）。
 // - 残り営業日（days_left）: 今日の翌日〜期限日の営業日の数。期限が今日なら 0、過ぎていれば負（過ぎた営業日の数）。
 import { addDays, isBusinessDay, todayInTokyo, type CalendarOptions } from '../calendar/businessDays.ts';
 import type { Db } from '../db/index.ts';
@@ -51,8 +52,10 @@ type Row = {
 const SELECT = `SELECT d.id, d.received_on, d.kind, d.status, d.deadline_on, d.paper_required, d.created_at,
   EXISTS (SELECT 1 FROM reviews r WHERE r.document_id = d.id) AS reviewed,
   CASE WHEN d.status = 'needs_attention' THEN (
-    SELECT json_extract(a.payload_json, '$.reason') FROM audit_log a
-    WHERE a.entity = 'document' AND a.entity_id = d.id AND a.action = 'document.needs_attention'
+    SELECT CASE WHEN a.action = 'deal.needs_attention' THEN (SELECT x.attention_reason FROM deals x WHERE x.id = a.entity_id)
+      ELSE json_extract(a.payload_json, '$.reason') END FROM audit_log a
+    WHERE (a.entity = 'document' AND a.entity_id = d.id AND a.action = 'document.needs_attention')
+       OR (a.entity = 'deal' AND a.action = 'deal.needs_attention' AND a.entity_id IN (SELECT x.id FROM deals x WHERE x.document_id = d.id))
     ORDER BY a.seq DESC LIMIT 1) END AS reason
   FROM documents d`;
 

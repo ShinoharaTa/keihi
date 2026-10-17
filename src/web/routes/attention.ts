@@ -1,30 +1,20 @@
-// 要対応 API（docs/mvp-plan.md T4-5）と紙原本の廃棄（T4-6）。PWA 側は別担当。
-//   GET  /api/attention               → 200 {total, groups: [{reason, items: [{id, document_id, state, reason, detail, attention_at, remote_deal_id, last_error}]}]}
-//        対象は送信（deals）の needs_attention で、人がまだ対応済みにしていないもの。理由ごとに、古い順。
-//   POST /api/attention/:id/resolve   body {note?: string（500 字まで）} → 200 {id, resolved_at} / 404 / 409（要対応でない・対応済み）
-//        人が freee 側などで対応したことを記録する（監査ログ）。状態は needs_attention のまま（照合でも上書きしない）。
+// 要対応 API（docs/mvp-plan.md T4-5）と紙原本の廃棄（T4-6）。文書（document_id）単位（src/review/attention.ts）。
+//   GET  /api/attention               → 200 {total, items: [Attention], groups: [{reason, items: [Attention]}]}
+//        needs_attention の文書のうち、人がまだ dismiss していないもの。古い順。Attention は
+//        {document_id, status, received_on, deadline_on, source, reason, kind, document_reason, deal_reason, deal_id, attention_at, detail, dismissed, actions}
+//   POST /api/documents/:id/attention/resolve   body {action?: 'retry' | 'dismiss'（既定 retry）, note?: string（500 字まで）}
+//        → 200 {document_id, action, reason, status, job, resolved_at} / 400 / 404 / 409（要対応でない・dismiss 済み・自動で直せない理由の retry）
+//        retry は理由に応じたジョブを積み直して状態を戻す。dismiss は対応済みの記録だけ（状態は needs_attention のまま）。
+//   POST /api/attention/:id/resolve   （互換。:id は deals.id）deals 行の document_id で上と同じ処理。応答に id（deals.id）も入れる。
 //   POST /api/documents/:id/paper     body {status: 'discarded'} → 200 {id, paper_status: 'discarded'} / 404 / 409 {paper_status, reasons}
 //        廃棄可（discard_ok）のときだけ「廃棄済」にできる（監査ログ）。
-import { Hono } from 'hono';
-import { appendAudit } from '../../audit.ts';
-import { tx } from '../../db/index.ts';
+import { Hono, type Context } from 'hono';
 import { markPaperDiscarded } from '../../deals/paper.ts';
+import { ATTENTION_ACTIONS, AttentionError, listAttention, resolveAttention, type Attention, type AttentionAction } from '../../review/attention.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
 const NOTE_MAX = 500;
-
-type Row = {
-  id: string;
-  document_id: string;
-  state: string;
-  attention_reason: string | null;
-  attention_detail_json: string | null;
-  attention_at: string | null;
-  attention_resolved_at: string | null;
-  remote_deal_id: string | null;
-  last_error: string | null;
-};
 
 async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   const text = await req.text();
@@ -37,57 +27,44 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
-export function attentionRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
+export function attentionRoutes(deps: Pick<AppDeps, 'db' | 'now' | 'triggerWorker'>): Hono {
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
 
   r.get('/attention', (c) => {
-    const rows = deps.db
-      .prepare(
-        `SELECT id, document_id, state, attention_reason, attention_detail_json, attention_at, attention_resolved_at, remote_deal_id, last_error
-         FROM deals WHERE state = 'needs_attention' AND attention_resolved_at IS NULL ORDER BY attention_at, id`,
-      )
-      .all() as Row[];
-    const groups = new Map<string, unknown[]>();
-    for (const row of rows) {
-      const reason = row.attention_reason ?? 'unknown';
-      if (!groups.has(reason)) groups.set(reason, []);
-      groups.get(reason)!.push({
-        id: row.id,
-        document_id: row.document_id,
-        state: row.state,
-        reason,
-        detail: row.attention_detail_json ? JSON.parse(row.attention_detail_json) : {},
-        attention_at: row.attention_at,
-        remote_deal_id: row.remote_deal_id,
-        last_error: row.last_error,
-      });
+    const items = listAttention(deps.db);
+    const groups = new Map<string, Attention[]>();
+    for (const it of items) {
+      if (!groups.has(it.reason)) groups.set(it.reason, []);
+      groups.get(it.reason)!.push(it);
     }
-    return c.json({ total: rows.length, groups: [...groups].map(([reason, items]) => ({ reason, items })) });
+    return c.json({ total: items.length, items, groups: [...groups].map(([reason, xs]) => ({ reason, items: xs })) });
   });
 
-  r.post('/attention/:id/resolve', async (c) => {
+  const resolve = async (c: Context, documentId: string, extra: Record<string, unknown> = {}) => {
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     const note = body.note ?? null;
     if (note !== null && (typeof note !== 'string' || note.length > NOTE_MAX)) return c.json({ error: 'invalid_note' }, 400);
+    const action = body.action ?? 'retry';
+    if (!(ATTENTION_ACTIONS as readonly unknown[]).includes(action)) return c.json({ error: 'invalid_action' }, 400);
+    try {
+      const res = resolveAttention(deps.db, documentId, { action: action as AttentionAction, note: note as string | null, user: c.req.header(USER_HEADER) ?? null, now: now() });
+      if (res.action === 'retry') deps.triggerWorker();
+      return c.json({ ...extra, ...res });
+    } catch (e) {
+      if (e instanceof AttentionError) return c.json({ error: e.reason }, e.status);
+      throw e;
+    }
+  };
+
+  r.post('/documents/:id/attention/resolve', (c) => resolve(c, c.req.param('id')));
+
+  r.post('/attention/:id/resolve', (c) => {
     const id = c.req.param('id');
-    const at = now();
-    const res = tx(deps.db, () => {
-      const row = deps.db.prepare('SELECT id, document_id, state, attention_reason, attention_resolved_at FROM deals WHERE id = ?').get(id) as Row | undefined;
-      if (!row) return 404 as const;
-      if (row.state !== 'needs_attention' || row.attention_resolved_at !== null) return 409 as const;
-      deps.db.prepare('UPDATE deals SET attention_resolved_at = ?, updated_at = ? WHERE id = ?').run(at.toISOString(), at.toISOString(), id);
-      appendAudit(
-        deps.db,
-        { actor: 'user', action: 'deal.attention_resolved', entity: 'deal', entityId: id, payload: { document_id: row.document_id, reason: row.attention_reason, note, user: c.req.header(USER_HEADER) ?? null } },
-        at,
-      );
-      return 200 as const;
-    });
-    if (res === 404) return c.json({ error: 'not_found' }, 404);
-    if (res === 409) return c.json({ error: 'not_needs_attention' }, 409);
-    return c.json({ id, resolved_at: at.toISOString() });
+    const deal = deps.db.prepare('SELECT document_id FROM deals WHERE id = ?').get(id) as { document_id: string } | undefined;
+    if (!deal) return c.json({ error: 'not_found' }, 404);
+    return resolve(c, deal.document_id, { id });
   });
 
   r.post('/documents/:id/paper', async (c) => {

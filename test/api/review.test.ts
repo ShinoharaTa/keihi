@@ -11,6 +11,7 @@ import { appendAudit, verifyAudit } from '../../src/audit.ts';
 import { validateSchema } from '../../src/ai/validate.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { ensureDealRow, markNeedsAttention } from '../../src/deals/stateMachine.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
 import { CATALOG } from '../../src/review/card.ts';
 import { putObject } from '../../src/storage/objects.ts';
@@ -29,8 +30,10 @@ let db: Db;
 let objectsDir: string;
 let app: Hono;
 let trigger: () => void = () => {};
+let clock = NOW;
 
 function make() {
+  clock = NOW;
   objectsDir = path.join(root, `objects-${n}`);
   db = openDb(path.join(root, `${n++}.db`));
   migrate(db);
@@ -60,7 +63,7 @@ function make() {
     },
     auth: allow,
     triggerWorker: () => trigger(),
-    now: () => NOW,
+    now: () => clock,
   });
 }
 
@@ -166,6 +169,26 @@ describe('GET /api/documents/:id/card（T2-7）', () => {
     const r2 = await getCard(id);
     assert.equal(r2.json.card_id, r.json.card_id);
     assert.equal(audits('ai.proposed').length, 1);
+  });
+
+  test('日付が進んでも・documents.status が変わっても同じカード（残り営業日と status は応答で付け足す）', async () => {
+    const id = addDoc();
+    addExtraction(id, {}, [GEMINI]);
+    const r = await getCard(id);
+    assert.equal(r.json.dataModel.days_left, 6);
+    const stored = JSON.parse((db.prepare('SELECT card_json FROM ui_cards WHERE id = ?').get(r.json.card_id) as { card_json: string }).card_json);
+    assert.equal('days_left' in stored.dataModel, false);
+    assert.equal('status' in stored.dataModel, false);
+    clock = new Date('2026-10-19T03:00:00.000Z'); // 月
+    db.prepare(`UPDATE documents SET status = 'needs_attention' WHERE id = ?`).run(id);
+    const r2 = await getCard(id);
+    assert.equal(r2.json.card_id, r.json.card_id);
+    assert.equal(r2.json.dataModel.days_left, 5);
+    assert.equal(r2.json.dataModel.status, 'needs_attention');
+    assert.equal(audits('ai.proposed').length, 1);
+    // 古くならないので、そのカードで確定できる
+    const a = await act(id, 'approve', { card_id: r.json.card_id, expected_version: 0, values: { payment: 'cash' } });
+    assert.equal(a.status, 200);
   });
 
   test('質問カード（questions[]）は surface に入れない', async () => {
@@ -317,11 +340,56 @@ describe('POST /api/documents/:id/approve 他（T2-8・T2-9）', () => {
     assert.equal(card2.dataModel.version, 1);
     assert.equal(card2.dataModel.sources.account_id, 'dictionary'); // 確定の版の出所から始まる
     assert.equal(audits('ai.proposed').length, 1); // 確定の版から作ったカードは提案ではない
-    const r = await act(id, 'approve', { card_id: card2.card_id, expected_version: 1, values: { amount: 1200 } });
+    const r = await act(id, 'approve', { card_id: card2.card_id, expected_version: 1, values: { amount: 1200, tax_by_rate: [{ category: 'taxable_10', amount_incl_tax: 1200, tax: 109 }] } });
     assert.equal(r.status, 200);
     assert.equal(r.json.version, 2);
-    assert.deepEqual(r.json.warnings, ['amount_mismatch']);
+    assert.deepEqual(r.json.warnings, []);
     assert.equal((db.prepare('SELECT count(*) n FROM reviews').get() as any).n, 2);
+  });
+
+  test('取引ビルダが拒否する入力は approve で 422 not_sendable（内訳 0 円・内訳の和 ≠ 合計）。内訳が空なら合計だけで可', async () => {
+    const { id, card } = await ready({ dict: true });
+    const base = { card_id: card.card_id, expected_version: 0 };
+    const mismatch = await act(id, 'approve', { ...base, values: { amount: 1200 } });
+    assert.equal(mismatch.status, 422);
+    assert.equal(mismatch.json.reason, 'not_sendable');
+    assert.match(mismatch.json.messages[0], /内訳の合計（1100 円）が支払金額（1200 円）と合いません/);
+    const zero = await act(id, 'approve', {
+      ...base,
+      values: { tax_by_rate: [{ category: 'taxable_10', amount_incl_tax: 1100, tax: 100 }, { category: 'taxable_8_reduced', amount_incl_tax: 0, tax: 0 }] },
+    });
+    assert.equal(zero.status, 422);
+    assert.match(zero.json.messages[0], /2 行目の金額が 0 円/);
+    const prorate = await act(id, 'approve', { ...base, values: { proration_pct: 50.5 } });
+    assert.equal(prorate.status, 422); // 型の検証で先に止まる
+    assert.equal(jobs().length, 0);
+    // approve 以外は警告だけ
+    const rej = await act(id, 'reject', { ...base, values: { amount: 1200 } });
+    assert.equal(rej.status, 200);
+    assert.deepEqual(rej.json.warnings, ['amount_mismatch']);
+    // 内訳が空なら合計だけで送れる
+    const card2 = (await getCard(id)).json;
+    const ok = await act(id, 'approve', { card_id: card2.card_id, expected_version: 1, values: { amount: 1200, tax_by_rate: [] } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+  });
+
+  test('税率の区分を変えると、内訳が 1 行ならその区分に揃えて保存する。複数行なら 422', async () => {
+    const { id, card } = await ready({ dict: true });
+    const r = await act(id, 'approve', { card_id: card.card_id, expected_version: 0, values: { tax_id: 'taxable_8_reduced' } });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.ok(r.json.changed.includes('tax_by_rate'));
+    const rv = db.prepare('SELECT tax_id, tax_by_rate_json, field_sources_json FROM reviews WHERE document_id = ?').get(id) as any;
+    assert.equal(rv.tax_id, 'taxable_8_reduced');
+    assert.deepEqual(JSON.parse(rv.tax_by_rate_json), [{ category: '8r', amount_incl_tax: 1100, tax: 100 }]);
+    assert.equal(JSON.parse(rv.field_sources_json).tax_by_rate, 'human');
+
+    const id2 = addDoc();
+    addExtraction(id2, { vendor: '別の店', by_rate: [{ category: 'taxable_10', amount_incl_tax: 600, tax: 54 }, { category: 'taxable_8_reduced', amount_incl_tax: 500, tax: 37 }] }, [GEMINI]);
+    const c2 = (await getCard(id2)).json;
+    const bad = await act(id2, 'approve', { card_id: c2.card_id, expected_version: 0, values: { tax_id: 'taxable_8_reduced', payment: 'cash' } });
+    assert.equal(bad.status, 422);
+    assert.equal(bad.json.reason, 'not_sendable');
+    assert.match(bad.json.messages[0], /内訳を直してください/);
   });
 
   test('R10: approve で必須（日付・金額・取引先・科目・税・支払手段）が欠けると 422', async () => {
@@ -471,6 +539,16 @@ describe('GET /api/documents（T2-11）', () => {
     const counts = await (await app.request('/api/documents/counts')).json();
     assert.deepEqual(counts, { review: 3, attention: 1, urgent: 2 });
     assert.equal((await app.request('/api/documents?status=bogus')).status, 400);
+  });
+
+  test('要対応の理由は、文書側より新しい送信の要対応があれば deals.attention_reason', async () => {
+    const id = addDoc({ status: 'approved' });
+    appendAudit(db, { actor: 'worker', action: 'document.needs_attention', entity: 'document', entityId: id, payload: { reason: 'meta_retries_exhausted' } }, NOW);
+    db.prepare(`INSERT INTO reviews (id, document_id, version, decision, decided_at, proration_pct) VALUES ('RV1', ?, 1, 'approve', ?, 100)`).run(id, NOW.toISOString());
+    const row = ensureDealRow(db, { documentId: id, reviewId: 'RV1', provider: 'freee', draft: { refNumber: `kh-${id}`, issueDate: '2026-10-15', details: [], receiptIds: [], payment: { kind: 'cash' } } }, NOW);
+    markNeedsAttention(db, row.id, 'send_rejected', {}, NOW);
+    const at = (await (await app.request('/api/documents?status=attention')).json()) as { items: any[] };
+    assert.deepEqual(at.items.map((i) => [i.id, i.needs_attention_reason]), [[id, 'send_rejected']]);
   });
 });
 

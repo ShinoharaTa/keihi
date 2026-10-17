@@ -2,6 +2,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderableComponents } from '../../pwa/src/review/catalog.ts';
+import { reasonText, resolveMessage, resolveUrl } from '../../pwa/src/review/attention.ts';
+import { backupWarning } from '../../pwa/src/status.ts';
 import { canApprove, changedValues, errorText, missingRequired, parseAmount, pickCandidate, requestBody, type DataModel, type Values } from '../../pwa/src/review/model.ts';
 
 const values = (over: Partial<Values> = {}): Values => ({
@@ -81,5 +83,31 @@ describe('入力と表示', () => {
     assert.equal(errorText(422, { reason: 'missing_required', fields: ['txn_date', 'payment'] }), '未入力: 日付・支払手段');
     assert.match(errorText(409, {}), /読み直しました/);
     assert.match(errorText(0, null), /通信できません/);
+    assert.equal(errorText(422, { reason: 'not_sendable', messages: ['内訳を直してください。', '按分を直してください。'] }), '内訳を直してください。 按分を直してください。');
+  });
+});
+
+describe('要対応タブ（T4-5）', () => {
+  test('理由の文言・解消の URL と結果の文', () => {
+    assert.equal(reasonText('upload_rejected'), 'freee に証憑を送れませんでした');
+    assert.equal(reasonText('something_new'), '要対応（something_new）');
+    assert.equal(resolveUrl('01 X'), '/api/documents/01%20X/attention/resolve');
+    assert.equal(resolveMessage('retry', 200), 'もう一度試します。');
+    assert.equal(resolveMessage('dismiss', 200), '対応済みにしました。');
+    assert.match(resolveMessage('retry', 409), /自動では直せません/);
+    assert.match(resolveMessage('retry', 0), /通信できません/);
+  });
+});
+
+describe('バックアップの警告帯', () => {
+  const now = new Date('2026-10-17T03:00:00.000Z');
+  const drill = (ok: boolean) => ({ at: '2026-10-16T00:00:00.000Z', ok, failure_count: ok ? 0 : 2 });
+  test('2 日以内に成功し drill も成功なら出さない。古い・一度も無い・drill 失敗なら出す', () => {
+    assert.equal(backupWarning({ last_success_at: '2026-10-15T04:00:00.000Z', last_drill: drill(true) }, now), null);
+    assert.equal(backupWarning({ last_success_at: '2026-10-15T04:00:00.000Z', last_drill: null }, now), null);
+    assert.match(backupWarning({ last_success_at: '2026-10-15T02:59:59.000Z', last_drill: drill(true) }, now)!, /2026-10-15 から止まっています/);
+    assert.match(backupWarning({ last_success_at: null, last_drill: null }, now)!, /一度も成功していません/);
+    assert.match(backupWarning({ last_success_at: '2026-10-16T04:00:00.000Z', last_drill: drill(false) }, now)!, /drill/);
+    assert.equal(backupWarning(undefined, now), null);
   });
 });

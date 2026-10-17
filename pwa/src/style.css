@@ -57,6 +57,14 @@ body {
 .notice {
   margin: 12px 16px 0;
 }
+/* バックアップの警告帯（GET /api/status） */
+.band-warn {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--danger);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--danger);
+}
 .btn,
 .seg button,
 .tabs button {

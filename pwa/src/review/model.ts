@@ -109,12 +109,13 @@ export function isUrgent(days: number): boolean {
 
 // 確定 API の失敗を画面の文に直す。
 export function errorText(status: number, body: unknown): string {
-  const b = (typeof body === 'object' && body !== null ? body : {}) as { reason?: unknown; fields?: unknown };
+  const b = (typeof body === 'object' && body !== null ? body : {}) as { reason?: unknown; fields?: unknown; messages?: unknown };
   if (status === 0) return '通信できませんでした。もう一度押してください。';
   if (status === 409) return 'ほかで更新されました。読み直しました。';
   if (status === 422 && b.reason === 'missing_required' && Array.isArray(b.fields)) {
     return `未入力: ${b.fields.map((f) => FIELD_LABELS[f as FieldName] ?? String(f)).join('・')}`;
   }
+  if (status === 422 && b.reason === 'not_sendable' && Array.isArray(b.messages)) return b.messages.map(String).join(' ');
   if (status === 422) return '入力に誤りがあります。';
   return `確定できませんでした（HTTP ${status}）`;
 }
