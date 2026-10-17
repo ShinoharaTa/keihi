@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "provisional": true,
+  "note": "仮の対応表（classification-ocr.md A-5 の 24 件）。T0-4 で freee の勘定科目に合わせた config/account-map.json に置き換える。freee_account_item_id が null の行は freee_name で引く。",
+  "accounts": [
+    {
+      "key": "租税公課",
+      "freee_name": "租税公課",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "荷造運賃",
+      "freee_name": "荷造運賃",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "水道光熱費",
+      "freee_name": "水道光熱費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "旅費交通費",
+      "freee_name": "旅費交通費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "通信費",
+      "freee_name": "通信費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "広告宣伝費",
+      "freee_name": "広告宣伝費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "接待交際費",
+      "freee_name": "接待交際費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "損害保険料",
+      "freee_name": "損害保険料",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "修繕費",
+      "freee_name": "修繕費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "消耗品費",
+      "freee_name": "消耗品費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "減価償却費",
+      "freee_name": "減価償却費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "福利厚生費",
+      "freee_name": "福利厚生費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "給料賃金",
+      "freee_name": "給料賃金",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "外注工賃",
+      "freee_name": "外注工賃",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "利子割引料",
+      "freee_name": "利子割引料",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "地代家賃",
+      "freee_name": "地代家賃",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "貸倒金",
+      "freee_name": "貸倒金",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "雑費",
+      "freee_name": "雑費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "新聞図書費",
+      "freee_name": "新聞図書費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "支払手数料",
+      "freee_name": "支払手数料",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "会議費",
+      "freee_name": "会議費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "研修費",
+      "freee_name": "研修費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "車両費",
+      "freee_name": "車両費",
+      "freee_account_item_id": null,
+      "private": false
+    },
+    {
+      "key": "事業主貸",
+      "freee_name": "事業主貸",
+      "freee_account_item_id": null,
+      "private": true
+    }
+  ]
+}
