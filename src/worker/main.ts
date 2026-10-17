@@ -2,22 +2,25 @@
 // 実行可能なジョブが無くなったら終了する（ワンショット）。常駐しない。ポートを開かない。
 // - Provider は config.toml の [provider] kind（既定 freee）と [freee] target（既定 poc）から、最初に要るジョブで 1 回だけ作る
 //   （設定が無くても Provider を使わないジョブは動く）。freee の予算の日の区切りは [freee] day_boundary。
+// - Gemini（[gemini]）も同じく、最初に要るジョブで 1 回だけ作る（no_ai の抽出では作らない）。
 //
 //   node src/worker/main.ts [--db /path/to.db]
 import { parseArgs } from 'node:util';
+import { createGeminiFromConfig, type Gemini } from '../ai/gemini/client.ts';
 import { loadConfig, requireFreee, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers } from '../jobs/worker.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
 import { resetHourJstFor } from '../providers/freee/budget.ts';
 import { createFreeeProvider, freeeTokenPaths, type FreeeProvider } from '../providers/freee/provider.ts';
-import { extract } from './handlers/extract.ts';
+import { createExtractHandler } from './handlers/extract.ts';
 import { createUploadReceiptHandler } from './handlers/uploadReceipt.ts';
 
 export type WorkerRuntime = {
   cfg: Config;
   db: Db;
   provider(): FreeeProvider;
+  gemini(): Gemini;
 };
 
 // 設定から Provider を組み立てる。fake は開発用（freee を呼ばない。状態はこのプロセスの中だけ）。
@@ -38,10 +41,12 @@ export function buildProvider(cfg: Config, db: Db, opts: { fetch?: typeof fetch 
 
 export function createRuntime(cfg: Config, db: Db, opts: { fetch?: typeof fetch } = {}): WorkerRuntime {
   let provider: FreeeProvider | null = null;
+  let gemini: Gemini | null = null;
   return {
     cfg,
     db,
     provider: () => (provider ??= buildProvider(cfg, db, opts)),
+    gemini: () => (gemini ??= createGeminiFromConfig(cfg, { fetch: opts.fetch })),
   };
 }
 
@@ -58,7 +63,10 @@ export const HANDLERS: Handlers = {
     const rt = runtime();
     return { provider: rt.provider(), objectsDir: rt.cfg.objectsDir, calendar: { yearEndHolidays: rt.cfg.calendar.yearEndHolidays } };
   }),
-  extract,
+  extract: createExtractHandler(() => {
+    const rt = runtime();
+    return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir };
+  }),
 };
 
 // 実行環境を設定して HANDLERS を動かす（テストからも使う）。
