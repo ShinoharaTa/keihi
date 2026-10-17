@@ -11,7 +11,7 @@ import { migrate } from '../../src/db/migrate.ts';
 import { enqueue, getJob } from '../../src/jobs/queue.ts';
 import { runUntilEmpty } from '../../src/jobs/worker.ts';
 import { createFakeProvider, type FakeProvider } from '../../src/providers/fake/index.ts';
-import { createUpdateReceiptMetaHandler } from '../../src/worker/handlers/updateReceiptMeta.ts';
+import { UPLOAD_WAIT_MS, createUpdateReceiptMetaHandler } from '../../src/worker/handlers/updateReceiptMeta.ts';
 
 const T0 = new Date('2026-10-16T03:00:00.000Z'); // JST 2026-10-16
 const REG_NO = 'T9995784636321';
@@ -139,13 +139,41 @@ describe('update_receipt_meta', () => {
     assert.equal(puts().length, 0);
   });
 
-  test('証憑が未アップロードなら再試行。freee の一時的な失敗も再試行、4xx は needs_attention', async () => {
+  test('証憑が未アップロードなら回数を数えずに 10 分後へ延期し、上がったら送る', async () => {
     const a = await setup({ uploaded: false });
     review(a.id, 1);
     const j1 = enqueue(db, 'update_receipt_meta', a.id, { now: clock });
-    assert.deepEqual(await run(), { done: 0, failed: 1 });
-    assert.equal(getJob(db, j1)!.state, 'queued');
-    db.prepare('DELETE FROM jobs').run();
+    for (let i = 0; i < 8; i++) {
+      assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => new Date(clock.getTime() + i * UPLOAD_WAIT_MS) }), { done: 0, failed: 0 });
+    }
+    const j = getJob(db, j1)!;
+    assert.equal(j.state, 'queued');
+    assert.equal(j.attempts, 0);
+    assert.equal(j.run_after, new Date(clock.getTime() + 8 * UPLOAD_WAIT_MS).toISOString());
+    assert.match(j.last_error!, /^upload_pending/);
+    db.prepare(`UPDATE provider_uploads SET state = 'uploaded', remote_receipt_id = '1', uploaded_at = ? WHERE document_id = ?`).run(clock.toISOString(), a.id);
+    assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => new Date(clock.getTime() + 8 * UPLOAD_WAIT_MS) }), { done: 1, failed: 0 });
+    assert.equal(puts().length, 1);
+    assert.equal(status(a.id), 'confirmed');
+  });
+
+  test('未アップロードのまま meta_deadline_on（無ければ受領日 + 70 日）を過ぎたら needs_attention で終える', async () => {
+    const a = await setup({ uploaded: false });
+    db.prepare('UPDATE provider_uploads SET meta_deadline_on = NULL WHERE document_id = ?').run(a.id);
+    review(a.id, 1);
+    const j1 = enqueue(db, 'update_receipt_meta', a.id, { now: clock });
+    clock = new Date('2026-12-25T03:00:00.000Z'); // 受領日 10/16 + 70 日 = 12/25 の当日はまだ待つ
+    db.prepare('UPDATE jobs SET run_after = ?').run(clock.toISOString());
+    assert.deepEqual(await run(), { done: 0, failed: 0 });
+    clock = new Date('2026-12-26T03:00:00.000Z');
+    db.prepare('UPDATE jobs SET run_after = ?').run(clock.toISOString());
+    assert.deepEqual(await run(), { done: 1, failed: 0 });
+    assert.equal(getJob(db, j1)!.state, 'done');
+    assert.equal(status(a.id), 'needs_attention');
+    assert.equal(puts().length, 0);
+  });
+
+  test('freee の一時的な失敗は再試行、4xx は needs_attention', async () => {
 
     const b = await setup();
     review(b.id, 1);

@@ -1,20 +1,23 @@
 // update_receipt_meta ジョブ（docs/mvp-plan.md T2-12、legal.md R11）。確定した日付・金額・取引先を freee の証憑に入れる。
 // - ref_id は document_id。確定（reviews の最新の版）が approve のときだけ PUT /receipts/{id} を送る。
 //   送るもの: 発行元（reviews.vendor）・発行日（txn_date）・金額（amount）・登録番号・qualified_invoice。
-//   reviews に invoice_reg_no / qualified_invoice の列があればそれを使い、無ければ最新の extractions の登録番号（検証済み）を使う。
+//   登録番号は reviews.invoice_reg_no（0003）を使い、null なら最新の extractions の登録番号（検証済み）を使う。
 //   qualified_invoice は登録番号があれば qualified、無ければ unselected（不明のまま。not_qualified とは言い切らない）。
 // - 版が変わるたびに再 PUT する（freee に履歴が残る [FR-EBOOK]）。送った版は監査ログ（receipt.meta_updated）に残し、
 //   同じ版の 2 回目は送らない。
 // - provider_uploads.meta_deadline_on（保存から 70 日）を過ぎていれば PUT せず needs_attention: meta_deadline_passed。
-// - 証憑がまだ上がっていなければ例外（再試行）。Provider の失敗は例外で再試行に回し、自動では直らない失敗と最後の試行は
-//   needs_attention にする（uploadReceipt と同じ）。
+// - 証憑がまだ上がっていなければ失敗ではなく 10 分後へ延期する（回数を数えない）。上限は meta_deadline_on
+//   （まだ無ければ受領日 + 70 日）で、過ぎたら needs_attention: meta_deadline_passed にして終える。
+// - Provider の失敗は例外で再試行に回し、自動では直らない失敗と最後の試行は needs_attention にする。
 import { describeError, markNeedsAttention } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
-import { todayInTokyo } from '../../calendar/businessDays.ts';
+import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
-import type { Handler } from '../../jobs/worker.ts';
+import { DeferJob, type Handler } from '../../jobs/worker.ts';
 import { ProviderError, type Provider, type ReceiptMeta } from '../../providers/types.ts';
-import { PROVIDER } from './uploadReceipt.ts';
+import { META_DEADLINE_DAYS, PROVIDER } from './uploadReceipt.ts';
+
+export const UPLOAD_WAIT_MS = 10 * 60 * 1000;
 
 export type UpdateReceiptMetaDeps = { provider: Pick<Provider, 'updateReceiptMeta'> };
 
@@ -26,16 +29,12 @@ type ReviewRow = {
   amount: number | null;
   vendor: string | null;
   decision: string;
-  invoice_reg_no?: string | null;
-  qualified_invoice?: string | number | boolean | null;
+  invoice_reg_no: string | null;
+  qualified_invoice: string | number | boolean | null;
 };
 
 const REG_NO = /^T\d{13}$/;
 const QUALIFIED = new Set(['qualified', 'not_qualified', 'unselected']);
-
-function columns(db: Db, table: string): Set<string> {
-  return new Set((db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as { name: string }[]).map((r) => r.name));
-}
 
 function lastSentVersion(db: Db, documentId: string): number | null {
   const r = db
@@ -75,11 +74,12 @@ export function createUpdateReceiptMetaHandler(getDeps: () => UpdateReceiptMetaD
     const now = ctx.now();
     if (!job.ref_id) throw new Error('update_receipt_meta に document_id が無い');
     const documentId = job.ref_id;
-    if (!db.prepare('SELECT 1 FROM documents WHERE id = ?').get(documentId)) throw new Error(`document ${documentId} が無い`);
+    const doc = db.prepare('SELECT received_on FROM documents WHERE id = ?').get(documentId) as { received_on: string } | undefined;
+    if (!doc) throw new Error(`document ${documentId} が無い`);
 
-    const extra = columns(db, 'reviews');
-    const cols = ['id', 'version', 'txn_date', 'amount', 'vendor', 'decision', ...['invoice_reg_no', 'qualified_invoice'].filter((c) => extra.has(c))];
-    const review = db.prepare(`SELECT ${cols.join(', ')} FROM reviews WHERE document_id = ? ORDER BY version DESC LIMIT 1`).get(documentId) as ReviewRow | undefined;
+    const review = db
+      .prepare(`SELECT id, version, txn_date, amount, vendor, decision, invoice_reg_no, qualified_invoice FROM reviews WHERE document_id = ? ORDER BY version DESC LIMIT 1`)
+      .get(documentId) as ReviewRow | undefined;
     if (!review) throw new Error(`document ${documentId} に確定（reviews）が無い`);
     if (review.decision !== 'approve') {
       appendAudit(db, { actor: 'worker', action: 'receipt.meta_skipped', entity: 'document', entityId: documentId, payload: { review_version: review.version, decision: review.decision } }, now);
@@ -90,12 +90,14 @@ export function createUpdateReceiptMetaHandler(getDeps: () => UpdateReceiptMetaD
     const up = db.prepare('SELECT id, state, remote_receipt_id, meta_deadline_on, meta_state FROM provider_uploads WHERE document_id = ? AND provider = ?').get(documentId, PROVIDER) as
       | UploadRow
       | undefined;
-    if (!up || up.state !== 'uploaded' || !up.remote_receipt_id) throw new Error(`document ${documentId} の証憑がまだ freee に上がっていない`);
-
     const today = todayInTokyo(now);
-    if (up.meta_deadline_on && today > up.meta_deadline_on) {
-      markNeedsAttention(db, documentId, 'meta_deadline_passed', { meta_deadline_on: up.meta_deadline_on, review_version: review.version }, { now });
+    const deadline = up?.meta_deadline_on ?? addDays(doc.received_on, META_DEADLINE_DAYS);
+    if (today > deadline) {
+      markNeedsAttention(db, documentId, 'meta_deadline_passed', { meta_deadline_on: deadline, review_version: review.version }, { now });
       return;
+    }
+    if (!up || up.state !== 'uploaded' || !up.remote_receipt_id) {
+      throw new DeferJob(new Date(now.getTime() + UPLOAD_WAIT_MS), `upload_pending: document ${documentId} の証憑がまだ freee に上がっていない`);
     }
 
     const meta = metaFromReview(db, documentId, review);
