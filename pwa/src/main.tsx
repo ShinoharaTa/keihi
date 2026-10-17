@@ -1,17 +1,20 @@
-// PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13）。画面は 撮影 / 送信待ち / 送信済み の 3 つ（下のタブで切り替え）。
+// PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13、mvp-plan.md T2-10・T2-11）。画面は 撮影 / 確認 / 送信待ち / 送信済み の 4 つ（下のタブで切り替え）。
+// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。
 // 送信待ちは開いたとき・オンラインに戻ったとき・画面に戻ったとき・追加したときに再送する（iOS は Background Sync が無いため）。
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
-import { sendIngest } from './api.ts';
+import { getJson, sendIngest } from './api.ts';
 import { Capture } from './capture/Capture.tsx';
 import { todayLocal } from './capture/form.ts';
 import { SentList } from './list/SentList.tsx';
 import { idbStore } from './queue/idb.ts';
 import { QueueList } from './queue/QueueList.tsx';
+import { ReviewList } from './review/ReviewList.tsx';
 import { createFlusher, type FlushReport, type QueueItem } from './queue/queue.ts';
 import './style.css';
 
-type Tab = 'capture' | 'queue' | 'sent';
+type Tab = 'capture' | 'review' | 'queue' | 'sent';
+type Counts = { review: number; attention: number; urgent: number };
 
 // 共有シートから戻ったときの知らせ（?share=...）。読んだら URL から消す。
 function shareNotice(): { text: string; toQueue: boolean } | null {
@@ -47,8 +50,14 @@ function App() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [msg, setMsg] = useState(notice?.text ?? '');
   const [sentKey, setSentKey] = useState(0);
+  const [counts, setCounts] = useState<Counts | null>(null);
   const today = todayLocal(new Date());
   const flusher = useMemo(() => createFlusher(idbStore, sendIngest), []);
+
+  const reloadCounts = useCallback(async () => {
+    const r = await getJson<Counts>('/api/documents/counts');
+    if (r.ok) setCounts(r.data);
+  }, []);
 
   const reload = useCallback(async () => {
     const all = await idbStore.list();
@@ -61,11 +70,12 @@ function App() {
       const t = reportText(r);
       if (t) setMsg(t);
       if (r.sent.length) setSentKey((k) => k + 1);
+      void reloadCounts();
     } catch {
       setMsg('送信待ちを読めませんでした。');
     }
     await reload();
-  }, [flusher, reload]);
+  }, [flusher, reload, reloadCounts]);
 
   useEffect(() => {
     void flush();
@@ -101,12 +111,16 @@ function App() {
       )}
       <main>
         {tab === 'capture' && <Capture today={today} onQueue={save} />}
+        {tab === 'review' && <ReviewList onChanged={() => void reloadCounts()} />}
         {tab === 'queue' && <QueueList items={items} today={today} onSave={save} onRemove={remove} onRetry={() => void flush()} />}
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
       </main>
       <nav class="tabs">
         <button type="button" class={tab === 'capture' ? 'tab-on' : ''} onClick={() => setTab('capture')}>
           撮影
+        </button>
+        <button type="button" class={tab === 'review' ? 'tab-on' : ''} onClick={() => setTab('review')}>
+          確認{counts && counts.review + counts.attention ? `（${counts.review + counts.attention}）` : ''}
         </button>
         <button type="button" class={tab === 'queue' ? 'tab-on' : ''} onClick={() => setTab('queue')}>
           送信待ち{waiting ? `（${waiting}）` : ''}
