@@ -11,3 +11,4 @@ node_modules/
 !deploy/*.example.env
 poc/
 !src/storage/
+.claude/
