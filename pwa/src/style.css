@@ -165,7 +165,7 @@ button:disabled {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 4px;
   padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
   background: var(--bg);
@@ -224,4 +224,137 @@ button:disabled {
 }
 .status dd {
   margin: 0;
+}
+/* 確認カード（T2-10）。縦 1 画面: 上にサムネイルと金額、下（親指の範囲）に確定。 */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 150px;
+}
+.card-top {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.card-head {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.thumb {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  width: 88px;
+  height: 88px;
+  overflow: hidden;
+  flex: none;
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-zoom {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  background: var(--bg);
+  border: 0;
+  border-radius: 0;
+}
+.thumb-zoom img {
+  object-fit: contain;
+}
+.amount {
+  font: inherit;
+  font-size: 28px;
+  font-weight: 700;
+  text-align: left;
+  padding: 0;
+  min-height: 48px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+}
+.amount-input {
+  font-size: 24px;
+}
+.urgent {
+  color: var(--danger);
+}
+.row {
+  display: grid;
+  grid-template-columns: 4.5em 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.row-value {
+  min-height: 48px;
+  font: inherit;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  word-break: break-all;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chip {
+  min-height: 48px;
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+}
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 80dvh;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+}
+.sheet-list {
+  overflow-y: auto;
+  gap: 6px;
+}
+.decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.row-btns-even {
+  grid-template-columns: 1fr 1fr;
+}
+.item-btn {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+}
+.item-warn {
+  border-color: var(--danger);
 }

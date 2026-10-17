@@ -23,3 +23,18 @@ export async function getJson<T>(url: string): Promise<{ ok: true; data: T } | {
     return { ok: false, status: 0 };
   }
 }
+
+export async function postJson(url: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    return { status: res.status, body: await jsonOrNull(res) };
+  } catch {
+    return { status: 0, body: null };
+  }
+}
