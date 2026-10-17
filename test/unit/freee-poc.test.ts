@@ -431,4 +431,15 @@ describe('freee-auth', () => {
       assert.equal(await new TokenStore(tokenFile(dir, args.length ? 'prod' : 'poc')).read(), null);
     }
   });
+
+  test('poc_company_id が未設定でも、prod_company_id と同じ事業所はテスト事業所用に保存しない', async () => {
+    const dir = await makeConfigDir({ token: null });
+    await writeFile(path.join(dir, 'config.toml'), `[freee]\nprod_company_id = ${PROD}\n`);
+    const f = (async () =>
+      new Response(JSON.stringify({ access_token: 'at-TEST-y-0123456789', refresh_token: 'rt-TEST-y-0123456789', expires_in: 21600, company_id: PROD }))) as typeof fetch;
+    const s = sink();
+    assert.equal(await authMain(['--config-dir', dir], { fetch: f, readCode: async () => 'c0de-TEST', ...s }), 1);
+    assert.equal(await new TokenStore(tokenFile(dir, 'poc')).read(), null);
+    assert.match(s.lines.join('\n'), /prod_company_id と同じ/);
+  });
 });

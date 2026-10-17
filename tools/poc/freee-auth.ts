@@ -6,7 +6,8 @@
 //   node tools/poc/freee-auth.ts           # テスト事業所（freee-token-poc.json）
 //   node tools/poc/freee-auth.ts --prod    # 本番事業所（freee-token-prod.json。F15 の読み取り用）
 //
-// - 応答の company_id が config.toml の poc_company_id と違えば保存しない（未設定なら保存して、設定する値を表示する）。
+// - 応答の company_id が config.toml の poc_company_id と違えば保存しない（未設定なら保存して、設定する値を表示する。
+//   ただし prod_company_id と同じなら保存しない）。
 // - --prod では、応答の company_id が poc_company_id と同じなら保存しない。prod_company_id が設定済みで違っても保存しない。
 // - 認可コード・トークン・client_secret は表示しない。
 import { createInterface } from 'node:readline/promises';
@@ -67,6 +68,10 @@ export async function main(argv: string[], deps: AuthDeps = {}): Promise<number>
     if (cid === null) throw new Error('応答に company_id が無い（prompt=select_company で事業所を選んだか確かめる）。保存しない');
     if (target === 'poc' && config.pocCompanyId !== null && cid !== config.pocCompanyId) {
       throw new Error(`選んだ事業所（${cid}）が poc_company_id（${config.pocCompanyId}）と違う。保存しない`);
+    }
+    // poc_company_id が未設定でも、本番事業所のトークンをテスト事業所用として保存しない。
+    if (target === 'poc' && config.pocCompanyId === null && cid === config.prodCompanyId) {
+      throw new Error(`選んだ事業所（${cid}）は prod_company_id と同じ。テスト事業所用としては保存しない`);
     }
     if (target === 'prod' && cid === config.pocCompanyId) throw new Error(`選んだ事業所（${cid}）はテスト事業所。--prod では保存しない`);
     if (target === 'prod' && config.prodCompanyId !== null && cid !== config.prodCompanyId) {
