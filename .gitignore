@@ -12,3 +12,4 @@ node_modules/
 poc/
 !src/storage/
 .claude/
+pwa/dist/

@@ -18,6 +18,7 @@
     "update:holidays": "node tools/update-holidays.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.5",
     "hono": "^4.13.13",
     "pdf-lib": "^1.17.1",
     "sharp": "^0.35.5",
@@ -25,6 +26,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "typescript": "^5.9.3"
+    "preact": "^11.0.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4"
   }
 }

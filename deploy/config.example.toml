@@ -22,3 +22,13 @@ paid_tier_confirmed = false
 
 [deadline]
 # count_from = "receipt_day"    # "receipt_day"（受領日が営業日ならその日を 1 日目）/ "next_day"（翌日から数える）。税理士確認 #3 で変える前提
+
+[web]
+# port = 8795                   # 127.0.0.1 にだけバインドする（バインド先は設定できない）
+# Tailscale-User-Login の許可リスト。空なら /healthz 以外はすべて 403。
+# allowed_users = ["you@example.com"]
+# Host の許可リスト（127.0.0.1:<port> は常に許可）。tailscale serve のホスト名を足す（docs/ops/serve.md）。
+# allowed_hosts = ["<machine>.<tailnet>.ts.net:8444"]
+
+[mcp]
+# port = 8796                   # M7（keihi MCP）用の予約。M7 までは開かない
