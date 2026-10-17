@@ -211,6 +211,30 @@ describe('DB からの読み出し', () => {
     assert.throws(() => reviewForDeal(latestApprovedReview(db, doc2)!, [], resolveTax), DealBuildError);
   });
 
+  // 確定の tax_id（人の選択）と内訳の区分（抽出の値）の食い違い。
+  const r10 = { category: '10', amount_incl_tax: 1100, tax: 100 };
+  const r8 = { category: '8r', amount_incl_tax: 540, tax: 40 };
+  const overrideCases: { name: string; taxId: string | null; taxByRate: (typeof r10)[]; want: { taxCode: number; amount: number }[] | RegExp }[] = [
+    { name: '1 行・一致', taxId: 'taxable_10', taxByRate: [r10], want: [{ taxCode: 1, amount: 1100 }] },
+    { name: '1 行・tax_id が 8%（人の上書き）', taxId: 'taxable_8_reduced', taxByRate: [r10], want: [{ taxCode: 2, amount: 1100 }] },
+    { name: '1 行・tax_id が対象外', taxId: 'out_of_scope', taxByRate: [r10], want: [{ taxCode: 3, amount: 1100 }] },
+    { name: '1 行・tax_id が税区分コード', taxId: '4', taxByRate: [r10], want: [{ taxCode: 4, amount: 1100 }] },
+    { name: '1 行・tax_id が無い', taxId: null, taxByRate: [r10], want: [{ taxCode: 1, amount: 1100 }] },
+    { name: '1 行・tax_id が不正', taxId: 'xx', taxByRate: [r10], want: /税区分が不正/ },
+    { name: '2 行・tax_id がどちらかの区分', taxId: 'taxable_8_reduced', taxByRate: [r10, r8], want: [{ taxCode: 1, amount: 1100 }, { taxCode: 2, amount: 540 }] },
+    { name: '2 行・tax_id がどの区分とも合わない', taxId: 'out_of_scope', taxByRate: [r10, r8], want: /内訳（10, 8r）のどれとも合わない/ },
+  ];
+  for (const c of overrideCases) {
+    test(`tax_id と内訳: ${c.name}`, () => {
+      const doc = addDocument(db);
+      const amount = c.taxByRate.reduce((s, x) => s + x.amount_incl_tax, 0);
+      addReview(db, doc, { amount, taxId: c.taxId, taxByRate: c.taxByRate });
+      const row = latestApprovedReview(db, doc)!;
+      if (c.want instanceof RegExp) assert.throws(() => reviewForDeal(row, [], resolveTax), (e: unknown) => e instanceof DealBuildError && (c.want as RegExp).test(e.message));
+      else assert.deepEqual(reviewForDeal(row, [], resolveTax).taxLines, c.want);
+    });
+  }
+
   test('事業主貸は同期済みのマスタから名前で引く', () => {
     assert.throws(() => resolveBuildOptions(db, 'freee', resolveTax, '2026-10-15'), DealBuildError);
     applyMasterItems(db, 'freee', 'account', [{ remoteId: '104', name: '事業主貸', data: {} }], '2026-10-16T00:00:00.000Z');
