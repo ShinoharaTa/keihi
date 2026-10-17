@@ -7,10 +7,11 @@
 |---|---|
 | [legal.md](legal.md) | 電帳法・青色申告・申告経路・インボイス（出典 URL、税理士確認事項、実装要件 R1〜R22） |
 | [architecture.md](architecture.md) | MF/freee API 比較、スコープ案、パイプライン、保存・バックアップ、未決 Q1〜Q9 |
+| [mcp.md](mcp.md) | keihi MCP サーバー設計（127.0.0.1:8796、ツール一覧、提案ライフサイクル、freee プロキシ範囲、未決 K1〜K14） |
 | [freee-codex.md](freee-codex.md) | freee スタンダードへの切り替え推薦と freee 版 PoC（F1〜F16）、Codex（ChatGPT 認証）を `codex exec` で自然言語の受け口にする設計、未決 Y1〜Y14 |
 | [transactions.md](transactions.md) | MF に自動取得した入出金明細の API/MCP 対応、自然言語での振り分け（U10）、明細と領収書の照合、M6/M7 案、未決 P1〜P10 |
 | [plans-comparison.md](plans-comparison.md) | MF / freee 個人プラン別の API・証憑上限・電帳法対応・料金改定・解約後の保持、移行比較（推薦: MF 継続） |
-| [mvp-plan.md](mvp-plan.md) | MVP のマイルストーン M0〜M5・タスク T0-1〜T5-5、未決と決める時期の対応表、置いた判断 D1〜D13、PoC 結果による分岐 |
+| [mvp-plan.md](mvp-plan.md) | **v2（freee + MCP 前提）**。MVP のマイルストーンとタスク、未決と決める時期の対応表、置いた判断 D1〜D13、PoC 結果による分岐 |
 | [a2ui-review-ui.md](a2ui-review-ui.md) | A2UI の現状、確認カード + Gemini 質問カードの設計、対話の状態管理・費用・監査ログ・プライバシー、未決 U1〜U9 |
 | [classification-ocr.md](classification-ocr.md) | Kev の裏取り、科目分類方式、Gemini のデータ取扱い、ローカル OCR 比較 |
 
