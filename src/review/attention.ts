@@ -4,12 +4,14 @@
 // - 解消は 2 通り:
 //   retry   … 理由に応じたジョブを積み直し、documents.status を戻す（確定済みならその決定の状態、抽出済みなら needs_review、未抽出なら received）。
 //             upload 系 → upload_receipt、extract 系 → extract、meta 系 → update_receipt_meta、deal 系 → send_deal。
+//             deal 系は deals 行も requeueDeal で queued に戻す。freee に取引がある（remote_deal_id がある）行は戻せないので 409（not_retryable）。
 //             同じ種類・同じ文書の queued のジョブがあれば積まずに run_after を今にする（running なら何もしない）。
 //   dismiss … 人が freee 側などで対応したことを記録する（document.attention_dismissed）。状態は needs_attention のまま。
 //             送信の要対応なら deals.attention_resolved_at も入れる（deal.attention_resolved。照合でも上書きしない）。
 // - どちらも監査ログに残す（同じトランザクション）。
 import { appendAudit } from '../audit.ts';
 import { tx, type Db } from '../db/index.ts';
+import { requeueDeal } from '../deals/stateMachine.ts';
 import { enqueue, type JobKind } from '../jobs/queue.ts';
 import { STATUS_OF, type Decision } from './confirm.ts';
 import { PROVIDER } from './fields.ts';
@@ -147,10 +149,12 @@ function requeueJob(db: Db, kind: JobKind, documentId: string, now: Date): numbe
 export class AttentionError extends Error {
   readonly status: 404 | 409;
   readonly reason: string;
-  constructor(status: 404 | 409, reason: string) {
+  readonly hint: string | null; // 人向けの理由（あれば応答に出す）
+  constructor(status: 404 | 409, reason: string, hint: string | null = null) {
     super(reason);
     this.status = status;
     this.reason = reason;
+    this.hint = hint;
   }
 }
 
@@ -181,8 +185,11 @@ export function resolveAttention(db: Db, documentId: string, input: ResolveInput
 
     if (!a.kind) throw new AttentionError(409, 'not_retryable');
     const kind = JOB_OF[a.kind];
-    // TODO: deals 行を needs_attention から戻す requeueDeal(db, documentId)（src/deals/stateMachine.ts、別担当）ができたら、
-    // deal 系はそれを呼ぶ。いまは send_deal を積むだけ。
+    if (a.kind === 'deal') {
+      const remote = db.prepare(`SELECT remote_deal_id FROM deals WHERE document_id = ? AND state = 'needs_attention' AND remote_deal_id IS NOT NULL LIMIT 1`).get(a.document_id);
+      if (remote) throw new AttentionError(409, 'not_retryable', 'freee に取引がある。照合で確認する');
+      requeueDeal(db, a.document_id, { reason: 'user_retry', now: input.now });
+    }
     const jobId = requeueJob(db, kind, a.document_id, input.now);
     const next = restoredStatus(db, a.document_id);
     db.prepare('UPDATE documents SET status = ? WHERE id = ?').run(next, a.document_id);

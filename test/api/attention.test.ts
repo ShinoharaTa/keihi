@@ -159,6 +159,25 @@ describe('POST /api/documents/:id/attention/resolve', () => {
     assert.equal(statusOf(doc), 'approved');
     const jobs = db.prepare(`SELECT run_after FROM jobs WHERE ref_id = ?`).all(doc).map((r) => ({ ...r }));
     assert.deepEqual(jobs, [{ run_after: T0.toISOString() }]);
+    // deals 行も requeueDeal で queued に戻す（監査に deal.queued）
+    assert.equal((db.prepare('SELECT state FROM deals WHERE id = ?').get(id) as { state: string }).state, 'queued');
+    const q = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'deal.queued' AND entity_id = ? ORDER BY seq DESC LIMIT 1`).get(id) as { payload_json: string };
+    assert.equal(JSON.parse(q.payload_json).reason, 'user_retry');
+    assert.equal(verifyAudit(db).ok, true);
+  });
+
+  test('retry: freee に取引がある送信の要対応は 409 not_retryable と理由。何も変えない', async () => {
+    const id = attentionDeal('amount_changed');
+    db.prepare(`UPDATE deals SET remote_deal_id = '21' WHERE id = ?`).run(id);
+    const doc = docOf(id);
+    const r = await post(`/api/attention/${id}/resolve`);
+    assert.equal(r.status, 409);
+    assert.deepEqual(await r.json(), { error: 'not_retryable', hint: 'freee に取引がある。照合で確認する' });
+    assert.equal((await resolveDoc(doc)).status, 409);
+    assert.equal((db.prepare('SELECT state FROM deals WHERE id = ?').get(id) as { state: string }).state, 'needs_attention');
+    assert.equal(statusOf(doc), 'needs_attention');
+    assert.deepEqual(jobsOf(doc), []);
+    assert.equal((db.prepare(`SELECT count(*) n FROM audit_log WHERE action = 'document.attention_retried'`).get() as { n: number }).n, 0);
   });
 
   test('dismiss: 状態は needs_attention のまま。送信の要対応なら deals.attention_resolved_at も入れる。2 回目は 409、無い ID は 404', async () => {

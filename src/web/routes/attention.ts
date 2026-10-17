@@ -3,7 +3,8 @@
 //        needs_attention の文書のうち、人がまだ dismiss していないもの。古い順。Attention は
 //        {document_id, status, received_on, deadline_on, source, reason, kind, document_reason, deal_reason, deal_id, attention_at, detail, dismissed, actions}
 //   POST /api/documents/:id/attention/resolve   body {action?: 'retry' | 'dismiss'（既定 retry）, note?: string（500 字まで）}
-//        → 200 {document_id, action, reason, status, job, resolved_at} / 400 / 404 / 409（要対応でない・dismiss 済み・自動で直せない理由の retry）
+//        → 200 {document_id, action, reason, status, job, resolved_at} / 400 / 404 / 409 {error, hint?}（要対応でない・dismiss 済み・自動で直せない理由の retry・
+//          freee に取引がある送信の要対応の retry）
 //        retry は理由に応じたジョブを積み直して状態を戻す。dismiss は対応済みの記録だけ（状態は needs_attention のまま）。
 //   POST /api/attention/:id/resolve   （互換。:id は deals.id）deals 行の document_id で上と同じ処理。応答に id（deals.id）も入れる。
 //   POST /api/documents/:id/paper     body {status: 'discarded'} → 200 {id, paper_status: 'discarded'} / 404 / 409 {paper_status, reasons}
@@ -53,7 +54,7 @@ export function attentionRoutes(deps: Pick<AppDeps, 'db' | 'now' | 'triggerWorke
       if (res.action === 'retry') deps.triggerWorker();
       return c.json({ ...extra, ...res });
     } catch (e) {
-      if (e instanceof AttentionError) return c.json({ error: e.reason }, e.status);
+      if (e instanceof AttentionError) return c.json(e.hint ? { error: e.reason, hint: e.hint } : { error: e.reason }, e.status);
       throw e;
     }
   };
