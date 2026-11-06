@@ -192,6 +192,22 @@ describe('[bank]', () => {
   });
 });
 
+describe('[cashflow]', () => {
+  test('既定は予定外の目安 6 か月・残す額 3 か月。指定を読み、不正な値・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).cashflow, { unplannedLookbackMonths: 6, reserveMonths: 3 });
+    assert.deepEqual(
+      loadConfig({ configDir: dir2('[cashflow]\nunplanned_lookback_months = 12\nreserve_months = 1\n'), dataDir: '/data/keihi' }).cashflow,
+      { unplannedLookbackMonths: 12, reserveMonths: 1 },
+    );
+    for (const bad of [
+      '[cashflow]\nunplanned_lookback_months = 0',
+      '[cashflow]\nreserve_months = 0',
+      '[cashflow]\nreserve_months = "3"',
+      '[cashflow]\nlookback_months = 6',
+    ]) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  });
+});
+
 describe('[backup] / [retention]', () => {
   test('既定値（drill_dir は <data_dir>/drill）', () => {
     const c = loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' });

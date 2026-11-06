@@ -7,10 +7,14 @@
 //   POST /api/scheduled_items/:id/activate     → 200 ScheduledItem（active = 1 に戻す。既に有効ならそのまま）/ 404
 //   GET  /api/scheduled_items/upcoming?days=30 → 200 {from, to, items: [ScheduledItem & {due_date}]}
 //        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
+//   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
+//        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow（無ければ既定値）。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
 import { ScheduleError, activateItem, createItem, deactivateItem, listItems, parseBody, updateItem, upcoming, type ItemInput } from '../../cashflow/schedule.ts';
+import { DEFAULT_FORECAST_MONTHS, FORECAST_MAX_MONTHS, buildForecast } from '../../cashflow/forecast.ts';
+import type { Config } from '../../config.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -28,7 +32,10 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
-export function cashflowRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
+// config は AppDeps の Pick に cashflow が無いので、任意のキーとして受ける（main.ts は Config をそのまま渡す）。
+export type CashflowRouteDeps = Pick<AppDeps, 'db' | 'now'> & { config?: Partial<Pick<Config, 'cashflow'>> & Record<string, unknown> };
+
+export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
   const by = (c: Context) => ({ actor: 'user', user: c.req.header(USER_HEADER) ?? null });
@@ -84,6 +91,23 @@ export function cashflowRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
     } catch (e) {
       return fail(c, e);
     }
+  });
+
+  // ---- 資金繰り表（T303） ----
+
+  r.get('/cashflow', (c) => {
+    const q = c.req.query('months');
+    const months = q === undefined ? DEFAULT_FORECAST_MONTHS : /^\d+$/.test(q) ? Number(q) : NaN;
+    if (!Number.isSafeInteger(months) || months < 1 || months > FORECAST_MAX_MONTHS) return c.json({ error: 'invalid_months' }, 400);
+    const cf = deps.config?.cashflow;
+    return c.json(
+      buildForecast(deps.db, {
+        today: todayInTokyo(now()),
+        months,
+        unplannedLookbackMonths: cf?.unplannedLookbackMonths,
+        reserveMonths: cf?.reserveMonths,
+      }),
+    );
   });
 
   return r;

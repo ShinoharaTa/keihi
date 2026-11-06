@@ -44,6 +44,9 @@ export const DEFAULT_BACKFILL_FROM = '2025-01-01';
 export const DEFAULT_DEDUP_DATE_WINDOW_DAYS = 0;
 export const DEFAULT_TRANSFER_WINDOW_DAYS = 3;
 export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
+// [cashflow]（docs/mvp-plan-v3.md T303、V11 の初期案）。予定外の支出の目安は直近 6 か月の中央値、残す額は今後 3 か月分の予定支出。
+export const DEFAULT_UNPLANNED_LOOKBACK_MONTHS = 6;
+export const DEFAULT_RESERVE_MONTHS = 3;
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -104,6 +107,9 @@ export type Config = {
   // dedupDateWindowDays: API と CSV の重複を照合する日付の幅。transferWindowDays: 振替の入出金の日付差の上限。
   // matchDateWindowDays: 領収書の日付から明細の日付までの幅。
   bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number };
+  // 資金繰り表（src/cashflow/forecast.ts）。unplannedLookbackMonths: 予定外の収支の目安を出すのに見る月数。
+  // reserveMonths: 「月末に残す額」に積む予定支出の月数。
+  cashflow: { unplannedLookbackMonths: number; reserveMonths: number };
   secrets: Secrets;
 };
 
@@ -148,6 +154,7 @@ const KNOWN: Record<string, string[]> = {
   worker: ['linger_ms', 'reauth_wait_days'],
   reconcile: ['verified_lookback_days', 'max_list_pages'],
   bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days'],
+  cashflow: ['unplanned_lookback_months', 'reserve_months'],
 };
 
 function readConfigToml(file: string): Table {
@@ -335,6 +342,10 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       dedupDateWindowDays: optNonNegativeInt(t, 'bank', 'dedup_date_window_days') ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
       transferWindowDays: optNonNegativeInt(t, 'bank', 'transfer_window_days') ?? DEFAULT_TRANSFER_WINDOW_DAYS,
       matchDateWindowDays: optNonNegativeInt(t, 'bank', 'match_date_window_days') ?? DEFAULT_MATCH_DATE_WINDOW_DAYS,
+    },
+    cashflow: {
+      unplannedLookbackMonths: optPositiveInt(t, 'cashflow', 'unplanned_lookback_months') ?? DEFAULT_UNPLANNED_LOOKBACK_MONTHS,
+      reserveMonths: optPositiveInt(t, 'cashflow', 'reserve_months') ?? DEFAULT_RESERVE_MONTHS,
     },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
