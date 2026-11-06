@@ -106,6 +106,21 @@ const cases: Case[] = [
     want: [[0, 1, 'charge']],
   },
   {
+    name: 'カードの出金と銀行の入金 → 組まない',
+    txns: [['card', '2026-10-01', 5000, 'expense'], ['B', '2026-10-01', 5000, 'income']],
+    want: [],
+  },
+  {
+    name: 'カードの返金（入金）と銀行の出金 → 組まない',
+    txns: [['A', '2026-10-01', 5000, 'expense'], ['card', '2026-10-01', 5000, 'income']],
+    want: [],
+  },
+  {
+    name: 'カードの返金は銀行の出金の候補に数えない（銀行同士が 1 対 1 になる）',
+    txns: [['A', '2026-10-01', 5000, 'expense'], ['card', '2026-10-01', 5000, 'income'], ['B', '2026-10-01', 5000, 'income']],
+    want: [[0, 2, 'transfer']],
+  },
+  {
     name: 'カードの引き落とし → card_settlement（in は NULL）',
     txns: [['A', '2026-10-27', 48210, 'expense', 'ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ']],
     want: [[0, null, 'card_settlement']],
@@ -129,7 +144,7 @@ describe('detectTransfers（表駆動）', () => {
       try {
         updateAccountSettings(db, acc.card, { cardSettlementAccountId: acc.A, cardSettlementPattern: 'ﾐﾂｲｽﾐﾄﾓ' }, now);
         const ids = addTxns(db, acc, c.txns);
-        const made = detectTransfers(db, { windowDays: c.window ?? 3, now });
+        const made = detectTransfers(db, { windowDays: c.window ?? 3, now: new Date(now) });
         assert.deepEqual(
           made.map((l) => [l.out_txn_id, l.in_txn_id, l.kind, l.source, l.state]),
           c.want.map(([o, i, k]) => [ids[o], i === null ? null : ids[i], k, 'auto', 'active']),
@@ -146,8 +161,8 @@ describe('detectTransfers（作り直さない）', () => {
     const { db, acc } = setup();
     try {
       addTxns(db, acc, [['A', '2026-10-01', 30000, 'expense'], ['B', '2026-10-01', 30000, 'income']]);
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 1);
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 0);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 1);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 0);
       assert.equal(count(db, 'transfer_links'), 1);
     } finally {
       db.close();
@@ -158,9 +173,9 @@ describe('detectTransfers（作り直さない）', () => {
     const { db, acc } = setup();
     try {
       addTxns(db, acc, [['A', '2026-10-01', 30000, 'expense'], ['B', '2026-10-01', 30000, 'income']]);
-      detectTransfers(db, { windowDays: 3, now });
+      detectTransfers(db, { windowDays: 3, now: new Date(now) });
       addTxns(db, acc, [['C', '2026-10-02', 30000, 'income']]);
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 0);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 0);
     } finally {
       db.close();
     }
@@ -170,11 +185,11 @@ describe('detectTransfers（作り直さない）', () => {
     const { db, acc } = setup();
     try {
       addTxns(db, acc, [['A', '2026-10-01', 30000, 'expense'], ['B', '2026-10-01', 30000, 'income']]);
-      const [l] = detectTransfers(db, { windowDays: 3, now });
+      const [l] = detectTransfers(db, { windowDays: 3, now: new Date(now) });
       const r = rejectTransfer(db, l!.id, 'user', new Date(now))!;
       assert.equal(r.state, 'rejected');
       assert.equal(r.source, 'human');
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 0);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 0);
       assert.equal(count(db, 'transfer_links'), 2);
       assert.deepEqual(listActiveTransfers(db), []);
       // 2 回外しても行は増えない。
@@ -193,10 +208,10 @@ describe('detectTransfers（作り直さない）', () => {
     try {
       updateAccountSettings(db, acc.card, { cardSettlementAccountId: acc.A, cardSettlementPattern: 'ﾐﾂｲｽﾐﾄﾓ' }, now);
       addTxns(db, acc, [['A', '2026-10-27', 48210, 'expense', 'ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ']]);
-      const [l] = detectTransfers(db, { windowDays: 3, now });
+      const [l] = detectTransfers(db, { windowDays: 3, now: new Date(now) });
       assert.equal(l!.in_txn_id, null);
       rejectTransfer(db, l!.id, 'user', new Date(now));
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 0);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 0);
     } finally {
       db.close();
     }
@@ -207,7 +222,7 @@ describe('detectTransfers（作り直さない）', () => {
     try {
       updateAccountSettings(db, acc.card, { cardSettlementAccountId: acc.A }, now);
       addTxns(db, acc, [['A', '2026-10-27', 48210, 'expense', 'ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ']]);
-      assert.equal(detectTransfers(db, { windowDays: 3, now }).length, 0);
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 0);
     } finally {
       db.close();
     }
@@ -231,7 +246,7 @@ describe('範囲・一覧・集計から除く集合', () => {
         ['A', '2026-10-31', 30000, 'expense'], ['B', '2026-11-01', 30000, 'income'],
         ['A', '2026-11-02', 7000, 'expense'], ['B', '2026-11-02', 7000, 'income'],
       ]);
-      const made = detectTransfers(db, { windowDays: 3, now, from: '2026-10-01', to: '2026-10-31' });
+      const made = detectTransfers(db, { windowDays: 3, now: new Date(now), from: '2026-10-01', to: '2026-10-31' });
       assert.deepEqual(made.map((l) => [l.out_txn_id, l.in_txn_id]), [[ids[0], ids[1]]]);
       assert.deepEqual(listActiveTransfers(db, { from: '2026-11-01', to: '2026-11-30' }), []);
       assert.equal(listActiveTransfers(db, { from: '2026-10-01', to: '2026-10-31' }).length, 1);
@@ -242,9 +257,49 @@ describe('範囲・一覧・集計から除く集合', () => {
     }
   });
 
+  test('範囲付きでも 1 対 1 の判定は範囲なしと同じ（範囲の外の出金が相手を取り合う）', () => {
+    // 範囲の最終日の出金 o1 と 2 日後の入金 i。i から見ると、範囲の 4 日後の出金 o2 も候補（窓 3 日）なので 1 対 1 ではない。
+    const data: T[] = [
+      ['A', '2026-10-31', 9000, 'expense'], ['B', '2026-11-02', 9000, 'income'], ['C', '2026-11-04', 9000, 'expense'],
+      ['A', '2026-10-10', 4000, 'expense'], ['B', '2026-10-12', 4000, 'income'],
+      ['A', '2026-09-28', 3000, 'expense'], ['B', '2026-10-01', 3000, 'income'],
+    ];
+    const run = (range: { from?: string; to?: string }) => {
+      const { db, acc } = setup();
+      try {
+        const ids = addTxns(db, acc, data);
+        return detectTransfers(db, { windowDays: 3, now: new Date(now), ...range }).map((l) => [ids.indexOf(l.out_txn_id), ids.indexOf(l.in_txn_id!)]);
+      } finally {
+        db.close();
+      }
+    };
+    const all = run({});
+    assert.deepEqual(all, [[5, 6], [3, 4]]);
+    // 出金が 10 月のものだけ: o1（10-31）は範囲なしでも組まないので、範囲付きでも組まない。
+    assert.deepEqual(run({ from: '2026-10-01', to: '2026-10-31' }), [[3, 4]]);
+  });
+
+  test('excludedFromCashflow: card_settlement は出金だけ、charge は両側', () => {
+    const { db, acc } = setup();
+    try {
+      updateAccountSettings(db, acc.card, { cardSettlementAccountId: acc.A, cardSettlementPattern: 'ﾐﾂｲｽﾐﾄﾓ' }, now);
+      const ids = addTxns(db, acc, [
+        ['A', '2026-10-27', 48210, 'expense', 'ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ'],
+        ['B', '2026-10-01', 5000, 'expense', 'PAYPAY'], ['paypay', '2026-10-01', 5000, 'income', 'チャージ'],
+        ['B', '2026-10-02', 800, 'expense', 'ｺﾝﾋﾞﾆ'],
+      ]);
+      assert.deepEqual(detectTransfers(db, { windowDays: 3, now: new Date(now) }).map((l) => l.kind).sort(), ['card_settlement', 'charge']);
+      assert.deepEqual(excludedFromCashflow(db), new Set([ids[0], ids[1], ids[2]]));
+    } finally {
+      db.close();
+    }
+  });
+
   test('matchesSettlementPattern は全角・半角を揃え、空のパターンには当たらない', () => {
     assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', 'ミツイスミトモ'), true);
+    assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', 'ﾐﾂｲ ｽﾐﾄﾓ'), true);
     assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', ''), false);
+    assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', '  '), false);
     assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', null), false);
   });
 });

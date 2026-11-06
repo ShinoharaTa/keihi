@@ -219,6 +219,88 @@ describe('dedupAndInsert（細部）', () => {
     }
   });
 
+  test('CSV が先・freee が後で統合 → freee_status・due_amount・balance・last_seen_at が入る', () => {
+    const { db, acc } = setup();
+    try {
+      const [c] = rows(acc, [['csv', 'c1', '2026-10-01', 500]]);
+      const r1 = dedupAndInsert(db, [{ ...c!, balance: null }], { dateWindowDays: 0, now });
+      const [f] = rows(acc, [['freee', 'f1', '2026-10-01', 500]]);
+      const r2 = dedupAndInsert(db, [{ ...f!, freeeStatus: 1, dueAmount: 500, balance: 12000 }], { dateWindowDays: 0, now: later });
+      assert.equal(r2.merged.length, 1);
+      const t = getBankTxn(db, r1.new[0]!.bankTxnId)!;
+      assert.deepEqual([t.freee_status, t.due_amount, t.balance, t.last_seen_at], [1, 500, 12000, later]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('freee が先・CSV が後で統合 → freee の値は消えず、残高も上書きしない', () => {
+    const { db, acc } = setup();
+    try {
+      const [f] = rows(acc, [['freee', 'f1', '2026-10-01', 500]]);
+      const r1 = dedupAndInsert(db, [{ ...f!, freeeStatus: 2, dueAmount: 0, balance: 12000 }], { dateWindowDays: 0, now });
+      const [c] = rows(acc, [['csv', 'c1', '2026-10-01', 500]]);
+      dedupAndInsert(db, [{ ...c!, freeeStatus: null, dueAmount: null, balance: 99999 }], { dateWindowDays: 0, now: later });
+      // 同じ CSV をもう一度（touch）でも消えない。
+      dedupAndInsert(db, [{ ...c!, freeeStatus: null, dueAmount: null }], { dateWindowDays: 0, now: later });
+      const t = getBankTxn(db, r1.new[0]!.bankTxnId)!;
+      assert.deepEqual([t.freee_status, t.due_amount, t.balance, t.last_seen_at], [2, 0, 12000, later]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('窓 1: 入力の並び順（古い順・新しい順）によらず同じ組になる', () => {
+    const existing: Row[] = [['freee', 'f1', '2026-10-01', 700], ['freee', 'f2', '2026-10-02', 700], ['freee', 'f3', '2026-10-04', 700]];
+    const csv: Row[] = [['csv', 'c1', '2026-10-01', 700], ['csv', 'c2', '2026-10-02', 700], ['csv', 'c3', '2026-10-03', 700]];
+    const run = (order: Row[]) => {
+      const { db, acc } = setup();
+      try {
+        const r1 = dedupAndInsert(db, rows(acc, existing), { dateWindowDays: 1, now });
+        const name = new Map(r1.new.map((h) => [h.bankTxnId, existing[h.index]![1]]));
+        const r2 = dedupAndInsert(db, rows(acc, order), { dateWindowDays: 1, now });
+        return Object.fromEntries(r2.merged.map((h) => [order[h.index]![1], name.get(h.bankTxnId)]));
+      } finally {
+        db.close();
+      }
+    };
+    const asc = run(csv);
+    // 同じ日の明細と組む（c1-f1、c2-f2）。c3 は 1 日差の f3 と組む。
+    assert.deepEqual(asc, { c1: 'f1', c2: 'f2', c3: 'f3' });
+    assert.deepEqual(run([...csv].reverse()), asc);
+  });
+
+  test('窓 1: 日付の違う入力が同じ明細を取り合ったら、組めなかった方は疑い', () => {
+    const { db, acc } = setup();
+    try {
+      const r1 = dedupAndInsert(db, rows(acc, [['freee', 'f1', '2026-10-02', 700]]), { dateWindowDays: 1, now });
+      const r2 = dedupAndInsert(db, rows(acc, [['csv', 'c3', '2026-10-03', 700], ['csv', 'c1', '2026-10-01', 700]]), { dateWindowDays: 1, now });
+      assert.deepEqual(r2.merged.map((h) => h.index), [1]); // 日付の早い c1 が先に組む
+      assert.deepEqual(r2.suspects.map((h) => [h.index, h.candidateIds]), [[0, [r1.new[0]!.bankTxnId]]]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('同じ外部 ID で日付・金額が違う 2 行目は errors（touch しない）', () => {
+    const { db, acc } = setup();
+    try {
+      const r = dedupAndInsert(
+        db,
+        rows(acc, [['csv', 'c1', '2026-10-01', 500], ['csv', 'c1', '2026-10-01', 501], ['csv', 'c1', '2026-10-02', 500]]),
+        { dateWindowDays: 0, now },
+      );
+      assert.equal(r.new.length, 1);
+      assert.deepEqual(r.touched, []);
+      assert.deepEqual(r.errors, [{ index: 1, reason: 'external_id_conflict' }, { index: 2, reason: 'external_id_conflict' }]);
+      // 既にある明細と金額が違う再取り込みも errors。
+      const r2 = dedupAndInsert(db, rows(acc, [['csv', 'c1', '2026-10-01', 999]]), { dateWindowDays: 0, now });
+      assert.deepEqual(r2.errors, [{ index: 0, reason: 'external_id_conflict' }]);
+    } finally {
+      db.close();
+    }
+  });
+
   test('addDays は月末・うるう年をまたぐ', () => {
     assert.equal(addDays('2028-02-28', 1), '2028-02-29');
     assert.equal(addDays('2026-03-01', -1), '2026-02-28');

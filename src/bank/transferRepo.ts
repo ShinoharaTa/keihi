@@ -39,6 +39,11 @@ export function findDedupCandidates(
     .all(q.accountId, q.side, q.amount, q.from, q.to, q.source) as (BankTxnRow & { seq: number })[];
 }
 
+// 残高が NULL のときだけ埋める（CSV で先に入った明細に、後から API の残高を入れる）。
+export function fillBankTxnBalance(db: Db, id: string, balance: number): void {
+  db.prepare('UPDATE bank_txns SET balance = ? WHERE id = ? AND balance IS NULL').run(balance, id);
+}
+
 export function getCsvImportAccount(db: Db, csvImportId: string): string | null {
   const r = db.prepare('SELECT account_id FROM csv_imports WHERE id = ?').get(csvImportId) as { account_id: string } | undefined;
   return r?.account_id ?? null;
