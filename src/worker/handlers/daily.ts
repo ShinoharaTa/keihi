@@ -1,6 +1,6 @@
 // daily ジョブ（docs/mvp-plan.md §4.4 keihi-daily、T1-10・T2-1・T2-12）。keihi-daily.timer が src/jobs/trigger.ts で 1 日 1 回積む。
 // 1. freee のリフレッシュトークンの更新（残り 30 日を切ったら。refreshIfExpiringSoon）。fake では何もしない。
-//    invalid_grant なら settings.freee_reauth_required = 1（PWA の帯）。
+//    invalid_grant なら settings.freee_reauth_required = 1（GET /api/status の freee_reauth_required → PWA の再認可の帯）。
 // 2. マスタ同期（src/masters/sync.ts）。
 // 1'. 再認可の後（settings.freee_reauth_required が 1 でない）なら、再認可待ちで延期中の upload_receipt を今すぐ動くようにする。
 // 3. 検索項目の期限チェック: 最新の確定が approve で、アップロード済みかつ meta_state = none の証憑のうち、meta_deadline_on を過ぎたものは

@@ -136,7 +136,7 @@ export function ensureDealRow(db: Db, input: { documentId: string; reviewId: str
   });
 }
 
-// 要対応の再送（POST /api/outbound/:id/retry）。needs_attention の行を queued に戻す（下書きは次の send_deal で作り直す）。
+// 要対応の再送（POST /api/documents/:id/attention/resolve）。needs_attention の行を queued に戻す（下書きは次の send_deal で作り直す）。
 // freee に取引がある（remote_deal_id がある）行は戻せない（再送の前の照合で既存の取引を採用してしまうため）。
 // needs_attention の行が無ければ null。send_deal を積むのは呼び出し側。
 export function requeueDeal(db: Db, documentId: string, opts: { reason: string; now?: Date }): DealRow | null {

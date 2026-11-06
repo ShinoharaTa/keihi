@@ -1,8 +1,11 @@
 // GET /api/status（docs/mvp-plan.md T1-14、§4.2 の curl 確認）。認証の後に置く。
 //   → 200 {ok, user, documents: {total, needs_attention}, jobs: {queued, running, failed},
-//          backup: {last_success_at, last_drill: {at, ok, failure_count} | null}}
+//          backup: {last_success_at, last_drill: {at, ok, failure_count} | null}, freee_reauth_required}
 // 件数と日時だけを返す（中身・エラー文は返さない）。バックアップの状態は監査ログ（backup.run / backup.drill）から読む。
+// freee_reauth_required は settings の同名キーが 1 のとき true（providers/freee/state.ts。PWA の再認可の帯）。
 import { Hono } from 'hono';
+import { getSetting } from '../../attention.ts';
+import { REAUTH_KEY } from '../../providers/freee/state.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -26,7 +29,15 @@ export function statusRoutes(deps: Pick<AppDeps, 'db'>): Hono {
       last_success_at: lastBackup?.ts ?? null,
       last_drill: drill ? { at: drill.ts, ok: drill.ok === 1, failure_count: drill.failure_count } : null,
     };
-    return c.json({ ok: true, user: c.req.header(USER_HEADER) ?? null, documents: { total, needs_attention: needsAttention }, jobs, backup });
+    const freeeReauthRequired = getSetting(deps.db, REAUTH_KEY) === 1;
+    return c.json({
+      ok: true,
+      user: c.req.header(USER_HEADER) ?? null,
+      documents: { total, needs_attention: needsAttention },
+      jobs,
+      backup,
+      freee_reauth_required: freeeReauthRequired,
+    });
   });
   return r;
 }

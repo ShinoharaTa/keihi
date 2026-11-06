@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Hono } from 'hono';
+import { setSetting } from '../../src/attention.ts';
 import { appendAudit } from '../../src/audit.ts';
 import { ConfigError, loadConfig } from '../../src/config.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
@@ -95,6 +96,7 @@ describe('Tailscale-User-Login', () => {
       documents: { total: 0, needs_attention: 0 },
       jobs: { queued: 0, running: 0, failed: 0 },
       backup: { last_success_at: null, last_drill: null },
+      freee_reauth_required: false,
     });
   });
   test('取り込み API・一覧・PWA も認証の後ろにある', async () => {
@@ -231,5 +233,18 @@ describe('/api/status のバックアップ状態', () => {
     const r = await req('/api/status', { user: USER });
     const j = (await r.json()) as { backup: unknown };
     assert.deepEqual(j.backup, { last_success_at: '2026-10-10T00:00:00.000Z', last_drill: { at: '2026-10-12T00:00:00.000Z', ok: false, failure_count: 2 } });
+  });
+});
+
+describe('/api/status の freee_reauth_required', () => {
+  const get = async () => ((await (await req('/api/status', { user: USER })).json()) as { freee_reauth_required: unknown }).freee_reauth_required;
+  test('settings が無い・0 なら false、1 なら true', async () => {
+    db.prepare(`DELETE FROM settings WHERE key = 'freee_reauth_required'`).run();
+    assert.equal(await get(), false);
+    setSetting(db, 'freee_reauth_required', 0);
+    assert.equal(await get(), false);
+    setSetting(db, 'freee_reauth_required', 1);
+    assert.equal(await get(), true);
+    setSetting(db, 'freee_reauth_required', 0);
   });
 });
