@@ -16,8 +16,11 @@ export type FreeeTxnStatus = 1 | 2 | 3 | 4 | 6;
 export type BalanceSource = 'freee_walletable' | 'freee_txn' | 'csv' | 'manual';
 export type TagSource = 'rule' | 'human' | 'agent';
 
+export type AccountProvider = 'freee' | 'fake';
+
 export type MoneyAccountRow = {
   id: string;
+  provider: AccountProvider;
   name: string;
   kind: AccountKind;
   source: AccountSource;
@@ -27,6 +30,7 @@ export type MoneyAccountRow = {
   include_in_cashflow: 0 | 1;
   card_settlement_account_id: string | null;
   card_settlement_pattern: string | null;
+  active: 0 | 1;
   created_at: string;
   updated_at: string;
 };
@@ -55,7 +59,7 @@ export type BankTxnSourceRow = {
   raw_sha256: string | null;
 };
 
-export type AccountBalanceRow = { account_id: string; as_of_date: string; balance: number; source: BalanceSource; recorded_at: string };
+export type AccountBalanceRow = { seq: number; account_id: string; as_of_date: string; balance: number; source: BalanceSource; recorded_at: string };
 
 export type TxnTagRow = {
   bank_txn_id: string;
@@ -79,6 +83,7 @@ export type SyncStatusRow = {
 // ---- money_accounts ----
 
 export type NewAccount = {
+  provider: AccountProvider;
   name: string;
   kind: AccountKind;
   source: AccountSource;
@@ -89,15 +94,18 @@ export type NewAccount = {
 export function insertAccount(db: Db, a: NewAccount): MoneyAccountRow {
   const id = ulid();
   db.prepare(
-    `INSERT INTO money_accounts (id, name, kind, source, freee_walletable_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, a.name, a.kind, a.source, a.freeeWalletableId ?? null, a.now, a.now);
+    `INSERT INTO money_accounts (id, provider, name, kind, source, freee_walletable_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, a.provider, a.name, a.kind, a.source, a.freeeWalletableId ?? null, a.now, a.now);
   return getAccount(db, id)!;
 }
 
-// freee の walletable の口座を freee_walletable_id で upsert する。既にあれば name だけ変える（変わったときだけ updated_at も）。
-export function upsertFreeeAccount(db: Db, a: { freeeWalletableId: string; name: string; kind: AccountKind; now: string }): MoneyAccountRow {
+// freee の walletable の口座を (provider, freee_walletable_id) で upsert する。既にあれば name だけ変える（変わったときだけ updated_at も）。
+export function upsertFreeeAccount(
+  db: Db,
+  a: { provider: AccountProvider; freeeWalletableId: string; name: string; kind: AccountKind; now: string },
+): MoneyAccountRow {
   return tx(db, () => {
-    const cur = getAccountByWalletable(db, a.freeeWalletableId);
+    const cur = getAccountByWalletable(db, a.provider, a.freeeWalletableId);
     if (!cur) return insertAccount(db, { ...a, source: 'freee' });
     if (cur.name !== a.name) db.prepare('UPDATE money_accounts SET name = ?, updated_at = ? WHERE id = ?').run(a.name, a.now, cur.id);
     return getAccount(db, cur.id)!;
@@ -108,8 +116,12 @@ export function getAccount(db: Db, id: string): MoneyAccountRow | null {
   return (db.prepare('SELECT * FROM money_accounts WHERE id = ?').get(id) as MoneyAccountRow | undefined) ?? null;
 }
 
-export function getAccountByWalletable(db: Db, freeeWalletableId: string): MoneyAccountRow | null {
-  return (db.prepare('SELECT * FROM money_accounts WHERE freee_walletable_id = ?').get(freeeWalletableId) as MoneyAccountRow | undefined) ?? null;
+export function getAccountByWalletable(db: Db, provider: AccountProvider, freeeWalletableId: string): MoneyAccountRow | null {
+  return (
+    (db.prepare('SELECT * FROM money_accounts WHERE provider = ? AND freee_walletable_id = ?').get(provider, freeeWalletableId) as
+      | MoneyAccountRow
+      | undefined) ?? null
+  );
 }
 
 export function listAccounts(db: Db): MoneyAccountRow[] {
@@ -123,6 +135,7 @@ export type AccountSettings = {
   includeInCashflow?: boolean;
   cardSettlementAccountId?: string | null;
   cardSettlementPattern?: string | null;
+  active?: boolean;
 };
 
 const SETTING_COLUMNS: Record<keyof AccountSettings, string> = {
@@ -132,6 +145,7 @@ const SETTING_COLUMNS: Record<keyof AccountSettings, string> = {
   includeInCashflow: 'include_in_cashflow',
   cardSettlementAccountId: 'card_settlement_account_id',
   cardSettlementPattern: 'card_settlement_pattern',
+  active: 'active',
 };
 
 // 設定の列だけを変える。渡したキーだけ書く。口座が無ければ null。
@@ -190,7 +204,7 @@ export function findBankTxnByExternalId(db: Db, accountId: string, source: TxnSo
   );
 }
 
-// 再取得したときに変わってよい列（freee_status・due_amount・last_seen_at）だけを書く。渡さなかった列はそのまま。
+// 再取得したときに変わってよい列（freee_status・due_amount・last_seen_at）だけを書く。渡さなかった列はそのまま（null は NULL を書く）。
 export function touchBankTxn(
   db: Db,
   id: string,
@@ -236,10 +250,10 @@ export function appendBalance(db: Db, b: { accountId: string; asOfDate: string; 
   );
 }
 
-// as_of_date が最も新しい行（同じ日なら後に記録した方）。
+// as_of_date が最も新しい行（同じ日なら後に記録した方 = seq が大きい方）。
 export function latestBalance(db: Db, accountId: string): AccountBalanceRow | null {
   return (
-    (db.prepare('SELECT * FROM account_balances WHERE account_id = ? ORDER BY as_of_date DESC, rowid DESC LIMIT 1').get(accountId) as
+    (db.prepare('SELECT * FROM account_balances WHERE account_id = ? ORDER BY as_of_date DESC, seq DESC LIMIT 1').get(accountId) as
       | AccountBalanceRow
       | undefined) ?? null
   );

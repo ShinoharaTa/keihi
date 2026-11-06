@@ -4,25 +4,31 @@
 
 -- 口座（freee の walletable 1 つ、または CSV だけの口座 1 つにつき 1 行）。
 -- freee_walletable_id は src/masters/sync.ts の walletableRemoteId と同じ `type:id`（type が違えば id が重なりうる）。
+-- provider で事業所の切り替え（poc → prod）や fake を分ける（provider_master_versions などと同じ）。
 CREATE TABLE money_accounts (
   id TEXT PRIMARY KEY,                       -- ULID
+  provider TEXT NOT NULL CHECK (provider IN ('freee', 'fake')),
   name TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('bank', 'card', 'wallet', 'paypay', 'cash')),
   source TEXT NOT NULL CHECK (source IN ('freee', 'csv')),
-  freee_walletable_id TEXT UNIQUE,
+  freee_walletable_id TEXT,
   default_tag TEXT NOT NULL DEFAULT 'unset' CHECK (default_tag IN ('unset', 'business', 'private')),
   mcp_visibility TEXT NOT NULL DEFAULT 'summary' CHECK (mcp_visibility IN ('full', 'summary', 'none')),
   include_in_cashflow INTEGER NOT NULL DEFAULT 1 CHECK (include_in_cashflow IN (0, 1)),
   card_settlement_account_id TEXT REFERENCES money_accounts(id),   -- カードの引き落とし口座（T107）
   card_settlement_pattern TEXT,              -- 引き落としの摘要のパターン（T107）
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),   -- 0: 使わない口座（切り替え前の事業所の口座など）
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE (provider, freee_walletable_id),
+  CHECK ((source = 'freee') = (freee_walletable_id IS NOT NULL)),
+  CHECK (card_settlement_account_id IS NULL OR card_settlement_account_id <> id)
 );
 
--- 設定の列（name, default_tag, mcp_visibility, include_in_cashflow, card_settlement_*, updated_at）以外の更新を拒否する。
+-- 設定の列（name, default_tag, mcp_visibility, include_in_cashflow, card_settlement_*, active, updated_at）以外の更新を拒否する。
 -- freee_walletable_id は一度入れたら変えられない。
 CREATE TRIGGER money_accounts_immutable BEFORE UPDATE ON money_accounts
-WHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind OR NEW.source IS NOT OLD.source
+WHEN NEW.id IS NOT OLD.id OR NEW.provider IS NOT OLD.provider OR NEW.kind IS NOT OLD.kind OR NEW.source IS NOT OLD.source
   OR (OLD.freee_walletable_id IS NOT NULL AND NEW.freee_walletable_id IS NOT OLD.freee_walletable_id)
   OR NEW.created_at IS NOT OLD.created_at
 BEGIN SELECT RAISE(ABORT, 'money_accounts の不変の列は更新できない'); END;
@@ -37,8 +43,8 @@ CREATE TABLE bank_txns (
   description TEXT NOT NULL,
   description_norm TEXT NOT NULL,
   freee_status INTEGER CHECK (freee_status IN (1, 2, 3, 4, 6)),   -- wallet_txns の status。CSV だけの明細は NULL
-  due_amount INTEGER,
-  balance INTEGER,                           -- 取引後の残高（取れる取得元だけ）
+  due_amount INTEGER CHECK (due_amount IS NULL OR typeof(due_amount) = 'integer'),
+  balance INTEGER,                           -- 取引後の残高（取れる取得元だけ。CSV で先に入った明細には後から埋める）
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
 );
@@ -47,12 +53,12 @@ CREATE INDEX bank_txns_account_date ON bank_txns(account_id, txn_date);
 CREATE TRIGGER bank_txns_no_delete BEFORE DELETE ON bank_txns
 BEGIN SELECT RAISE(ABORT, 'bank_txns は削除できない'); END;
 
--- 更新してよいのは freee_status・due_amount・last_seen_at だけ。
+-- 更新してよいのは freee_status・due_amount・last_seen_at と、NULL の balance に値を入れることだけ。
 CREATE TRIGGER bank_txns_immutable BEFORE UPDATE ON bank_txns
 WHEN NEW.id IS NOT OLD.id OR NEW.account_id IS NOT OLD.account_id OR NEW.txn_date IS NOT OLD.txn_date
   OR NEW.amount IS NOT OLD.amount OR NEW.side IS NOT OLD.side
   OR NEW.description IS NOT OLD.description OR NEW.description_norm IS NOT OLD.description_norm
-  OR NEW.balance IS NOT OLD.balance OR NEW.first_seen_at IS NOT OLD.first_seen_at
+  OR (OLD.balance IS NOT NULL AND NEW.balance IS NOT OLD.balance) OR NEW.first_seen_at IS NOT OLD.first_seen_at
 BEGIN SELECT RAISE(ABORT, 'bank_txns の不変の列は更新できない'); END;
 
 -- CSV の取り込み 1 回につき 1 行。同じ口座に同じファイルは 2 回入れない。
@@ -83,12 +89,15 @@ CREATE TABLE bank_txn_sources (
 );
 CREATE INDEX bank_txn_sources_txn ON bank_txn_sources(bank_txn_id);
 
+-- account_id と、csv_import_id が指す取り込みの口座は、明細の口座と同じでないといけない。
 CREATE TRIGGER bank_txn_sources_account BEFORE INSERT ON bank_txn_sources
 WHEN NEW.account_id IS NOT (SELECT account_id FROM bank_txns WHERE id = NEW.bank_txn_id)
+  OR (NEW.csv_import_id IS NOT NULL AND NEW.account_id IS NOT (SELECT account_id FROM csv_imports WHERE id = NEW.csv_import_id))
 BEGIN SELECT RAISE(ABORT, 'bank_txn_sources の account_id が明細の口座と違う'); END;
 
--- 残高の記録。最新は (account_id ごとに) as_of_date が最大の行。
+-- 残高の記録。最新は (account_id ごとに) as_of_date が最大の行（同じ日なら seq が最大の行）。
 CREATE TABLE account_balances (
+  seq INTEGER PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES money_accounts(id),
   as_of_date TEXT NOT NULL,
   balance INTEGER NOT NULL,
@@ -124,15 +133,19 @@ CREATE TABLE tag_rules (
 );
 CREATE INDEX tag_rules_account ON tag_rules(account_id);
 
--- 口座間の振替・カードの引き落とし・チャージの組（T107）。組ごとに id 最大の行が有効。
+-- 口座間の振替・カードの引き落とし・チャージの組（T107）。組ごとに seq 最大の行が有効（ULID は同じミリ秒の中で順序が無い）。
+-- カードの引き落としは銀行の出金 1 件だけで表す（入金側の明細は無いので in_txn_id は NULL）。
 CREATE TABLE transfer_links (
-  id TEXT PRIMARY KEY,                       -- ULID
+  seq INTEGER PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE,                   -- ULID
   out_txn_id TEXT NOT NULL REFERENCES bank_txns(id),
-  in_txn_id TEXT NOT NULL REFERENCES bank_txns(id),
+  in_txn_id TEXT REFERENCES bank_txns(id),
   kind TEXT NOT NULL CHECK (kind IN ('transfer', 'card_settlement', 'charge')),
   source TEXT NOT NULL CHECK (source IN ('auto', 'human')),
   state TEXT NOT NULL CHECK (state IN ('active', 'rejected')),
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  CHECK (kind = 'card_settlement' OR in_txn_id IS NOT NULL),
+  CHECK (in_txn_id IS NULL OR out_txn_id <> in_txn_id)
 );
 CREATE INDEX transfer_links_out ON transfer_links(out_txn_id);
 CREATE INDEX transfer_links_in ON transfer_links(in_txn_id);
@@ -147,12 +160,14 @@ CREATE TABLE sync_status (
   backfill_done_until TEXT                   -- 過去分をここまで取った（暦日。T104）
 );
 
--- keihi が freee に作った自動登録ルール（T109）。作ったときと消したときに 1 行ずつ追記する。
+-- keihi が freee に作った自動登録ルール（T109）。作ったときと消したときに 1 行ずつ追記する。seq 最大の行が有効。
+-- act は 4（無視を登録）か 12（プライベートを登録）。
 CREATE TABLE freee_rule_links (
-  id TEXT PRIMARY KEY,                       -- ULID
+  seq INTEGER PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE,                   -- ULID
   account_id TEXT NOT NULL REFERENCES money_accounts(id),
   remote_matcher_id TEXT NOT NULL,
-  act INTEGER NOT NULL,
+  act INTEGER NOT NULL CHECK (act IN (4, 12)),
   state TEXT NOT NULL CHECK (state IN ('active', 'deleted')),
   created_at TEXT NOT NULL
 );

@@ -12,6 +12,7 @@ import {
   appendTxnTag,
   findBankTxnByExternalId,
   getAccount,
+  getBankTxn,
   getSyncStatus,
   insertAccount,
   insertBankTxn,
@@ -87,8 +88,8 @@ describe('0005_bank の制約', () => {
   let txn2: string;
   before(() => {
     db = freshDb();
-    acc = insertAccount(db, { name: '普通預金', kind: 'bank', source: 'freee', freeeWalletableId: 'bank_account:1', now }).id;
-    acc2 = insertAccount(db, { name: 'PayPay', kind: 'paypay', source: 'csv', now }).id;
+    acc = insertAccount(db, { provider: 'freee', name: '普通預金', kind: 'bank', source: 'freee', freeeWalletableId: 'bank_account:1', now }).id;
+    acc2 = insertAccount(db, { provider: 'freee', name: 'PayPay', kind: 'paypay', source: 'csv', now }).id;
     txn = insertBankTxn(db, { accountId: acc, txnDate: '2026-11-01', amount: 1000, side: 'expense', description: 'ｺﾝﾋﾞﾆ', descriptionNorm: 'コンビニ', freeeStatus: 1, dueAmount: 1000, balance: 5000, now }).id;
     txn2 = insertBankTxn(db, { accountId: acc2, txnDate: '2026-11-01', amount: 1000, side: 'income', description: 'チャージ', descriptionNorm: 'チャージ', now }).id;
     db.exec(`INSERT INTO csv_imports (id, account_id, parser_id, file_sha256, storage_key, rows_total, rows_new, rows_merged, rows_error, actor, imported_at)
@@ -128,6 +129,15 @@ describe('0005_bank の制約', () => {
     db.exec(`UPDATE bank_txns SET freee_status = 2, due_amount = 0, last_seen_at = '${later}' WHERE id = '${txn}'`);
   });
 
+  test('bank_txns の balance は NULL → 値 だけ更新でき、値 → 別の値・NULL は拒否', () => {
+    const t = insertBankTxn(db, { accountId: acc2, txnDate: '2026-11-03', amount: 10, side: 'expense', description: 'b', descriptionNorm: 'b', now }).id;
+    db.exec(`UPDATE bank_txns SET balance = 900 WHERE id = '${t}'`);
+    assert.equal(getBankTxn(db, t)!.balance, 900);
+    assert.throws(() => db.exec(`UPDATE bank_txns SET balance = 800 WHERE id = '${t}'`), /不変の列/);
+    assert.throws(() => db.exec(`UPDATE bank_txns SET balance = NULL WHERE id = '${t}'`), /不変の列/);
+    db.exec(`UPDATE bank_txns SET balance = 900 WHERE id = '${t}'`);
+  });
+
   test('bank_txns の CHECK（金額は正の整数、side・freee_status の値）', () => {
     const ins = (amount: string, side = 'expense', status = 'NULL') =>
       db.exec(`INSERT INTO bank_txns (id, account_id, txn_date, amount, side, description, description_norm, freee_status, first_seen_at, last_seen_at)
@@ -135,15 +145,27 @@ describe('0005_bank の制約', () => {
     for (const [a, s, st] of [['0'], ['-1'], ['1.5'], [`'abc'`], ['1', 'out'], ['1', 'expense', '5']] as [string, string?, string?][]) {
       assert.throws(() => ins(a, s, st), /CHECK/, `${a} ${s} ${st}`);
     }
+    assert.throws(() => db.exec(`UPDATE bank_txns SET due_amount = 1.5 WHERE id = '${txn}'`), /CHECK/);
   });
 
   test('money_accounts は設定の列だけ更新でき、kind・source・freee_walletable_id は変えられない', () => {
-    for (const set of [`kind = 'card'`, `source = 'csv'`, `freee_walletable_id = 'bank_account:2'`, `created_at = '${later}'`, `id = 'X'`]) {
+    for (const set of [`kind = 'card'`, `source = 'csv'`, `provider = 'fake'`, `freee_walletable_id = 'bank_account:2'`, `created_at = '${later}'`, `id = 'X'`]) {
       assert.throws(() => db.exec(`UPDATE money_accounts SET ${set} WHERE id = '${acc}'`), /不変の列/, set);
     }
     assert.throws(() => db.exec(`UPDATE money_accounts SET default_tag = 'mixed' WHERE id = '${acc}'`), /CHECK/);
     assert.throws(() => db.exec(`UPDATE money_accounts SET mcp_visibility = 'all' WHERE id = '${acc}'`), /CHECK/);
-    assert.throws(() => insertAccount(db, { name: 'x', kind: 'bank', source: 'freee', freeeWalletableId: 'bank_account:1', now }), /UNIQUE/);
+    assert.throws(() => insertAccount(db, { provider: 'freee', name: 'x', kind: 'bank', source: 'freee', freeeWalletableId: 'bank_account:1', now }), /UNIQUE/);
+    // provider が違えば同じ walletable でもよい（poc → prod の切り替え、fake）。
+    insertAccount(db, { provider: 'fake', name: 'x', kind: 'bank', source: 'freee', freeeWalletableId: 'bank_account:1', now });
+    assert.throws(() => insertAccount(db, { provider: 'other' as never, name: 'x', kind: 'bank', source: 'csv', now }), /CHECK/);
+    assert.throws(() => db.exec(`UPDATE money_accounts SET card_settlement_account_id = id WHERE id = '${acc}'`), /CHECK/);
+    db.exec(`UPDATE money_accounts SET active = 0 WHERE id = '${acc2}'`);
+    assert.throws(() => db.exec(`UPDATE money_accounts SET active = 2 WHERE id = '${acc2}'`), /CHECK/);
+  });
+
+  test('money_accounts の source と freee_walletable_id の整合', () => {
+    assert.throws(() => insertAccount(db, { provider: 'freee', name: 'x', kind: 'paypay', source: 'csv', freeeWalletableId: 'wallet:9', now }), /CHECK/);
+    assert.throws(() => insertAccount(db, { provider: 'freee', name: 'x', kind: 'bank', source: 'freee', now }), /CHECK/);
   });
 
   test('UNIQUE: 口座・取得元・外部 ID、口座・ファイル、明細・版', () => {
@@ -161,6 +183,26 @@ describe('0005_bank の制約', () => {
   test('bank_txn_sources の account_id は明細の口座と同じでないと入らない', () => {
     assert.throws(() => db.exec(`INSERT INTO bank_txn_sources (bank_txn_id, account_id, source, external_id) VALUES ('${txn}', '${acc2}', 'csv', 'zz')`), /口座と違う/);
     assert.throws(() => addBankTxnSource(db, { bankTxnId: 'NOPE', source: 'csv', externalId: 'zz' }), /無い/);
+    // csv_import_id が指す取り込みの口座も明細の口座と同じでないといけない（I1 は acc2 の取り込み）。
+    assert.throws(() => addBankTxnSource(db, { bankTxnId: txn, source: 'csv', externalId: 'zz', csvImportId: 'I1' }), /口座と違う/);
+    addBankTxnSource(db, { bankTxnId: txn2, source: 'csv', externalId: 'zz', csvImportId: 'I1' });
+  });
+
+  test('transfer_links: card_settlement だけ in_txn_id が NULL でよい。out = in は拒否', () => {
+    const ins = (id: string, kind: string, inTxn: string | null, out = txn) =>
+      db.prepare(`INSERT INTO transfer_links (id, out_txn_id, in_txn_id, kind, source, state, created_at) VALUES (?, ?, ?, ?, 'auto', 'active', ?)`).run(id, out, inTxn, kind, now);
+    ins('L2', 'card_settlement', null);
+    assert.throws(() => ins('L3', 'transfer', null), /CHECK/);
+    assert.throws(() => ins('L4', 'charge', null), /CHECK/);
+    assert.throws(() => ins('L5', 'transfer', txn), /CHECK/);
+    assert.throws(() => ins('L2', 'transfer', txn2), /UNIQUE/);
+    const seqs = db.prepare(`SELECT seq FROM transfer_links ORDER BY seq`).all() as { seq: number }[];
+    assert.ok(seqs.length >= 2 && seqs.every((r, i) => i === 0 || r.seq > seqs[i - 1].seq));
+  });
+
+  test('freee_rule_links の act は 4 か 12', () => {
+    db.exec(`INSERT INTO freee_rule_links (id, account_id, remote_matcher_id, act, state, created_at) VALUES ('F2', '${acc}', '10', 12, 'active', '${now}')`);
+    assert.throws(() => db.exec(`INSERT INTO freee_rule_links (id, account_id, remote_matcher_id, act, state, created_at) VALUES ('F3', '${acc}', '11', 1, 'active', '${now}')`), /CHECK/);
   });
 
   test('外部キーと enum の CHECK', () => {
@@ -188,24 +230,36 @@ describe('src/bank/repo.ts', () => {
   after(() => db.close());
 
   test('upsertFreeeAccount: 2 回目は行を増やさず名前だけ変える。既定は unset / summary / 1', () => {
-    const a = upsertFreeeAccount(db, { freeeWalletableId: 'credit_card:1', name: 'カード', kind: 'card', now });
+    const a = upsertFreeeAccount(db, { provider: 'freee', freeeWalletableId: 'credit_card:1', name: 'カード', kind: 'card', now });
     assert.equal(a.source, 'freee');
     assert.equal(a.default_tag, 'unset');
     assert.equal(a.mcp_visibility, 'summary');
     assert.equal(a.include_in_cashflow, 1);
-    const same = upsertFreeeAccount(db, { freeeWalletableId: 'credit_card:1', name: 'カード', kind: 'card', now: later });
+    const same = upsertFreeeAccount(db, { provider: 'freee', freeeWalletableId: 'credit_card:1', name: 'カード', kind: 'card', now: later });
     assert.equal(same.updated_at, now);
-    const b = upsertFreeeAccount(db, { freeeWalletableId: 'credit_card:1', name: 'カード（新）', kind: 'card', now: later });
+    const b = upsertFreeeAccount(db, { provider: 'freee', freeeWalletableId: 'credit_card:1', name: 'カード（新）', kind: 'card', now: later });
     assert.equal(b.id, a.id);
     assert.equal(b.name, 'カード（新）');
     assert.equal(b.updated_at, later);
     // type が違えば別の口座。
-    upsertFreeeAccount(db, { freeeWalletableId: 'bank_account:1', name: '普通', kind: 'bank', now });
+    upsertFreeeAccount(db, { provider: 'freee', freeeWalletableId: 'bank_account:1', name: '普通', kind: 'bank', now });
     assert.equal(listAccounts(db).length, 2);
   });
 
+  test('upsertFreeeAccount の再同期は設定の列（default_tag・mcp_visibility・card_settlement_*・active）を上書きしない', () => {
+    const settle = upsertFreeeAccount(db, { provider: 'fake', freeeWalletableId: 'bank_account:5', name: '引落', kind: 'bank', now });
+    const a = upsertFreeeAccount(db, { provider: 'fake', freeeWalletableId: 'credit_card:5', name: 'C', kind: 'card', now });
+    const set = updateAccountSettings(db, a.id, {
+      defaultTag: 'private', mcpVisibility: 'none', includeInCashflow: false, cardSettlementAccountId: settle.id, cardSettlementPattern: 'ｶｰﾄﾞ', active: false,
+    }, later)!;
+    assert.equal(set.active, 0);
+    const again = upsertFreeeAccount(db, { provider: 'fake', freeeWalletableId: 'credit_card:5', name: 'C2', kind: 'card', now: later });
+    assert.deepEqual({ ...again }, { ...set, name: 'C2' });
+    assert.equal(upsertFreeeAccount(db, { provider: 'fake', freeeWalletableId: 'credit_card:5', name: 'C2', kind: 'card', now: later }).id, a.id);
+  });
+
   test('updateAccountSettings: 渡した設定の列だけ書く。無い口座は null', () => {
-    const settle = insertAccount(db, { name: '引落口座', kind: 'bank', source: 'csv', now });
+    const settle = insertAccount(db, { provider: 'freee', name: '引落口座', kind: 'bank', source: 'csv', now });
     const card = listAccounts(db).find((a) => a.kind === 'card')!;
     const r = updateAccountSettings(db, card.id, { defaultTag: 'private', includeInCashflow: false, cardSettlementAccountId: settle.id, cardSettlementPattern: 'ｶｰﾄﾞ' }, later);
     assert.equal(r!.default_tag, 'private');
@@ -236,6 +290,10 @@ describe('src/bank/repo.ts', () => {
     const u2 = touchBankTxn(db, t.id, { lastSeenAt: later, freeeStatus: 2, dueAmount: 0 });
     assert.equal(u2!.freee_status, 2);
     assert.equal(u2!.due_amount, 0);
+    // null を渡せば NULL を書く。渡さなければそのまま。
+    const u3 = touchBankTxn(db, t.id, { lastSeenAt: later, freeeStatus: null });
+    assert.equal(u3!.freee_status, null);
+    assert.equal(u3!.due_amount, 0);
     assert.equal(touchBankTxn(db, 'NOPE', { lastSeenAt: later }), null);
   });
 
@@ -244,8 +302,11 @@ describe('src/bank/repo.ts', () => {
     assert.equal(latestBalance(db, acc), null);
     appendBalance(db, { accountId: acc, asOfDate: '2026-11-02', balance: 100, source: 'freee_walletable', now });
     appendBalance(db, { accountId: acc, asOfDate: '2026-11-01', balance: 50, source: 'freee_txn', now: later });
-    appendBalance(db, { accountId: acc, asOfDate: '2026-11-02', balance: -30, source: 'manual', now: later });
-    assert.deepEqual({ ...latestBalance(db, acc)! }, { account_id: acc, as_of_date: '2026-11-02', balance: -30, source: 'manual', recorded_at: later });
+    // 同じ as_of_date・同じ recorded_at でも、後に入れた方（seq が大きい方）。
+    appendBalance(db, { accountId: acc, asOfDate: '2026-11-02', balance: -30, source: 'manual', now });
+    const { seq, ...rest } = latestBalance(db, acc)!;
+    assert.deepEqual({ ...rest }, { account_id: acc, as_of_date: '2026-11-02', balance: -30, source: 'manual', recorded_at: now });
+    assert.equal(seq, 3);
   });
 
   test('txn_tags は版を追記し、最新版を返す', () => {
