@@ -8,6 +8,7 @@ import { getJson, postJson } from '../api.ts';
 import { Icon } from './Icons.tsx';
 import {
   applyRuleLocally,
+  countLabel,
   applyTag,
   categoryLabel,
   dayLabel,
@@ -29,6 +30,7 @@ import {
   txnsUrl,
   txnSummary,
   UNCATEGORIZED_QUERY,
+  pageCount,
   unsetPosition,
   yen,
   type Account,
@@ -373,8 +375,11 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
       setLoading(false);
       if (!r.ok) {
         setMsg(failText(r.status, r.body));
-        setCursor(null);
-        if (!after) setItems([]);
+        // 続きの読み込みの失敗は cursor を残す（「続きを読み込む」をもう一度押せる）。
+        if (!after) {
+          setCursor(null);
+          setItems([]);
+        }
         return;
       }
       setMsg('');
@@ -395,7 +400,7 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
     void (async () => {
       const r = await getJson<TxnPage>(txnsUrl({ ...filter, tag: 'unset' }, today, null, 100));
       if (n !== countSeq.current) return;
-      setUnsetCount(r.ok ? `${r.data.items.length}${r.data.next_cursor ? '+' : ''}` : '');
+      setUnsetCount(r.ok ? countLabel(pageCount(r.data)) : '');
     })();
   }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, today]);
 
@@ -426,15 +431,22 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
       setSheetErr(failText(r.status, r.body));
       return;
     }
-    let out = applyTag(items, txn.id, r.body as TagResult);
+    const result = r.body as TagResult;
+    let ruled = false;
     if (draft.rule && draft.tag !== 'unset') {
       const rr = await postJson('/api/tag_rules', { account_id: txn.account_id, pattern: txn.description, match: 'exact', tag: draft.tag, category: draft.category });
-      if (rr.status === 201) out = applyRuleLocally(out, txn, draft.tag, draft.category);
+      if (rr.status === 201) ruled = true;
       else setMsg(`タグは保存しましたが、ルールは作れませんでした。${failText(rr.status, rr.body)}`);
     }
+    // 待っている間に続きを読み込んでいても消さないよう、その時点の一覧（cur）に当てる。
+    const apply = (xs: Txn[]) => {
+      const tagged = applyTag(xs, txn.id, result);
+      return ruled ? applyRuleLocally(tagged, txn, draft.tag, draft.category) : tagged;
+    };
     setSaving(false);
-    setItems(out);
+    setItems((cur) => (cur ? apply(cur) : cur));
     if (!next) return openTxn(null);
+    const out = apply(items);
     const nx = nextUnset(out, txn.id) ?? out.find((t) => t.tag === 'unset' && !t.excluded && t.id !== txn.id) ?? null;
     if (!nx) setMsg('読み込んだ分の未設定はこれで終わりです。');
     openTxn(nx);

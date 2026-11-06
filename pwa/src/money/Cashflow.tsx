@@ -157,8 +157,15 @@ export function CashflowView({
           </span>
         </div>
         <ForecastChart months={cf.months} marks={marks} shortfall={short} onPick={onJump} />
+        <div class="m-btnrow m-px4" role="group" aria-label="年ごとの行へ移る">
+          {yearGroups(cf.months).map((g) => (
+            <button type="button" key={g.index} class={g.shortCount > 0 ? 'm-btn m-btn-warn' : 'm-btn'} onClick={() => onJump(g.from)}>
+              {g.index + 1} 年目の行へ
+            </button>
+          ))}
+        </div>
         <p class="m-sub m-px4">
-          下の 3 段は予定の大きな支出。大きい印ほど金額が大きい{biggest ? `（最大は ${biggest.month} の${biggest.name} ${yen(biggest.amount)}）` : ''}。グラフを押すとその月の行へ移ります。
+          下の 3 段は予定の大きな支出。大きい印ほど金額が大きい{biggest ? `（最大は ${biggest.month} の${biggest.name} ${yen(biggest.amount)}）` : ''}。グラフか下のボタンを押すとその行へ移ります。
         </p>
       </section>
 

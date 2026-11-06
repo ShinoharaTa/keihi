@@ -32,12 +32,12 @@ export function StackBar({ parts, label, tall }: { parts: { cls: string; pct: nu
 // カテゴリ別の横棒。値の棒と、平均の縦線。
 export function CatBar({ value, avg, max }: { value: number; avg: number; max: number }) {
   const v = pct(value, max);
-  const a = Math.min(99, Math.max(1, pct(avg, max)));
+  const a = avg > 0 ? Math.min(99, Math.max(1, pct(avg, max))) : null;
   return (
     <svg class="m-catbar" viewBox="0 0 100 18" preserveAspectRatio="none" aria-hidden="true">
       <rect class="f-track" x="0" y="3" width="100" height="12" />
       <rect class="f-out" x="0" y="3" width={v} height="12" />
-      <line class="f-avg" x1={a} x2={a} y1="0" y2="18" vector-effect="non-scaling-stroke" />
+      {a !== null && <line class="f-avg" x1={a} x2={a} y1="0" y2="18" vector-effect="non-scaling-stroke" />}
     </svg>
   );
 }
@@ -260,7 +260,26 @@ export function SixMonthBars({ months, selected, onSelect }: { months: { month: 
       })}
       {onSelect &&
         months.map((m, i) => (
-          <rect key={`hit${m.month}`} x={r1(g.bars[i]!.cx - slot / 2)} y="0" width={r1(slot)} height={p.h} fill="transparent" onClick={() => onSelect(m.month)} />
+          <rect
+            key={`hit${m.month}`}
+            class="m-hit"
+            x={r1(g.bars[i]!.cx - slot / 2)}
+            y="0"
+            width={r1(slot)}
+            height={p.h}
+            fill="transparent"
+            tabindex={0}
+            role="button"
+            aria-label={`${mon(m.month)}に切り替える`}
+            aria-pressed={m.month === selected}
+            onClick={() => onSelect(m.month)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onSelect(m.month);
+              }
+            }}
+          />
         ))}
     </svg>
   );

@@ -11,6 +11,7 @@ import {
   accountPatch,
   failText,
   md,
+  needsSettlement,
   settlementChoices,
   shortTime,
   syncText,
@@ -30,8 +31,6 @@ import { ScreenHead } from './Money.tsx';
 type Row = Account & { status: BankStatus | null };
 const KIND_ICON: Record<string, IconName> = { bank: 'bank', card: 'card', wallet: 'wallet', paypay: 'wallet', cash: 'cash' };
 const TAG_SEG_LABELS = { ...TAG_LABELS, unset: '決めない' };
-// 引落元が未設定のカード（警告のカードにする）。
-export const needsSettlement = (a: Account) => a.kind === 'card' && a.active && a.card_settlement_account_id === null;
 
 function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -137,10 +136,10 @@ export function AccountCard({
       {fix && !open && (
         <div class="m-acct-fix">
           <p class="m-fs14">
-            <b class="m-warn-text">引落元が未設定です。</b>カードの利用と銀行の引落が両方とも支出に入っています。
+            <b class="m-warn-text">引落の設定が済んでいません。</b>引落元の口座と摘要の文字の両方が要ります。無いあいだは、カードの利用と銀行の引落が両方とも支出に入ります。
           </p>
           <SettlementFields draft={draft} accounts={accounts} idp={`${idp}-fix`} onChange={(d) => onDraft(d)} />
-          <button type="button" class="m-btn m-btn-primary m-btn-big" disabled={busy || !draft.card_settlement_account_id} onClick={onSave}>
+          <button type="button" class="m-btn m-btn-primary m-btn-big" disabled={busy || !draft.card_settlement_account_id || !draft.card_settlement_pattern.trim()} onClick={onSave}>
             保存して二重計上を直す
           </button>
         </div>

@@ -12,11 +12,15 @@ export function niceTicks(min: number, max: number, n = 4): number[] {
   const raw = (hi - lo) / n;
   const p = 10 ** Math.floor(Math.log10(raw));
   const f = raw / p;
-  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+  // 刻みは最低 1 円（小さな値で目盛りが重ならないように）。丸めて同じになった目盛りは 1 つにする。
+  const step = Math.max(1, (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p);
   const start = Math.floor(lo / step) * step;
   const end = Math.ceil(hi / step) * step;
   const out: number[] = [];
-  for (let v = start; v <= end + step / 2; v += step) out.push(Math.round(v));
+  for (let v = start; v <= end + step / 2; v += step) {
+    const r = Math.round(v);
+    if (out[out.length - 1] !== r) out.push(r);
+  }
   return out;
 }
 

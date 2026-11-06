@@ -128,6 +128,8 @@ export type Overview = {
   reserve: number;
   available: number;
   untagged_count: number;
+  // クライアントだけの印: 代わりの計算で未設定が 100 件を超えた（「100+」と出す）。
+  untagged_more?: boolean;
   cards_without_settlement: { account_id: string; name: string }[];
   open_candidates: number;
   upcoming_due?: unknown;
@@ -416,6 +418,15 @@ export function warningText(w: ForecastWarning, accountName: (id: string) => str
 export const noIncome = (cf: Forecast) => cf.months.every((m) => m.planned_in === 0);
 // ---- 口座 ----
 
+// 引落の設定が済んでいないカード（引落元か摘要の文字が空。サーバーの cards_without_settlement と同じ条件）。二重計上になる。
+export const needsSettlement = (a: Account) => a.kind === 'card' && a.active && (!a.card_settlement_account_id || !a.card_settlement_pattern);
+
+// GET /api/bank_txns（tag=unset・category=none など）の 1 ページから件数（集計外は数えない）。次がある（上限を超えた）なら more。
+export function pageCount(p: TxnPage): { n: number; more: boolean } {
+  return { n: p.items.filter((t) => !t.excluded).length, more: p.next_cursor !== null };
+}
+export const countLabel = (c: { n: number; more: boolean }) => `${c.n}${c.more ? '+' : ''}`;
+
 // カードの引落元に選べる口座（銀行だけ）。
 export const settlementChoices = (accounts: Account[]) => accounts.filter((a) => a.kind === 'bank');
 // 口座と同期の状態を id で結ぶ。
@@ -463,6 +474,7 @@ export const syncText = (created: boolean) => (created ? '同期を始めまし�
 
 // 「125万」「13.2万」「−1.8万」。100 万以上は整数、それ未満は小数 1 桁（.0 は落とす）。
 export function man(n: number): string {
+  if (Math.abs(n) < 10000) return yen(n);
   const v = n / 10000;
   const a = Math.abs(v);
   const s = a >= 100 ? String(Math.round(a)) : String(Math.round(a * 10) / 10);
@@ -509,12 +521,14 @@ export function overviewFallback(x: {
   accounts: Account[];
   cf: Forecast | null;
   month: MonthlySummary | null;
-  untagged: number;
+  untagged: { n: number; more: boolean };
   candidates: number;
   lastOkAt: string | null;
 }): Overview | null {
   if (!x.cf) return null;
   const cur = x.cf.months.find((m) => m.month === x.today.slice(0, 7)) ?? null;
+  // 今月の収支は資金繰りに入れる口座の分だけ（サーバーの overview と同じ）。
+  const inCf = (x.month?.by_account ?? []).filter((r) => r.include_in_cashflow && r.active);
   const byAccount = x.accounts
     .filter((a) => a.active && a.include_in_cashflow && a.kind !== 'card' && a.latest_balance)
     .map((a) => ({ account_id: a.id, name: a.name, kind: a.kind, balance: a.latest_balance!.balance, as_of_date: a.latest_balance!.as_of_date }));
@@ -523,13 +537,14 @@ export function overviewFallback(x: {
     balances: { total: x.cf.opening_balance, by_account: byAccount },
     reserve: x.cf.reserve,
     available: x.cf.opening_balance - x.cf.reserve,
-    untagged_count: x.untagged,
-    cards_without_settlement: x.accounts.filter((a) => a.kind === 'card' && a.active && a.card_settlement_account_id === null).map((a) => ({ account_id: a.id, name: a.name })),
+    untagged_count: x.untagged.n,
+    untagged_more: x.untagged.more,
+    cards_without_settlement: x.accounts.filter(needsSettlement).map((a) => ({ account_id: a.id, name: a.name })),
     open_candidates: x.candidates,
     this_month: {
       month: x.today.slice(0, 7),
-      income: x.month?.total.income ?? 0,
-      expense: x.month?.total.expense ?? 0,
+      income: inCf.reduce((a, r) => a + r.income, 0),
+      expense: inCf.reduce((a, r) => a + r.expense, 0),
       planned_out_remaining: cur?.planned_out ?? 0,
       unplanned_out_estimate: cur?.unplanned_out ?? 0,
       projected_end_balance: cur?.balance_end ?? x.cf.opening_balance,
@@ -563,12 +578,12 @@ export function incomeAhead(cf: Forecast | null, month: string): { total: number
 export type Notice =
   | { kind: 'card_settlement'; accountId: string; name: string }
   | { kind: 'candidates'; count: number }
-  | { kind: 'untagged'; count: number }
+  | { kind: 'untagged'; count: number; more: boolean }
   | { kind: 'no_income' };
 export function notices(o: Overview, cf: Forecast | null): Notice[] {
   const out: Notice[] = o.cards_without_settlement.map((c) => ({ kind: 'card_settlement' as const, accountId: c.account_id, name: c.name }));
   if (o.open_candidates > 0) out.push({ kind: 'candidates', count: o.open_candidates });
-  if (o.untagged_count > 0) out.push({ kind: 'untagged', count: o.untagged_count });
+  if (o.untagged_count > 0) out.push({ kind: 'untagged', count: o.untagged_count, more: o.untagged_more === true });
   if (cf && noIncome(cf)) out.push({ kind: 'no_income' });
   return out;
 }

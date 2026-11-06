@@ -1,7 +1,7 @@
 // PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13、mvp-plan.md T2-10・T2-11）。画面は 撮影 / 確認 / 送信待ち / 送信済み の 4 つ（下のタブで切り替え）。
 // 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。5 つ目の「お金」（T111・T304）には期日の近い予定の件数（counts.upcoming、T305）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
 // 送信待ちは開いたとき・オンラインに戻ったとき・画面に戻ったとき・追加したときに再送する（iOS は Background Sync が無いため）。
-import { render } from 'preact';
+import { h, render } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import { getJson, sendIngest } from './api.ts';
 import { Capture } from './capture/Capture.tsx';
@@ -9,12 +9,12 @@ import { todayLocal } from './capture/form.ts';
 import { SentList } from './list/SentList.tsx';
 import { idbStore } from './queue/idb.ts';
 import { QueueList } from './queue/QueueList.tsx';
-import { Money } from './money/Money.tsx';
 import { ReviewList } from './review/ReviewList.tsx';
 import { createFlusher, type FlushReport, type QueueItem } from './queue/queue.ts';
 import { backupWarning, reauthWarning, STATUS_URL, type StatusResponse } from './status.ts';
 import './style.css';
 
+type MoneyComponent = (typeof import('./money/Money.tsx'))['Money'];
 type Tab = 'capture' | 'review' | 'queue' | 'sent' | 'money';
 // upcoming は T305 で足す。無いサーバーでは 0 として扱う。
 type Counts = { review: number; attention: number; urgent: number; upcoming?: number };
@@ -59,10 +59,20 @@ function App() {
   const [msg, setMsg] = useState(notice?.text ?? '');
   const [sentKey, setSentKey] = useState(0);
   const [counts, setCounts] = useState<Counts | null>(null);
+  // お金タブは別チャンク（撮影タブの初回を軽くする）。初めて開いたときに読む。
+  const [money, setMoney] = useState<MoneyComponent | 'error' | null>(null);
   const [backupWarn, setBackupWarn] = useState<string | null>(null);
   const [reauthWarn, setReauthWarn] = useState<string | null>(null);
   const today = todayLocal(new Date());
   const flusher = useMemo(() => createFlusher(idbStore, sendIngest), []);
+
+  useEffect(() => {
+    if (tab !== 'money' || (money !== null && money !== 'error')) return;
+    import('./money/Money.tsx').then(
+      (m) => setMoney(() => m.Money),
+      () => setMoney('error'),
+    );
+  }, [tab]);
 
   const reloadCounts = useCallback(async () => {
     const [r, st] = await Promise.all([getJson<Counts>('/api/documents/counts'), getJson<StatusResponse>(STATUS_URL)]);
@@ -140,7 +150,7 @@ function App() {
         {tab === 'review' && <ReviewList onChanged={() => void reloadCounts()} />}
         {tab === 'queue' && <QueueList items={items} today={today} onSave={save} onRemove={remove} onRetry={() => void flush()} />}
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
-        {tab === 'money' && <Money today={today} />}
+        {tab === 'money' && (typeof money === 'function' ? h(money, { today }) : <p class="empty">{money === 'error' ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>)}
       </main>
       <nav class="tabs">
         <button type="button" class={tab === 'capture' ? 'tab-on' : ''} onClick={() => setTab('capture')}>

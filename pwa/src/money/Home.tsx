@@ -34,6 +34,7 @@ import {
   type Overview,
   type TxnPage,
   type Upcoming,
+  pageCount,
 } from './model.ts';
 import type { Go } from './Money.tsx';
 
@@ -55,7 +56,7 @@ function NoticeItem({ n, go }: { n: Notice; go: Go }) {
         <Icon name="warn" class="m-warn-icon" />
         <div class="m-col m-tile-text">
           <p>
-            <b>{n.name} の引落元が未設定</b>
+            <b>{n.name} の引落の設定が済んでいません</b>
             <br />
             <span class="m-sub13">カードの利用と銀行の引落が両方とも支出に入り、二重に数えています。</span>
           </p>
@@ -70,7 +71,7 @@ function NoticeItem({ n, go }: { n: Notice; go: Go }) {
     n.kind === 'candidates'
       ? { title: `定期の支払いが ${n.count} 件見つかりました`, sub: '予定に入れると見通しに反映されます', on: () => go('schedule') }
       : n.kind === 'untagged'
-        ? { title: `事業/私用が未設定の明細が ${n.count} 件`, sub: '押すと未設定だけを出します', on: () => go('txns', { filter: { period: 'all', tag: 'unset' } }) }
+        ? { title: `事業/私用が未設定の明細が ${n.count}${n.more ? '+' : ''} 件`, sub: '押すと未設定だけを出します', on: () => go('txns', { filter: { period: 'all', tag: 'unset' } }) }
         : { title: '収入の予定がありません', sub: '入れないと見通しは減る一方になります', on: () => go('schedule', { add: 'in' }) };
   return (
     <button type="button" class="m-tile" onClick={t.on}>
@@ -85,14 +86,14 @@ function NoticeItem({ n, go }: { n: Notice; go: Go }) {
   );
 }
 
-function NavRow({ title, sub, warn, count, onClick }: { title: string; sub: string; warn?: boolean; count?: number; onClick: () => void }) {
+function NavRow({ title, sub, warn, count, onClick }: { title: string; sub: string; warn?: boolean; count?: string; onClick: () => void }) {
   return (
     <button type="button" class="m-nav-row" onClick={onClick}>
       <span class="m-nav-text">
         <span class="m-nav-title">{title}</span>
         <span class={warn ? 'm-nav-sub m-warn-text' : 'm-nav-sub'}>{sub}</span>
       </span>
-      {count !== undefined && count > 0 && <span class="m-count">{count > 99 ? '99+' : count}</span>}
+      {count && <span class="m-count">{count}</span>}
       <Chev />
     </button>
   );
@@ -123,6 +124,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
     .filter(Boolean)
     .join('・');
   const untagged = o?.untagged_count ?? 0;
+  const untaggedText = `${untagged}${o?.untagged_more ? '+' : ''}`;
   return (
     <>
       {o ? (
@@ -252,8 +254,8 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
         <NavRow title="月次" sub={monthlyLine(d.months.filter((m) => m.month <= last), last, cats) ?? '月ごとの収入と支出'} onClick={() => go('monthly')} />
         <NavRow
           title="明細"
-          sub={untagged > 0 ? `事業/私用が未設定 ${untagged} 件` : '未設定はありません'}
-          count={untagged}
+          sub={untagged > 0 ? `事業/私用が未設定 ${untaggedText} 件` : '未設定はありません'}
+          count={untagged > 0 ? untaggedText : undefined}
           onClick={() => go('txns', untagged > 0 ? { filter: { period: 'all', tag: 'unset' } } : {})}
         />
         <NavRow title="見通し" sub={cf && v ? (cf.first_shortfall_month ? `${cf.first_shortfall_month} に残す額を下回る見込み` : v.title) : '36 か月の残高の見通し'} warn={v?.short} onClick={() => go('forecast')} />
@@ -264,7 +266,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
   );
 }
 
-type Raw = Omit<HomeData, 'o'> & { o: Overview | null; untagged: number; candidates: number };
+type Raw = Omit<HomeData, 'o'> & { o: Overview | null; fallback: boolean; untagged: { n: number; more: boolean }; candidates: number };
 
 export function Home({ today, accounts, cats, go }: { today: string; accounts: Account[]; cats: Categories | null; go: Go }) {
   const [raw, setRaw] = useState<Raw | null>(null);
@@ -283,12 +285,15 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
         getJson<{ items: Upcoming[] }>('/api/scheduled_items/upcoming?days=60'),
         getJson<{ accounts: BankStatus[] }>('/api/bank/status'),
       ]);
-      // overview が無いサーバー（404）: 未設定の明細と提案の数を別に読み、描画のときに代わりを作る。
-      const [u, c] = o.ok
+      // overview が無い古いサーバー（404）だけ、未設定の明細と提案の数を別に読み、描画のときに代わりを作る。
+      // それ以外の失敗は代わりを作らず、理由を出す（残高を間違って見せないため）。
+      const fallback = !o.ok && o.status === 404;
+      const [u, c] = !fallback
         ? [null, null]
         : await Promise.all([getJson<TxnPage>('/api/bank_txns?tag=unset&limit=100'), getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open')]);
       if (!live) return;
-      if (!cf.ok && !o.ok) setMsg(failText(cf.status, cf.body));
+      if (!o.ok && !fallback) setMsg(failText(o.status, o.body));
+      else if (fallback && !cf.ok) setMsg(failText(cf.status, cf.body));
       setRaw({
         o: o.ok ? o.data : null,
         history: h.ok ? h.data : null,
@@ -296,7 +301,8 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
         months: m.ok ? m.data.months : [],
         upcoming: up.ok ? up.data.items : [],
         status: st.ok ? st.data.accounts : [],
-        untagged: u?.ok ? u.data.items.length : 0,
+        fallback,
+        untagged: u?.ok ? pageCount(u.data) : { n: 0, more: false },
         candidates: c?.ok ? c.data.candidates.length : 0,
       });
     })();
@@ -316,7 +322,8 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
     ...raw,
     o:
       raw.o ??
-      overviewFallback({
+      (raw.fallback
+        ? overviewFallback({
         today,
         accounts,
         cf: raw.cf,
@@ -324,7 +331,8 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
         untagged: raw.untagged,
         candidates: raw.candidates,
         lastOkAt: raw.status.map((s) => s.last_ok_at).filter((x): x is string => !!x).sort().pop() ?? null,
-      }),
+          })
+        : null),
   };
   const lastOk = d?.o?.sync.last_ok_at ?? null;
   const syncErr = syncErrorCount(d?.o?.sync.errors);
