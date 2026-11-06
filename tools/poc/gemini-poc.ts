@@ -10,7 +10,7 @@
 // - ~/.config/keihi/config.toml に `[gemini] paid_tier_confirmed = true` が無ければ実行しない。
 // - Gemini へは EXIF などのメタデータを除いた派生画像（src/ai/gemini/derive.ts deriveForAi）を inline で送る。Files API・キャッシュは使わない。
 // - 送る形（派生画像・プロンプト・応答スキーマ）は本番と同じ src/ai/gemini/client.ts の extractReceipt を使う。
-//   科目は PoC 用の名前（ACCOUNTS。ID = 名前）、税は税率の区分（schema.ts）。スキーマの検証は src/ai/validate.ts。
+//   科目は PoC 用の名前（ACCOUNTS。ID は a01〜 の連番）、税は税率の区分（schema.ts）。スキーマの検証は src/ai/validate.ts。
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -30,6 +30,7 @@ import {
 } from '../../src/ai/gemini/client.ts';
 import { buildResponseSchema as buildSchema, type Schema, type SchemaAccount } from '../../src/ai/gemini/schema.ts';
 import { validateSchema } from '../../src/ai/validate.ts';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../src/config.ts';
 import type { Truth } from '../fixtures/gen-receipts.ts';
 import { assertSecretsFile, mimeOf } from './common.ts';
 
@@ -195,13 +196,17 @@ function* jpegSegments(buf: Buffer): Generator<JpegSegment> {
 // ---- 応答スキーマ・検証（本番の schema.ts / validate.ts を PoC の科目で使う） ----
 
 // 科目: 青色申告決算書の経費科目 + 任意科目 + 事業主貸（classification-ocr.md A-5）。
-// PoC 用。ID は名前そのもの（freee の勘定科目 ID は使わない）。
+// PoC 用。ID は ASCII の連番 a01〜（freee の勘定科目 ID は使わない）。名前を ID にすると、responseJsonSchema の enum に
+// 日本語の値が 12 個以上並んだ時点で Gemini 3.8 Flash が 400 INVALID_ARGUMENT を返す（2026-11-06 実 API で確認。issue #9）。
 export const ACCOUNTS = [
   '租税公課', '荷造運賃', '水道光熱費', '旅費交通費', '通信費', '広告宣伝費', '接待交際費', '損害保険料',
   '修繕費', '消耗品費', '減価償却費', '福利厚生費', '給料賃金', '外注工賃', '利子割引料', '地代家賃',
   '貸倒金', '雑費', '新聞図書費', '支払手数料', '会議費', '研修費', '車両費', '事業主貸',
 ] as const;
-export const POC_ACCOUNTS: readonly SchemaAccount[] = ACCOUNTS.map((a) => ({ id: a, name: a }));
+export const POC_ACCOUNTS: readonly SchemaAccount[] = ACCOUNTS.map((a, i) => ({ id: `a${String(i + 1).padStart(2, '0')}`, name: a }));
+const POC_ACCOUNT_NAME = new Map(POC_ACCOUNTS.map((a) => [a.id, a.name]));
+// 応答の account_id（a01〜）を科目名に戻す。知らない ID はそのまま返す（採点で不一致になる）。
+export const pocAccountName = (id: unknown): unknown => (typeof id === 'string' ? (POC_ACCOUNT_NAME.get(id) ?? id) : id);
 
 export function buildResponseSchema(): Schema {
   return buildSchema(POC_ACCOUNTS);
@@ -227,7 +232,7 @@ export function scoreOutput(truth: Pick<Truth, 'date' | 'total' | 'vendor' | 're
   const ex = o.extraction ?? {};
   const s = (v: unknown) => (v === undefined || v === null ? '' : String(v));
   const regNo = typeof ex.invoice_reg_no === 'string' && ex.invoice_reg_no.trim() ? normalizeText(ex.invoice_reg_no).toUpperCase() : null;
-  const account = Array.isArray(o.account_candidates) ? o.account_candidates[0]?.account_id : undefined;
+  const account = Array.isArray(o.account_candidates) ? pocAccountName(o.account_candidates[0]?.account_id) : undefined;
   return {
     date: ex.txn_date === truth.date,
     total: ex.amount_total === truth.total,
@@ -281,7 +286,7 @@ export async function runConditions(opts: {
   const { client, model, fixtures, log = () => {} } = opts;
   const conditions = opts.conditions ?? CONDITIONS;
   const schema = buildResponseSchema();
-  const gemini = { client, model, thinkingLevel: 'low' as ThinkingLevel, mediaResolution: 'medium' as MediaResolution };
+  const gemini = { client, model, thinkingLevel: 'low' as ThinkingLevel, mediaResolution: 'medium' as MediaResolution, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS };
   const rows: Row[] = [];
   const total = fixtures.length * conditions.length;
   for (const fx of fixtures) {
@@ -535,7 +540,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       let bad = 0;
       for (const f of fixtures) {
         for (const c of CONDITIONS) {
-          const input = await buildReceiptInput({ original: f.bytes, accounts: POC_ACCOUNTS }, { model, thinkingLevel: c.thinking, mediaResolution: c.media });
+          const input = await buildReceiptInput({ original: f.bytes, accounts: POC_ACCOUNTS }, { model, thinkingLevel: c.thinking, mediaResolution: c.media, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS });
           const url = generateContentUrl(DEFAULT_BASE_URL, model);
           const body = buildGenerateContentBody(input);
           const size = Buffer.byteLength(JSON.stringify(body));

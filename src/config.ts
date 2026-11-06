@@ -15,6 +15,8 @@ export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 // U7 の暫定（mvp-plan.md §3.2）。T0-3r の結果で変える。
 export const DEFAULT_THINKING_LEVEL = 'low';
 export const DEFAULT_MEDIA_RESOLUTION = 'medium';
+// 出力トークン（思考トークン込み）の上限。トークン爆発の防止。応答の JSON は 1〜2 千トークン、思考は low で数百〜数千。
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 // T1-6: 取り込みのサイズ上限の初期値（freee は 64MB。mvp-plan.md T1-6 の変更）。
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 // T1-14（D4）: web は 127.0.0.1 の固定ポート。バインド先は設定にしない（0.0.0.0 にできないようにする）。
@@ -75,7 +77,7 @@ export type Config = {
   dbPath: string;
   objectsDir: string;
   freeeTokenPath: string;
-  gemini: { model: string; paidTierConfirmed: boolean; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution };
+  gemini: { model: string; paidTierConfirmed: boolean; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution; maxOutputTokens: number };
   // target は worker が使う事業所（既定 poc。G1 で prod に変える）。
   freee: { pocCompanyId: number | null; prodCompanyId: number | null; target: FreeeTarget; dayBoundary: DayBoundary };
   // fake は開発用（プロセス内のメモリだけ。freee を呼ばない）。
@@ -143,7 +145,7 @@ type Table = Record<string, unknown>;
 
 const KNOWN: Record<string, string[]> = {
   paths: ['data_dir'],
-  gemini: ['model', 'paid_tier_confirmed', 'thinking_level', 'media_resolution'],
+  gemini: ['model', 'paid_tier_confirmed', 'thinking_level', 'media_resolution', 'max_output_tokens'],
   freee: ['poc_company_id', 'prod_company_id', 'target', 'day_boundary'],
   provider: ['kind'],
   ingest: ['max_upload_bytes'],
@@ -311,6 +313,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       paidTierConfirmed: optBool(t, 'gemini', 'paid_tier_confirmed') ?? false,
       thinkingLevel: optEnum(t, 'gemini', 'thinking_level', LEVELS) ?? DEFAULT_THINKING_LEVEL,
       mediaResolution: optEnum(t, 'gemini', 'media_resolution', LEVELS) ?? DEFAULT_MEDIA_RESOLUTION,
+      maxOutputTokens: optPositiveInt(t, 'gemini', 'max_output_tokens') ?? DEFAULT_MAX_OUTPUT_TOKENS,
     },
     freee: {
       pocCompanyId,

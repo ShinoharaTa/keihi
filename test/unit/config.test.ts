@@ -99,18 +99,20 @@ describe('worker の配線（[freee] target / day_boundary、[provider] kind、[
     assert.deepEqual(cfg.provider, { kind: 'freee' });
     assert.equal(cfg.gemini.thinkingLevel, 'low');
     assert.equal(cfg.gemini.mediaResolution, 'medium');
+    assert.equal(cfg.gemini.maxOutputTokens, 8192);
   });
   test('指定を読む', async () => {
     const cfg = loadConfig({
-      configDir: await dir('[freee]\ntarget = "prod"\nday_boundary = "jst"\n[provider]\nkind = "fake"\n[gemini]\nthinking_level = "medium"\nmedia_resolution = "high"\n', null),
+      configDir: await dir('[freee]\ntarget = "prod"\nday_boundary = "jst"\n[provider]\nkind = "fake"\n[gemini]\nthinking_level = "medium"\nmedia_resolution = "high"\nmax_output_tokens = 2048\n', null),
     });
     assert.equal(cfg.freee.target, 'prod');
     assert.equal(cfg.provider.kind, 'fake');
     assert.equal(cfg.gemini.thinkingLevel, 'medium');
     assert.equal(cfg.gemini.mediaResolution, 'high');
+    assert.equal(cfg.gemini.maxOutputTokens, 2048);
   });
   test('知らない値は拒否', async () => {
-    for (const toml of ['[freee]\ntarget = "production"\n', '[freee]\nday_boundary = "utc"\n', '[provider]\nkind = "mf"\n', '[gemini]\nthinking_level = "max"\n']) {
+    for (const toml of ['[freee]\ntarget = "production"\n', '[freee]\nday_boundary = "utc"\n', '[provider]\nkind = "mf"\n', '[gemini]\nthinking_level = "max"\n', '[gemini]\nmax_output_tokens = 0\n']) {
       assert.throws(() => loadConfig({ configDir: dir2(toml) }), ConfigError, toml);
     }
   });
