@@ -21,6 +21,7 @@ import {
   type ReceiptMeta,
   type Rule,
   type UploadReceiptInput,
+  type WalletableType,
 } from '../types.ts';
 
 const TXN_PAGE = 100;
@@ -75,10 +76,14 @@ export type FakeProvider = Provider & {
   failNext(kind: ProviderErrorKind, opts?: FailOptions): void;
   // テストの前提を作る（API 呼び出しではないので calls に記録しない）。
   addBankTxn(txn: Omit<BankTxn, 'id'>): BankTxn;
+  // listWalletables が返す残高（既定は null）。
+  setWalletableBalance(type: WalletableType, id: number, balance: number | null): void;
   readonly state: {
     receipts: Map<number, Receipt & { bytes: Buffer; sha256: string }>;
     deals: Map<number, Deal>;
     bankTxns: Map<number, BankTxn>;
+    // `type:id` → 残高。
+    balances: Map<string, number | null>;
     rules: Map<number, Rule>;
   };
 };
@@ -90,7 +95,7 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
   const calls: FakeCall[] = [];
   const pending: Pending[] = [];
   const seq = { receipt: 0, deal: 0, txn: 0, rule: 0, request: 0 };
-  const state: FakeProvider['state'] = { receipts: new Map(), deals: new Map(), bankTxns: new Map(), rules: new Map() };
+  const state: FakeProvider['state'] = { receipts: new Map(), deals: new Map(), bankTxns: new Map(), balances: new Map(), rules: new Map() };
 
   const requestId = () => `fake-req-${++seq.request}`;
   const notFound = (what: string, id: number) => new ProviderError('client', `${what} ${id} が無い`, { status: 404, requestId: requestId() });
@@ -159,6 +164,10 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
       const t = { ...txn, id: ++seq.txn };
       state.bankTxns.set(t.id, t);
       return { ...t };
+    },
+
+    setWalletableBalance(type, id, balance) {
+      state.balances.set(`${type}:${id}`, balance);
     },
 
     capabilities() {
@@ -268,6 +277,10 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
 
     syncMasters() {
       return run('syncMasters', [], () => structuredClone(masters));
+    },
+
+    listWalletables() {
+      return run('listWalletables', [], () => masters.walletables.map((w) => ({ ...w, lastBalance: state.balances.get(`${w.type}:${w.id}`) ?? null })));
     },
 
     listBankTxns(q: ListBankTxnsQuery = {}) {

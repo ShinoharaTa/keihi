@@ -99,6 +99,7 @@ describe('Tailscale-User-Login', () => {
       backup: { last_success_at: null, last_drill: null },
       freee_reauth_required: false,
       retention: { earliest_retain_until: null, documents: 0 },
+      bank: { accounts: 0, last_ok_at: null, errors: 0 },
     });
   });
   test('取り込み API・一覧・PWA も認証の後ろにある', async () => {

@@ -3,8 +3,11 @@
 // - 前回あって今回無いものは retired_at を入れた版を追記する。再び現れたら retired_at が NULL の版を追記する。
 // - partners は Masters の型にまだ無い（src/providers/types.ts）。返ってきたときだけ同期し、無ければ既存の版に触らない。
 // - walletables は type と id の組を remote_id にする（`credit_card:1`）。別名は walletable_aliases に keihi 側で付ける。
+// - walletables ごとに口座（money_accounts）も upsert する（src/bank/accounts.ts、T103）。
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../audit.ts';
+import { upsertWalletableAccounts } from '../bank/accounts.ts';
+import type { AccountProvider } from '../bank/repo.ts';
 import { tx, type Db } from '../db/index.ts';
 import type { Masters, Provider } from '../providers/types.ts';
 
@@ -123,7 +126,12 @@ export function applyMasterItems(db: Db, provider: string, kind: MasterKind, ite
 }
 
 // Provider からマスタを取得して保存する。全種類を 1 つのトランザクションで追記する。
-export async function syncMasters(db: Db, provider: Provider, opts: { providerName: string; now?: () => Date }): Promise<SyncResult> {
+// accountProvider（[provider] kind）を渡すと、同じトランザクションで walletable ごとに口座（money_accounts）を upsert する（T103）。
+export async function syncMasters(
+  db: Db,
+  provider: Provider,
+  opts: { providerName: string; accountProvider?: AccountProvider; now?: () => Date },
+): Promise<SyncResult> {
   const masters = await provider.syncMasters();
   const fetchedAt = (opts.now ?? (() => new Date()))().toISOString();
   const byKind = itemsFromMasters(masters as Masters & { partners?: Partner[] });
@@ -132,6 +140,10 @@ export async function syncMasters(db: Db, provider: Provider, opts: { providerNa
     for (const kind of MASTER_KINDS) {
       const items = byKind[kind];
       if (items) out[kind] = applyMasterItems(db, opts.providerName, kind, items, fetchedAt);
+    }
+    if (opts.accountProvider !== undefined) {
+      const ws = masters.walletables.map((w) => ({ remoteId: walletableRemoteId(w.type, w.id), type: w.type, name: w.name }));
+      upsertWalletableAccounts(db, opts.accountProvider, ws, fetchedAt);
     }
     return out;
   });

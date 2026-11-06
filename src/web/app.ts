@@ -6,6 +6,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import type { Config } from '../config.ts';
 import type { Db } from '../db/index.ts';
 import { attentionRoutes } from './routes/attention.ts';
+import { bankRoutes } from './routes/bank.ts';
 import { documentsRoutes } from './routes/documents.ts';
 import { exportRoutes } from './routes/export.ts';
 import { ingestRoutes } from './routes/ingest.ts';
@@ -16,7 +17,8 @@ import { statusRoutes } from './routes/status.ts';
 export type AppDeps = {
   db: Db;
   objectsDir: string;
-  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention'>;
+  // provider は口座（money_accounts.provider）に使う。省略時は freee。
+  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention'> & Partial<Pick<Config, 'provider'>>;
   auth: MiddlewareHandler;
   triggerWorker: () => void;
   now?: () => Date;
@@ -33,6 +35,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', reviewRoutes(deps));
   app.route('/api', attentionRoutes(deps));
   app.route('/api', exportRoutes(deps));
+  app.route('/api', bankRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
   return app;
 }

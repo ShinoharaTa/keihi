@@ -103,7 +103,7 @@ export function createFreeeMock(opts: { override?: Override; tokenStatus?: () =>
     if (m === 'DELETE') return new Response(null, { status: 204 });
     if (m === 'GET' && p === '/api/1/account_items') return json(200, { account_items: [{ id: 101, name: '消耗品費' }] });
     if (m === 'GET' && p === '/api/1/taxes/codes') return json(200, { taxes: [{ code: 136, name: 'purchase_with_tax_10', name_ja: '課対仕入10%' }] });
-    if (m === 'GET' && p === '/api/1/walletables') return json(200, { walletables: [{ id: 1, type: 'credit_card', name: 'ダミーカード' }] });
+    if (m === 'GET' && p === '/api/1/walletables') return json(200, { walletables: [{ id: 1, type: 'credit_card', name: 'ダミーカード' }, { id: 2, type: 'bank_account', name: 'ダミー銀行', last_balance: 51000 }] });
     if (m === 'GET' && p === '/api/1/partners') return json(200, { partners: [{ id: 5, name: 'ダミー商店' }] });
     if (m === 'GET' && p === '/api/1/wallet_txns') {
       return json(200, { wallet_txns: WALLET_TXNS });
