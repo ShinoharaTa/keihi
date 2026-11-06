@@ -9,7 +9,7 @@ export const BACKOFF_MINUTES = [1, 5, 30, 120] as const;
 export const MAX_ATTEMPTS = 6;
 export const LOCK_TIMEOUT_MS = 15 * 60 * 1000;
 
-export type JobKind = 'upload_receipt' | 'extract' | 'update_receipt_meta' | 'daily' | 'send_deal' | 'reconcile_deals';
+export type JobKind = 'upload_receipt' | 'extract' | 'update_receipt_meta' | 'daily' | 'send_deal' | 'reconcile_deals' | 'sync_bank';
 export type JobState = 'queued' | 'running' | 'done' | 'failed';
 
 export type Job = {

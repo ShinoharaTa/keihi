@@ -29,6 +29,7 @@ import {
   type Rule,
   type RuleAction,
   type UploadReceiptInput,
+  type WalletableBalance,
   type WalletableType,
 } from '../types.ts';
 import { FreeeAuthError, TOKEN_URL, TokenStore, createTokenProvider, type ClientCredentials } from './auth.ts';
@@ -394,6 +395,17 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
           name: str(obj(x).name) ?? '',
         })),
       };
+    },
+
+    // 口座の残高（with_balance=true の last_balance）。
+    async listWalletables(): Promise<WalletableBalance[]> {
+      const res = await call('listWalletables', 'GET', '/api/1/walletables', { query: cq({ with_balance: true }) });
+      return arr(obj(res.json).walletables).map(obj).map((x) => ({
+        id: num(x.id) ?? 0,
+        type: str(x.type) as WalletableType,
+        name: str(x.name) ?? '',
+        lastBalance: num(x.last_balance),
+      }));
     },
 
     // 1 ページだけ取る（limit 既定 100、続きは offset）。

@@ -77,7 +77,7 @@ function ensureUploadRow(db: Db, documentId: string, now: Date): UploadRow {
 }
 
 // 再認可待ちの開始時刻（前の延期の note から読む）。
-function reauthSince(lastError: string | null): Date | null {
+export function reauthSince(lastError: string | null): Date | null {
   const m = new RegExp(`^${REAUTH_PENDING} since=(\\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z)`).exec(lastError ?? '');
   if (!m) return null;
   const t = new Date(m[1]);
