@@ -8,7 +8,7 @@
 //   GET  /api/scheduled_items/upcoming?days=30 → 200 {from, to, items: [ScheduledItem & {due_date}]}
 //        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
 // 周期の検出の候補（T302。src/cashflow/detect.ts）:
-//   GET  /api/recurrence_candidates?state=open        → 200 {candidates: [RecurrenceCandidate]}（state を省くとすべて）/ 400 {error}
+//   GET  /api/recurrence_candidates?state=open        → 200 {candidates: [RecurrenceCandidate + description・account_name]}（state を省くとすべて。description は最新の明細の正規化前の摘要）/ 400 {error}
 //   POST /api/recurrence_candidates/detect            → 200 {created, updated}（手動で検出する。updated は金額が変わって置き換えた open の候補の数。今日は Asia/Tokyo の暦日）
 //   POST /api/recurrence_candidates/:id/accept        body {category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 候補の金額）}
 //        → 200 {candidate, item}（台帳の項目を作って accepted にする）/ 400 {error}（open でない・値が不正）/ 404
@@ -22,7 +22,7 @@ import { ScheduleError, activateItem, createItem, deactivateItem, listItems, par
 import { DEFAULT_FORECAST_MONTHS, FORECAST_MAX_MONTHS, buildForecast } from '../../cashflow/forecast.ts';
 import type { Config } from '../../config.ts';
 import { acceptCandidate, detectRecurrences, dismissCandidate, type AcceptOverrides } from '../../cashflow/detect.ts';
-import { CANDIDATE_STATES, listRecurrenceCandidates, type CandidateState } from '../../cashflow/repo.ts';
+import { CANDIDATE_STATES, listRecurrenceCandidateViews, type CandidateState } from '../../cashflow/repo.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -103,7 +103,7 @@ export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
   r.get('/recurrence_candidates', (c) => {
     const state = c.req.query('state');
     if (state !== undefined && !(CANDIDATE_STATES as readonly string[]).includes(state)) return c.json({ error: 'invalid_state' }, 400);
-    return c.json({ candidates: listRecurrenceCandidates(deps.db, { state: state as CandidateState | undefined }) });
+    return c.json({ candidates: listRecurrenceCandidateViews(deps.db, { state: state as CandidateState | undefined }) });
   });
 
   r.post('/recurrence_candidates/detect', (c) => {

@@ -510,6 +510,24 @@ describe('/api/recurrence_candidates', () => {
     assert.deepEqual(await res.json(), { error: 'not_open' });
   });
 
+  test('一覧の各候補に最新の明細の正規化前の摘要と口座名が付く', async () => {
+    const A = (db.prepare("SELECT id FROM money_accounts WHERE name = '銀行A'").get() as { id: string }).id;
+    const norm = 'ntt東日本光コラボ回収代行分';
+    MONTHS.forEach((ym, i) => {
+      const description = i === MONTHS.length - 1 ? 'NTT東日本光コラボ回収代行分' : 'ＮＴＴ東日本光コラボ回収代行分';
+      insertBankTxn(db, { accountId: A, txnDate: day(ym, 12), amount: 5500, side: 'expense', description, descriptionNorm: norm, now });
+    });
+    await post('/api/recurrence_candidates/detect');
+    const { candidates } = (await (await get('/api/recurrence_candidates')).json()) as {
+      candidates: { description_norm: string; description: string | null; account_name: string | null }[];
+    };
+    assert.equal(candidates.length, 5);
+    const c = candidates.find((x) => x.description_norm === norm)!;
+    assert.deepEqual([c.description, c.account_name], ['NTT東日本光コラボ回収代行分', '銀行A']);
+    for (const x of candidates) assert.equal(x.account_name, '銀行A');
+    assert.equal(candidates.find((x) => x.description_norm === '家賃')!.description, '家賃');
+  });
+
   test('不正な入力は 400 / 404', async () => {
     await post('/api/recurrence_candidates/detect');
     const { candidates } = (await (await get('/api/recurrence_candidates')).json()) as { candidates: { id: string }[] };

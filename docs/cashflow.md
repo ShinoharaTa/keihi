@@ -159,7 +159,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category・recurrence（once/monthly/bimonthly/quarterly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14） | out に income は不可。origin は変えられない |
 | POST /api/scheduled_items/:id/deactivate・/activate | ― | active を切り替え |
 | GET /api/scheduled_items/upcoming | days（1〜1096、既定 30） | 今日〜今日 + days（両端を含む）の期日順 |
-| GET /api/recurrence_candidates | state? | `{candidates}` |
+| GET /api/recurrence_candidates | state? | `{candidates}`。各候補に description（occurrences_json の最後〈最新〉の明細の正規化前の摘要）・account_name（口座名）。見つからなければ null |
 | POST /api/recurrence_candidates/detect | ― | `{created, updated}` |
 | POST /api/recurrence_candidates/:id/accept | category?・name?・amount? | `{candidate, item}` |
 | POST /api/recurrence_candidates/:id/dismiss | ― | 候補 |
