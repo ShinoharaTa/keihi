@@ -295,6 +295,8 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
 
     createRule(input: CreateRuleInput) {
       return run('createRule', [{ ...input }], () => {
+        // freee と同じく、口座の指定は未対応（walletable の書式が未確認）。
+        if (input.walletableId !== undefined) throw badRequest('ルールの口座の指定は未対応');
         const r: Rule = { ...input, id: ++seq.rule };
         state.rules.set(r.id, r);
         return { ...r };

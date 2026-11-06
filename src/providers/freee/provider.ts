@@ -12,7 +12,6 @@ import type { Db } from '../../db/index.ts';
 import {
   ProviderError,
   type BankTxn,
-  type BankTxnStatus,
   type Capabilities,
   type CreateExpenseDealInput,
   type CreateRuleInput,
@@ -415,7 +414,7 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
         entrySide: t.entry_side === 'income' ? 'income' : 'expense',
         description: str(t.description) ?? '',
         balance: num(t.balance),
-        status: (num(t.status) ?? 0) as BankTxnStatus,
+        status: num(t.status),
         dueAmount: num(t.due_amount) ?? 0,
         ruleMatched: t.rule_matched === true,
       }));

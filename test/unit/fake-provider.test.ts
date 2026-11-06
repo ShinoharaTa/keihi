@@ -263,7 +263,9 @@ describe('明細・ルール', () => {
     }
     assert.deepEqual(pages, [100, 100, 50]);
     assert.deepEqual((await p.listBankTxns({ limit: 2, offset: 248 })).map((t) => t.id), [249, 250]);
+    assert.deepEqual(await p.listBankTxns({ offset: 250 }), []);
     await rejectsWith(p.listBankTxns({ limit: 101 }), 'client');
+    await rejectsWith(p.listBankTxns({ limit: 0 }), 'client');
     await rejectsWith(p.listBankTxns({ offset: -1 }), 'client');
   });
 
@@ -275,7 +277,10 @@ describe('明細・ルール', () => {
     await p.deleteRule(r.id);
     assert.deepEqual(await p.listRules(), []);
     await rejectsWith(p.deleteRule(r.id), 'client');
-    const r2 = await p.createRule({ matchText: 'TEST SHOP', action: 'private_register', walletableType: 'bank_account', walletableId: 2 });
-    assert.deepEqual(await p.listRules(), [{ matchText: 'TEST SHOP', action: 'private_register', walletableType: 'bank_account', walletableId: 2, id: r2.id }]);
+    const r2 = await p.createRule({ matchText: 'TEST SHOP', action: 'private_register' });
+    assert.deepEqual(await p.listRules(), [{ matchText: 'TEST SHOP', action: 'private_register', id: r2.id }]);
+    // freee と同じく、口座の指定は client。
+    await rejectsWith(p.createRule({ matchText: 'TEST SHOP', action: 'ignore', walletableId: 2 }), 'client');
+    assert.equal((await p.listRules()).length, 1);
   });
 });

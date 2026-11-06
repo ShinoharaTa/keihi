@@ -143,8 +143,15 @@ export type Masters = { accountItems: AccountItem[]; taxCodes: TaxCode[]; wallet
 
 // ---- 明細とルール（M6） ----
 
-// 明細の状態（freee の wallet_txns.status。1 = 未処理、3 = 無視）。
-export type BankTxnStatus = 1 | 2 | 3 | 4 | 6;
+// 明細の状態の既知の値（freee の wallet_txns.status。docs/transactions.md §明細）。
+// OpenAPI は 1〜6 の整数としか定めていないので、BankTxn.status はこれ以外の値（5 など）も入る。
+export const BANK_TXN_STATUS = {
+  unmatched: 1, // 消込待ち（未処理）
+  matched: 2, // 消込済み
+  ignored: 3, // 無視
+  matching: 4, // 消込中
+  excluded: 6, // 対象外
+} as const;
 
 export type BankTxn = {
   id: number;
@@ -155,8 +162,9 @@ export type BankTxn = {
   entrySide: 'income' | 'expense';
   description: string;
   // 取引後の残高。銀行は整数、カードは null。
-  balance?: number | null;
-  status: BankTxnStatus;
+  balance: number | null;
+  // 既知の値は BANK_TXN_STATUS。応答に無ければ null。
+  status: number | null;
   dueAmount: number;
   ruleMatched: boolean;
 };
