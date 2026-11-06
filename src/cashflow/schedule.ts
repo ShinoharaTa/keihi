@@ -23,6 +23,8 @@ import {
 } from './repo.ts';
 
 export const DEFAULT_NOTIFY_DAYS_BEFORE = 14;
+export const NOTIFY_DAYS_MAX = 365;
+export const NAME_MAX = 200;
 
 // 周期ごとの月数（once は 1 回だけ）。
 const STEP_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, yearly: 12, biennial: 24 };
@@ -80,11 +82,15 @@ const CREATE_ONLY = new Set<string>(['origin']);
 
 const isEnum = <T extends string>(xs: readonly T[], v: unknown): v is T => (xs as readonly unknown[]).includes(v);
 
-function checkField(key: keyof ItemInput, v: unknown): void {
+// 検査して、保存する値を返す（name は前後の空白を落とす）。
+function checkField(key: keyof ItemInput, v: unknown): unknown {
+  if (key === 'name') {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (t.length < 1 || t.length > NAME_MAX) throw new ScheduleError('invalid_name');
+    return t;
+  }
   const ok = (() => {
     switch (key) {
-      case 'name':
-        return typeof v === 'string' && v.trim() !== '';
       case 'amount':
         return Number.isSafeInteger(v) && (v as number) > 0;
       case 'direction':
@@ -100,12 +106,13 @@ function checkField(key: keyof ItemInput, v: unknown): void {
       case 'endDate':
         return v === null || isDate(v);
       case 'notifyDaysBefore':
-        return Number.isSafeInteger(v) && (v as number) >= 0;
+        return Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= NOTIFY_DAYS_MAX;
       case 'origin':
         return isEnum(ORIGINS, v);
     }
   })();
   if (!ok) throw new ScheduleError(`invalid_${snake(key)}`);
+  return v;
 }
 
 const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -114,10 +121,9 @@ const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 export function parseBody(body: Record<string, unknown>, mode: 'create' | 'update'): Partial<ItemInput> {
   const out: Partial<Record<keyof ItemInput, unknown>> = {};
   for (const [k, v] of Object.entries(body)) {
-    if (!(k in BODY_KEYS) || (mode === 'update' && CREATE_ONLY.has(k))) throw new ScheduleError('invalid_field');
+    if (!Object.hasOwn(BODY_KEYS, k) || (mode === 'update' && CREATE_ONLY.has(k))) throw new ScheduleError('invalid_field');
     const key = BODY_KEYS[k as keyof typeof BODY_KEYS];
-    checkField(key, v);
-    out[key] = v;
+    out[key] = checkField(key, v);
   }
   if (mode === 'create') {
     out.accountId ??= null;
@@ -131,15 +137,17 @@ export function parseBody(body: Record<string, unknown>, mode: 'create' | 'updat
   return out as Partial<ItemInput>;
 }
 
-function checkConsistent(db: Db, v: { accountId: string | null; anchorDate: string; endDate: string | null }): void {
+function checkConsistent(db: Db, v: { direction: Direction; category: Category; accountId: string | null; anchorDate: string; endDate: string | null }): void {
+  if (v.direction === 'out' && v.category === 'income') throw new ScheduleError('invalid_category_for_direction');
   if (v.endDate !== null && v.endDate < v.anchorDate) throw new ScheduleError('end_before_anchor');
   if (v.accountId !== null && !db.prepare('SELECT 1 FROM money_accounts WHERE id = ?').get(v.accountId)) throw new ScheduleError('unknown_account');
 }
 
-// ---- 作成・更新・停止 ----
+// ---- 作成・更新・停止・再開 ----
 
 export function createItem(db: Db, input: ItemInput, by: By, now: Date = new Date()): ScheduledItemRow {
-  for (const k of Object.keys(BODY_KEYS).map((b) => BODY_KEYS[b as keyof typeof BODY_KEYS])) checkField(k, input[k]);
+  input = { ...input };
+  for (const k of Object.values(BODY_KEYS)) (input as Record<string, unknown>)[k] = checkField(k, input[k]);
   checkConsistent(db, input);
   return tx(db, () => {
     const row = insertScheduledItem(db, { ...input, now: now.toISOString() });
@@ -150,15 +158,18 @@ export function createItem(db: Db, input: ItemInput, by: By, now: Date = new Dat
 
 // 渡したキーだけ変える。変わった列の前後を監査ログに残す（何も変わらなければ書かない）。
 export function updateItem(db: Db, id: string, patch: Partial<ItemInput>, by: By, now: Date = new Date()): ScheduledItemRow {
+  patch = { ...patch };
   for (const [k, v] of Object.entries(patch) as [keyof ItemInput, unknown][]) {
     if (v === undefined) continue;
     if (k === 'origin') throw new ScheduleError('invalid_field');
-    checkField(k, v);
+    (patch as Record<string, unknown>)[k] = checkField(k, v);
   }
   return tx(db, () => {
     const cur = getScheduledItem(db, id);
     if (!cur) throw new ScheduleError('not_found', 404);
     const next = {
+      direction: patch.direction ?? cur.direction,
+      category: patch.category ?? cur.category,
       accountId: patch.accountId !== undefined ? patch.accountId : cur.account_id,
       anchorDate: patch.anchorDate ?? cur.anchor_date,
       endDate: patch.endDate !== undefined ? patch.endDate : cur.end_date,
@@ -189,6 +200,18 @@ export function deactivateItem(db: Db, id: string, by: By, now: Date = new Date(
     if (cur.active === 0) return cur;
     const row = updateScheduledItem(db, id, { active: 0 }, now.toISOString())!;
     appendAudit(db, { actor: by.actor, action: 'scheduled_item.deactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null } }, now);
+    return row;
+  });
+}
+
+// active = 1 に戻す（deactivateItem と対）。既に有効ならそのまま返す（監査ログは書かない）。
+export function activateItem(db: Db, id: string, by: By, now: Date = new Date()): ScheduledItemRow {
+  return tx(db, () => {
+    const cur = getScheduledItem(db, id);
+    if (!cur) throw new ScheduleError('not_found', 404);
+    if (cur.active === 1) return cur;
+    const row = updateScheduledItem(db, id, { active: 1 }, now.toISOString())!;
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.reactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null } }, now);
     return row;
   });
 }
@@ -260,7 +283,8 @@ export function nextDue(item: DueItem, today: string): string | null {
 
 export type Upcoming = ScheduledItemRow & { due_date: string };
 
-// active な項目の today 〜 today + days 日（両端を含む）の期日を、期日順（同じ日は作成順）に並べる。
+// active な項目の期日を、期日順（同じ日は作成順）に並べる。
+// 範囲は今日〜今日 + days 日で、両端を含む（days = 30 なら 31 日分。today は呼ぶ側が Asia/Tokyo の暦日で渡す）。
 export function upcoming(db: Db, today: string, days: number): { from: string; to: string; items: Upcoming[] } {
   const to = addDays(today, days);
   const items: Upcoming[] = [];

@@ -15,6 +15,7 @@ import {
 } from '../../src/cashflow/repo.ts';
 import {
   ScheduleError,
+  activateItem,
   createItem,
   deactivateItem,
   getItem,
@@ -137,11 +138,12 @@ describe('0006_cashflow の制約', () => {
     }
   });
 
-  test('scheduled_items は削除できず、id・created_at は変えられない', () => {
+  test('scheduled_items は削除できず、id・origin・created_at は変えられない', () => {
     const id = ins({});
     assert.throws(() => db.prepare('DELETE FROM scheduled_items WHERE id = ?').run(id), /削除できない/);
     assert.throws(() => db.prepare('UPDATE scheduled_items SET created_at = ? WHERE id = ?').run('x', id), /不変/);
     assert.throws(() => db.prepare('UPDATE scheduled_items SET id = ? WHERE id = ?').run('Z', id), /不変/);
+    assert.throws(() => db.prepare('UPDATE scheduled_items SET origin = ? WHERE id = ?').run('detected', id), /不変/);
     db.prepare('UPDATE scheduled_items SET name = ?, amount = ? WHERE id = ?').run('y', 2, id);
   });
 
@@ -170,6 +172,19 @@ describe('0006_cashflow の制約', () => {
     assert.equal(s.updated_at, '2026-11-07T00:00:00.000Z');
     assert.equal(setRecurrenceCandidateState(db, 'NOPE', 'dismissed', null, now), null);
     assert.throws(() => setRecurrenceCandidateState(db, c.id, 'closed' as never, null, now), /CHECK/);
+  });
+
+  test('recurrence_candidates は accepted のときだけ scheduled_item_id を持つ', () => {
+    const c = insertRecurrenceCandidate(db, { accountId: acc, descriptionNorm: 'ｶﾞｽ', amount: 3000, interval: 'monthly', occurrences: [], now });
+    const item = createItem(db, base, by, T0);
+    assert.throws(() => setRecurrenceCandidateState(db, c.id, 'accepted', null, now), /CHECK/);
+    assert.throws(() => setRecurrenceCandidateState(db, c.id, 'dismissed', item.id, now), /CHECK/);
+    assert.throws(() => setRecurrenceCandidateState(db, c.id, 'open', item.id, now), /CHECK/);
+    assert.throws(
+      () => db.prepare(`INSERT INTO recurrence_candidates (id, account_id, description_norm, amount, interval, occurrences_json, state, created_at, updated_at) VALUES ('R8', ?, 'x', 1, 'yearly', '[]', 'accepted', ?, ?)`).run(acc, now, now),
+      /CHECK/,
+    );
+    assert.equal(getRecurrenceCandidate(db, c.id)!.state, 'open');
   });
 
   test('recurrence_candidates の CHECK と一覧', () => {
@@ -277,6 +292,9 @@ describe('台帳の作成・更新・停止', () => {
       [{ endDate: '2027-13-01' }, 'invalid_end_date'],
       [{ endDate: '2027-05-30' }, 'end_before_anchor'],
       [{ notifyDaysBefore: -1 }, 'invalid_notify_days_before'],
+      [{ notifyDaysBefore: 366 }, 'invalid_notify_days_before'],
+      [{ name: 'あ'.repeat(201) }, 'invalid_name'],
+      [{ category: 'income' }, 'invalid_category_for_direction'],
       [{ origin: 'agent' as never }, 'invalid_origin'],
       [{ accountId: 'NOPE' }, 'unknown_account'],
     ];
@@ -308,8 +326,20 @@ describe('台帳の作成・更新・停止', () => {
     assert.ok(verifyAudit(db).ok);
   });
 
+  test('name は前後の空白を落として 200 文字まで、notify_days_before は 365 まで', () => {
+    const it = createItem(db, { ...base, name: `  ${'あ'.repeat(200)}  `, notifyDaysBefore: 365 }, by, T0);
+    assert.equal(it.name, 'あ'.repeat(200));
+    assert.equal(it.notify_days_before, 365);
+    assert.equal(updateItem(db, it.id, { name: ' 車検 ' }, by, T1).name, '車検');
+    assert.equal(createItem(db, { ...base, direction: 'in', category: 'income' }, by, T0).category, 'income');
+  });
+
   test('更新の検査', () => {
     const it = createItem(db, base, by, T0);
+    assert.throws(() => updateItem(db, it.id, { category: 'income' }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_category_for_direction');
+    const inc = createItem(db, { ...base, direction: 'in', category: 'income' }, by, T0);
+    assert.throws(() => updateItem(db, inc.id, { direction: 'out' }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_category_for_direction');
+    assert.equal(updateItem(db, inc.id, { direction: 'out', category: 'other' }, by, T1).direction, 'out');
     assert.throws(() => updateItem(db, it.id, { endDate: '2027-01-01' }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'end_before_anchor');
     assert.throws(() => updateItem(db, it.id, { amount: -5 }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_amount');
     assert.throws(() => updateItem(db, it.id, { origin: 'detected' }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field');
@@ -329,6 +359,19 @@ describe('台帳の作成・更新・停止', () => {
     assert.throws(() => deactivateItem(db, 'NOPE', by, T1), (e: unknown) => e instanceof ScheduleError && e.status === 404);
   });
 
+  test('再開は active=1 に戻し、冪等', () => {
+    const it = createItem(db, { ...base, name: '再開' }, by, T0);
+    assert.equal(activateItem(db, it.id, by, T1).active, 1);
+    deactivateItem(db, it.id, by, T1);
+    assert.equal(activateItem(db, it.id, by, T1).active, 1);
+    assert.equal(activateItem(db, it.id, by, T1).active, 1);
+    const a = audits(db).filter((x) => x.entity_id === it.id);
+    assert.deepEqual(a.map((x) => x.action), ['scheduled_item.created', 'scheduled_item.deactivated', 'scheduled_item.reactivated']);
+    assert.ok(listItems(db).some((r) => r.id === it.id));
+    assert.throws(() => activateItem(db, 'NOPE', by, T1), (e: unknown) => e instanceof ScheduleError && e.status === 404);
+    assert.ok(verifyAudit(db).ok);
+  });
+
   test('parseBody', () => {
     assert.deepEqual(parseBody({ name: 'x', amount: 1, direction: 'in', category: 'income', recurrence: 'monthly', anchor_date: '2026-11-25' }, 'create'), {
       name: 'x', amount: 1, direction: 'in', category: 'income', recurrence: 'monthly', anchorDate: '2026-11-25', accountId: null, endDate: null, notifyDaysBefore: 14, origin: 'manual',
@@ -337,6 +380,11 @@ describe('台帳の作成・更新・停止', () => {
     assert.throws(() => parseBody({ active: 1 }, 'update'), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field');
     assert.throws(() => parseBody({ origin: 'manual' }, 'update'), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field');
     assert.deepEqual(parseBody({ end_date: null }, 'update'), { endDate: null });
+    for (const body of [{ toString: 1 }, JSON.parse('{"__proto__":1}'), { hasOwnProperty: 1 }]) {
+      for (const mode of ['create', 'update'] as const) {
+        assert.throws(() => parseBody(body, mode), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field', `${JSON.stringify(body)} ${mode}`);
+      }
+    }
   });
 
   test('upcoming は期日順に、active だけ', () => {

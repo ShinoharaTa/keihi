@@ -4,12 +4,13 @@
 //        account_id?, end_date?, notify_days_before?（既定 14）, origin?（既定 manual）} → 201 ScheduledItem / 400 {error}
 //   PATCH /api/scheduled_items/:id             body は上の部分（origin は変えられない）→ 200 ScheduledItem / 400 / 404
 //   POST /api/scheduled_items/:id/deactivate   → 200 ScheduledItem（active = 0。既に止めてあればそのまま）/ 404
+//   POST /api/scheduled_items/:id/activate     → 200 ScheduledItem（active = 1 に戻す。既に有効ならそのまま）/ 404
 //   GET  /api/scheduled_items/upcoming?days=30 → 200 {from, to, items: [ScheduledItem & {due_date}]}
-//        Asia/Tokyo の今日から days 日後まで（両端を含む）の期日を期日順に。days は 1〜UPCOMING_MAX_DAYS の整数。
+//        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
-import { ScheduleError, createItem, deactivateItem, listItems, parseBody, updateItem, upcoming, type ItemInput } from '../../cashflow/schedule.ts';
+import { ScheduleError, activateItem, createItem, deactivateItem, listItems, parseBody, updateItem, upcoming, type ItemInput } from '../../cashflow/schedule.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -72,6 +73,14 @@ export function cashflowRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
   r.post('/scheduled_items/:id/deactivate', (c) => {
     try {
       return c.json(deactivateItem(deps.db, c.req.param('id'), by(c), now()));
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  r.post('/scheduled_items/:id/activate', (c) => {
+    try {
+      return c.json(activateItem(deps.db, c.req.param('id'), by(c), now()));
     } catch (e) {
       return fail(c, e);
     }

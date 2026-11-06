@@ -10,6 +10,7 @@ import { verifyAudit } from '../../src/audit.ts';
 import { insertAccount } from '../../src/bank/repo.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { createApp } from '../../src/web/app.ts';
 import { createAuth } from '../../src/web/auth.ts';
 import { cashflowRoutes } from '../../src/web/routes/cashflow.ts';
 
@@ -92,6 +93,11 @@ describe('POST /api/scheduled_items', () => {
       [{ ...item, active: 0 }, 'invalid_field'],
       [{ ...item, name: '' }, 'invalid_name'],
       [{ amount: 1 }, 'missing_name'],
+      ['{"toString":1}', 'invalid_field'],
+      ['{"__proto__":1}', 'invalid_field'],
+      [{ ...item, name: 'x'.repeat(201) }, 'invalid_name'],
+      [{ ...item, notify_days_before: 366 }, 'invalid_notify_days_before'],
+      [{ ...item, category: 'income' }, 'invalid_category_for_direction'],
     ];
     for (const [body, code] of cases) {
       const res = await send('POST', '/api/scheduled_items', body);
@@ -104,6 +110,22 @@ describe('POST /api/scheduled_items', () => {
   test('認証は app.ts と同じミドルウェアで通る（ヘッダが無ければ 401）', async () => {
     const res = await app.request('/api/scheduled_items', { method: 'POST', headers: { Host: HOST, 'content-type': 'application/json' }, body: JSON.stringify(item) });
     assert.equal(res.status, 401);
+  });
+
+  test('createApp に登録されていて、未認証は 401', async () => {
+    const full = createApp({
+      db,
+      objectsDir: path.join(root, 'objects'),
+      config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' }, retention: { years: 7, extraYears: 1, start: 'next_year_0316' } },
+      auth: createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }),
+      triggerWorker: () => {},
+      now: () => T0,
+    });
+    assert.equal((await full.request('/api/scheduled_items', { headers: { Host: HOST } })).status, 401);
+    assert.equal((await full.request('/api/scheduled_items', { method: 'POST', headers: { Host: HOST, 'content-type': 'application/json' }, body: JSON.stringify(item) })).status, 401);
+    const ok = await full.request('/api/scheduled_items', { headers: { Host: HOST, 'Tailscale-User-Login': USER } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { items: [] });
   });
 });
 
@@ -155,6 +177,22 @@ describe('POST /api/scheduled_items/:id/deactivate と GET /api/scheduled_items'
     assert.equal((await get('/api/scheduled_items?all=yes')).status, 400);
     assert.equal((await send('POST', '/api/scheduled_items/NOPE/deactivate')).status, 404);
   });
+
+  test('activate で戻す（冪等）。PATCH では active を変えられない', async () => {
+    const a = await create({ name: 'A' });
+    await send('POST', `/api/scheduled_items/${a.id}/deactivate`);
+    assert.equal((await send('PATCH', `/api/scheduled_items/${a.id}`, { active: 1 })).status, 400);
+    for (let i = 0; i < 2; i++) {
+      const res = await send('POST', `/api/scheduled_items/${a.id}/activate`);
+      assert.equal(res.status, 200);
+      assert.equal(((await res.json()) as { active: number }).active, 1);
+    }
+    const acts = db.prepare(`SELECT action FROM audit_log WHERE entity_id = ? ORDER BY seq`).all(a.id as string) as { action: string }[];
+    assert.deepEqual(acts.map((x) => x.action), ['scheduled_item.created', 'scheduled_item.deactivated', 'scheduled_item.reactivated']);
+    const list = (await (await get('/api/scheduled_items')).json()) as { items: { id: string }[] };
+    assert.deepEqual(list.items.map((x) => x.id), [a.id]);
+    assert.equal((await send('POST', '/api/scheduled_items/NOPE/activate')).status, 404);
+  });
 });
 
 describe('GET /api/scheduled_items/upcoming', () => {
@@ -171,6 +209,23 @@ describe('GET /api/scheduled_items/upcoming', () => {
 
     const long = (await (await get('/api/scheduled_items/upcoming?days=60')).json()) as { items: { name: string; due_date: string }[] };
     assert.deepEqual(long.items.map((x) => [x.name, x.due_date]), [['車検', '2026-11-20'], ['年金', '2026-11-30'], ['年金', '2026-12-31']]);
+  });
+
+  test('今日は JST の暦日（14:59:59Z は前日、15:00:00Z は当日）', async () => {
+    await create({ name: '前日', recurrence: 'once', anchor_date: '2026-11-05', category: 'other' });
+    const at = async (iso: string) => {
+      const a = new Hono();
+      a.route('/api', cashflowRoutes({ db, now: () => new Date(iso) }));
+      return (await (await a.request('/api/scheduled_items/upcoming?days=1', { headers })).json()) as { from: string; to: string; items: { name: string }[] };
+    };
+    const before = await at('2026-11-05T14:59:59Z');
+    assert.equal(before.from, '2026-11-05');
+    assert.equal(before.to, '2026-11-06');
+    assert.deepEqual(before.items.map((x) => x.name), ['前日']);
+    const afterMidnight = await at('2026-11-05T15:00:00Z');
+    assert.equal(afterMidnight.from, '2026-11-06');
+    assert.equal(afterMidnight.to, '2026-11-07');
+    assert.deepEqual(afterMidnight.items, []);
   });
 
   test('days が不正なら 400', async () => {

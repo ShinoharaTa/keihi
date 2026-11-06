@@ -23,7 +23,7 @@ CREATE TABLE scheduled_items (
 CREATE INDEX scheduled_items_active ON scheduled_items(active);
 
 CREATE TRIGGER scheduled_items_immutable BEFORE UPDATE ON scheduled_items
-WHEN NEW.id IS NOT OLD.id OR NEW.created_at IS NOT OLD.created_at
+WHEN NEW.id IS NOT OLD.id OR NEW.origin IS NOT OLD.origin OR NEW.created_at IS NOT OLD.created_at
 BEGIN SELECT RAISE(ABORT, 'scheduled_items の不変の列は更新できない'); END;
 
 CREATE TRIGGER scheduled_items_no_delete BEFORE DELETE ON scheduled_items
@@ -41,7 +41,8 @@ CREATE TABLE recurrence_candidates (
   state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'accepted', 'dismissed')),
   scheduled_item_id TEXT REFERENCES scheduled_items(id),
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  CHECK ((state = 'accepted') = (scheduled_item_id IS NOT NULL))   -- 台帳の項目を結ぶのは受け入れたときだけ
 );
 CREATE INDEX recurrence_candidates_account ON recurrence_candidates(account_id, state);
 
