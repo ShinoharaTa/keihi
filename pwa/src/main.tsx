@@ -118,7 +118,8 @@ function App() {
   const upcoming = counts?.upcoming ?? 0;
   return (
     <div class="app">
-      <header class="top">keihi</header>
+      {/* お金タブは画面ごとに自分のヘッダ（戻る・題）を持つ */}
+      {tab !== 'money' && <header class="top">keihi</header>}
       {reauthWarn && (
         <p class="band-warn" role="alert">
           {reauthWarn}

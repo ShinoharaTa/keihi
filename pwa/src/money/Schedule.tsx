@@ -1,25 +1,37 @@
-// 予定（docs/mvp-plan-v3.md T301・T302。src/web/routes/cashflow.ts）。
-// 上に周期検出の提案（GET /api/recurrence_candidates?state=open）: 「予定に追加」で分類と金額を確かめて accept、「却下」で dismiss、「今すぐ検出」で detect。
-// 下に予定の台帳（GET /api/scheduled_items?all=1。次の期日は GET /api/scheduled_items/upcoming の最初の due_date）。
-// 「予定を追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」を出す。
-// 提案の分類の初期値は摘要から推す（guessCategory）。フォームを開いている間は onLock(true) でセグメントの切り替えを止める。
+// 予定（モック Schedule。docs/mvp-plan-v3.md T301・T302。src/web/routes/cashflow.ts）。
+// 上に明細から見つけた定期の支払い（GET /api/recurrence_candidates?state=open）: 「予定にする（分類）」で accept（分類は摘要から推す）、「しない」で dismiss。
+// 次に この先 12 か月の山（GET /api/scheduled_items/upcoming の期日から、毎月の分を除いて分類別に積む）。
+// 下に台帳（GET /api/scheduled_items?all=1。分類で絞り、次の期日順。停止中は「停止中の n 件も表示」で出す）。
+// ヘッダの「追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」。
+// フォームを開いている間は onLock(true) で「戻る」を止める。周期の「3 か月ごと」は追加中の API（古いサーバーは invalid_recurrence で断る）。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, patchJson, postJson } from '../api.ts';
+import { PeakStrip } from './Charts.tsx';
+import { Icon } from './Icons.tsx';
 import {
+  candidateNext,
   categoriesFor,
+  dateShort,
+  daysBetween,
   draftBody,
   draftError,
   draftOf,
   emptyDraft,
   failText,
   guessCategory,
+  heavyMonths,
   lastOccurrence,
+  ledgerRows,
+  md,
+  monthlyFixed,
   nextDueMap,
-  parseYen,
+  NOTIFY_MAX,
+  occurrenceCount,
+  peakMonths,
   RECURRENCE_LABELS,
   RECURRENCES,
+  SCHEDULE_CATEGORIES,
   SCHEDULE_CATEGORY_LABELS,
-  NOTIFY_MAX,
   TEXT_MAX,
   UPCOMING_DAYS,
   yen,
@@ -27,102 +39,163 @@ import {
   type Candidate,
   type Direction,
   type ItemDraft,
+  type LedgerFilter,
+  type PeakMonth,
   type ScheduleCategory,
   type ScheduledItem,
+  type Upcoming,
 } from './model.ts';
+import { ScreenHead } from './Money.tsx';
 
-export type Accepting = { id: string; category: ScheduleCategory; amount: string };
+const PER: Record<string, string> = { monthly: '毎月', bimonthly: '2 か月ごと', quarterly: '3 か月ごと', yearly: '毎年', biennial: '2 年ごと' };
 
-export function CandidateList({
-  items,
-  accounts,
-  accepting,
-  busy,
-  onAccept,
-  onChange,
-  onConfirm,
-  onDismiss,
-}: {
-  items: Candidate[];
-  accounts: Account[];
-  accepting: Accepting | null;
-  busy: boolean;
-  onAccept: (c: Candidate) => void;
-  onChange: (a: Accepting | null) => void;
-  onConfirm: () => void;
-  onDismiss: (c: Candidate) => void;
-}) {
+export function CandidateList({ items, accounts, today, busy, onAccept, onDismiss }: { items: Candidate[]; accounts: Account[]; today: string; busy: boolean; onAccept: (c: Candidate) => void; onDismiss: (c: Candidate) => void }) {
   const nameOf = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   return (
-    <ul class="list">
-      {items.map((c) => (
-        <li class="item" key={c.id}>
-          <div class="item-head">
-            <span class="item-name">{c.description_norm}</span>
-            <span class="num out">−{yen(c.amount)}</span>
-          </div>
-          <p class="sub">
-            {RECURRENCE_LABELS[c.interval]}・最後 {lastOccurrence(c) ?? '—'}・{nameOf(c.account_id)}
-          </p>
-          {accepting?.id === c.id ? (
-            <div class="fields">
-              <div class="chips" role="group" aria-label="分類">
-                {categoriesFor('out').map((k) => (
-                  <button type="button" key={k} class={accepting.category === k ? 'chip seg-on' : 'chip'} onClick={() => onChange({ ...accepting, category: k })}>
-                    {SCHEDULE_CATEGORY_LABELS[k]}
-                  </button>
-                ))}
-              </div>
-              <label class="fields">
-                <span class="label">金額（円）</span>
-                <input class="field" inputMode="numeric" value={accepting.amount} onInput={(e) => onChange({ ...accepting, amount: e.currentTarget.value })} />
-              </label>
-              <div class="row-btns">
-                <button type="button" class="btn btn-primary" disabled={busy || parseYen(accepting.amount) === null} onClick={onConfirm}>
-                  予定に追加
-                </button>
-                <button type="button" class="btn" onClick={() => onChange(null)}>
-                  やめる
-                </button>
-              </div>
+    <>
+      {items.map((c) => {
+        const cat = guessCategory(c.description_norm);
+        const last = lastOccurrence(c);
+        const next = candidateNext(c);
+        const n = occurrenceCount(c);
+        return (
+          <article key={c.id} class="m-card m-cand">
+            <div class="m-row">
+              <h3 class="m-h3">{c.description_norm}</h3>
+              <span class="m-h3 m-num">
+                {yen(c.amount)}
+                <span class="m-per"> / {PER[c.interval] ?? RECURRENCE_LABELS[c.interval]}</span>
+              </span>
             </div>
-          ) : (
-            <div class="row-btns">
-              <button type="button" class="btn btn-primary" disabled={busy} onClick={() => onAccept(c)}>
-                予定に追加
+            <p class="m-sub">
+              {nameOf(c.account_id)}
+              {last ? ` · 最後 ${dateShort(last, today)}${n > 0 ? `（${n} 回）` : ''}` : ''}
+              {next ? ` · 次は ${dateShort(next, today)} ごろ` : ''}
+            </p>
+            <div class="m-grid2">
+              <button type="button" class="m-btn m-btn-accent" disabled={busy} onClick={() => onAccept(c)}>
+                予定にする（{SCHEDULE_CATEGORY_LABELS[cat]}）
               </button>
-              <button type="button" class="btn" disabled={busy} onClick={() => onDismiss(c)}>
-                予定にしない
+              <button type="button" class="m-btn" disabled={busy} onClick={() => onDismiss(c)}>
+                しない
               </button>
             </div>
-          )}
-        </li>
-      ))}
-    </ul>
+          </article>
+        );
+      })}
+    </>
   );
 }
 
-export function ItemRows({ items, nextDue, onOpen }: { items: ScheduledItem[]; nextDue: Record<string, string>; onOpen: (it: ScheduledItem) => void }) {
+export function PeakCard({ peaks, fixed }: { peaks: PeakMonth[]; fixed: number }) {
+  const heavy = heavyMonths(peaks);
   return (
-    <ul class="list">
-      {items.map((it) => (
-        <li key={it.id}>
-          <button type="button" class={it.active ? 'item item-btn' : 'item item-btn txn-excluded'} onClick={() => onOpen(it)}>
-            <div class="item-head">
-              <span class="item-name">{it.name}</span>
-              {!it.active && <span class="badge">停止中</span>}
-              <span class={it.direction === 'out' ? 'num out' : 'num in'}>
-                {it.direction === 'out' ? '−' : '+'}
-                {yen(it.amount)}
-              </span>
-            </div>
-            <p class="sub">
-              {RECURRENCE_LABELS[it.recurrence]}・{SCHEDULE_CATEGORY_LABELS[it.category]}・次 {it.active ? (nextDue[it.id] ?? '—') : '—'}
-            </p>
+    <section class="m-card m-pad12 m-gap6" aria-labelledby="m-peak">
+      <div class="m-row">
+        <h2 id="m-peak" class="m-h2">
+          この先 12 か月の山
+        </h2>
+        {fixed > 0 && <span class="m-sub">毎月の {yen(fixed)} は除く</span>}
+      </div>
+      <div class="m-legend" aria-hidden="true">
+        <span>
+          <span class="m-sw sw-tax" />
+          税金
+        </span>
+        <span>
+          <span class="m-sw sw-ins" />
+          保険
+        </span>
+        <span>
+          <span class="m-sw sw-car" />
+          車
+        </span>
+        <span>
+          <span class="m-sw sw-other" />
+          その他
+        </span>
+      </div>
+      <PeakStrip peaks={peaks} heavy={heavy} />
+      <p class="m-sub">
+        {heavy.length > 0 ? `${heavy.map((m) => `${Number(m.slice(5, 7))} 月`).join('・')}が重い月です。前の月までに残しておきましょう。` : 'この先 12 か月に大きな予定支出はありません。'}
+      </p>
+    </section>
+  );
+}
+
+const FILTERS: { id: LedgerFilter; label: string }[] = [{ id: '', label: '全部' }, ...SCHEDULE_CATEGORIES.map((c) => ({ id: c, label: SCHEDULE_CATEGORY_LABELS[c] }))];
+
+export function Ledger({
+  items,
+  nextDue,
+  today,
+  filter,
+  showInactive,
+  onFilter,
+  onShowInactive,
+  onOpen,
+}: {
+  items: ScheduledItem[];
+  nextDue: Record<string, string>;
+  today: string;
+  filter: LedgerFilter;
+  showInactive: boolean;
+  onFilter: (f: LedgerFilter) => void;
+  onShowInactive: (v: boolean) => void;
+  onOpen: (it: ScheduledItem) => void;
+}) {
+  const rows = ledgerRows(items, nextDue, filter, showInactive);
+  const inactive = items.filter((it) => !it.active && (filter === '' || it.category === filter)).length;
+  return (
+    <section class="m-col" aria-labelledby="m-ledger">
+      <h2 id="m-ledger" class="m-h2 m-px4">
+        台帳（次の期日順）
+      </h2>
+      <div class="m-chips6" role="group" aria-label="分類で絞り込む">
+        {FILTERS.map((f) => (
+          <button type="button" key={f.id || 'all'} aria-pressed={filter === f.id} onClick={() => onFilter(f.id)}>
+            {f.label}
           </button>
-        </li>
-      ))}
-    </ul>
+        ))}
+      </div>
+      {rows.length === 0 ? (
+        <p class="m-sub13 m-px4">予定はまだありません。</p>
+      ) : (
+        <ul class="m-ledger">
+          {rows.map((it) => {
+            const due = it.active ? (nextDue[it.id] ?? null) : null;
+            const left = due ? daysBetween(today, due) : null;
+            return (
+              <li key={it.id}>
+                <button type="button" class={it.active ? 'm-lrow' : 'm-lrow m-lrow-off'} onClick={() => onOpen(it)}>
+                  <span class="m-lrow-date">
+                    <b>{due ? md(due) : '—'}</b>
+                    <span>{!it.active ? '停止中' : due === null ? '期日なし' : left !== null && left <= 60 ? (left <= 0 ? '今日' : `あと ${left} 日`) : due.slice(0, 4)}</span>
+                  </span>
+                  <span class="m-lrow-name">
+                    <span>{it.name}</span>
+                    <span>
+                      <span class={`m-badge b-${it.category}`}>{SCHEDULE_CATEGORY_LABELS[it.category]}</span>
+                      {PER[it.recurrence] ?? RECURRENCE_LABELS[it.recurrence]}
+                      {it.origin === 'detected' ? ' · 明細から' : ''}
+                    </span>
+                  </span>
+                  <span class={it.direction === 'in' ? 'm-lrow-amt m-amt-in' : 'm-lrow-amt'}>
+                    {it.direction === 'in' ? '+' : ''}
+                    {yen(it.amount)}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {inactive > 0 && (
+        <button type="button" class="m-link m-link-center" onClick={() => onShowInactive(!showInactive)}>
+          {showInactive ? '停止中を隠す' : `停止中の ${inactive} 件も表示`}
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -146,71 +219,79 @@ export function ItemForm({
   const set = <K extends keyof ItemDraft>(k: K, v: ItemDraft[K]) => onChange({ ...draft, [k]: v });
   const err = draftError(draft);
   return (
-    <div class="fields">
-      <p class="sheet-title">{editing ? `「${editing.name}」を編集` : '予定を追加'}</p>
-      <label class="fields">
-        <span class="label">名称</span>
-        <input class="field" maxLength={TEXT_MAX} value={draft.name} onInput={(e) => set('name', e.currentTarget.value)} />
-      </label>
-      <label class="fields">
-        <span class="label">金額（円）</span>
-        <input class="field" inputMode="numeric" value={draft.amount} onInput={(e) => set('amount', e.currentTarget.value)} />
-      </label>
-      <div class="seg" role="group" aria-label="向き">
-        <button type="button" class={draft.direction === 'out' ? 'seg-on' : ''} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
+    <section class="m-card m-form" aria-labelledby="m-item-form">
+      <h2 id="m-item-form" class="m-h2">
+        {editing ? `「${editing.name}」を編集` : '予定を追加'}
+      </h2>
+      <div class="m-seg m-seg-3" role="group" aria-label="向き">
+        <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
           支出
         </button>
-        <button type="button" class={draft.direction === 'in' ? 'seg-on' : ''} onClick={() => onChange({ ...draft, direction: 'in', category: draft.category === 'other' ? 'income' : draft.category })}>
+        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' ? 'income' : draft.category })}>
           収入
         </button>
       </div>
-      <label class="fields">
-        <span class="label">分類</span>
-        <select class="field" value={draft.category} onChange={(e) => set('category', e.currentTarget.value as ScheduleCategory)}>
-          {categoriesFor(draft.direction).map((k) => (
-            <option key={k} value={k}>
-              {SCHEDULE_CATEGORY_LABELS[k]}
-            </option>
-          ))}
-        </select>
+      <label class="m-field-wrap">
+        <span class="m-label">名称</span>
+        <input class="m-field" maxLength={TEXT_MAX} value={draft.name} onInput={(e) => set('name', e.currentTarget.value)} />
       </label>
-      <label class="fields">
-        <span class="label">周期</span>
-        <select class="field" value={draft.recurrence} onChange={(e) => set('recurrence', e.currentTarget.value as ItemDraft['recurrence'])}>
-          {RECURRENCES.map((k) => (
-            <option key={k} value={k}>
-              {RECURRENCE_LABELS[k]}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label class="fields">
-        <span class="label">最初の支払日</span>
-        <input class="field" type="date" value={draft.anchor_date} onInput={(e) => set('anchor_date', e.currentTarget.value)} />
-      </label>
-      <label class="fields">
-        <span class="label">終わりの日（任意）</span>
-        <input class="field" type="date" min={draft.anchor_date} value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
-      </label>
-      <label class="fields">
-        <span class="label">何日前から知らせるか（0〜{NOTIFY_MAX}）</span>
-        <input class="field" inputMode="numeric" maxLength={3} value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
-      </label>
-      {err && draft.name !== '' && <p class="msg">{err}</p>}
-      <div class="row-btns">
-        <button type="button" class="btn btn-primary" disabled={busy || err !== null} onClick={onSave}>
+      <div class="m-form-2">
+        <label class="m-field-wrap">
+          <span class="m-label">金額（円）</span>
+          <input class="m-field" inputMode="numeric" value={draft.amount} onInput={(e) => set('amount', e.currentTarget.value)} />
+        </label>
+        <label class="m-field-wrap">
+          <span class="m-label">分類</span>
+          <select class="m-field" value={draft.category} onChange={(e) => set('category', e.currentTarget.value as ScheduleCategory)}>
+            {categoriesFor(draft.direction).map((k) => (
+              <option key={k} value={k}>
+                {SCHEDULE_CATEGORY_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div class="m-form-2">
+        <label class="m-field-wrap">
+          <span class="m-label">周期</span>
+          <select class="m-field" value={draft.recurrence} onChange={(e) => set('recurrence', e.currentTarget.value as ItemDraft['recurrence'])}>
+            {RECURRENCES.map((k) => (
+              <option key={k} value={k}>
+                {RECURRENCE_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label class="m-field-wrap">
+          <span class="m-label">何日前に知らせる（0〜{NOTIFY_MAX}）</span>
+          <input class="m-field" inputMode="numeric" maxLength={3} value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
+        </label>
+      </div>
+      <div class="m-form-2">
+        <label class="m-field-wrap">
+          <span class="m-label">最初の支払日</span>
+          <input class="m-field" type="date" value={draft.anchor_date} onInput={(e) => set('anchor_date', e.currentTarget.value)} />
+        </label>
+        <label class="m-field-wrap">
+          <span class="m-label">終わりの日（任意）</span>
+          <input class="m-field" type="date" min={draft.anchor_date} value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
+        </label>
+      </div>
+      {err && draft.name !== '' && <p class="m-msg">{err}</p>}
+      <div class="m-grid2">
+        <button type="button" class="m-btn m-btn-primary" disabled={busy || err !== null} onClick={onSave}>
           保存
         </button>
-        <button type="button" class="btn" onClick={onClose}>
+        <button type="button" class="m-btn" onClick={onClose}>
           閉じる
         </button>
       </div>
       {editing && (
-        <button type="button" class={editing.active ? 'btn btn-danger' : 'btn'} disabled={busy} onClick={onToggle}>
+        <button type="button" class={editing.active ? 'm-btn m-btn-warn' : 'm-btn'} disabled={busy} onClick={onToggle}>
           {editing.active ? '停止する' : '再開する'}
         </button>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -218,18 +299,23 @@ export function Schedule({
   today,
   accounts,
   addDirection,
+  locked,
   onLock,
+  onBack,
 }: {
   today: string;
   accounts: Account[];
-  // 開いたときに追加フォームを出す（資金繰り・はじめにから「収入を予定に追加」）。
+  // 開いたときに追加フォームを出す（ホーム・見通しから「収入を予定に追加」）。
   addDirection?: Direction;
+  locked: boolean;
   onLock: (locked: boolean) => void;
+  onBack: () => void;
 }) {
   const [cands, setCands] = useState<Candidate[]>([]);
   const [items, setItems] = useState<ScheduledItem[] | null>(null);
-  const [nextDue, setNextDue] = useState<Record<string, string>>({});
-  const [accepting, setAccepting] = useState<Accepting | null>(null);
+  const [upcoming, setUpcoming] = useState<Upcoming[]>([]);
+  const [filter, setFilter] = useState<LedgerFilter>('');
+  const [showInactive, setShowInactive] = useState(false);
   const [form, setForm] = useState<{ draft: ItemDraft; editing: ScheduledItem | null } | null>(() =>
     addDirection ? { draft: emptyDraft(today, addDirection), editing: null } : null,
   );
@@ -247,13 +333,13 @@ export function Schedule({
     const [c, s, u] = await Promise.all([
       getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open'),
       getJson<{ items: ScheduledItem[] }>('/api/scheduled_items?all=1'),
-      getJson<{ items: { id: string; due_date: string }[] }>(`/api/scheduled_items/upcoming?days=${UPCOMING_DAYS}`),
+      getJson<{ items: Upcoming[] }>(`/api/scheduled_items/upcoming?days=${UPCOMING_DAYS}`),
     ]);
     const failed = [c, s, u].find((r) => !r.ok);
     if (failed && !failed.ok) setMsg(failText(failed.status, failed.body));
     setCands(c.ok ? c.data.candidates : []);
     setItems(s.ok ? s.data.items : null);
-    setNextDue(u.ok ? nextDueMap(u.data.items) : {});
+    setUpcoming(u.ok ? u.data.items : []);
   }, []);
 
   useEffect(() => {
@@ -272,15 +358,6 @@ export function Schedule({
     return good;
   };
 
-  const confirmAccept = async () => {
-    if (!accepting) return;
-    const c = cands.find((x) => x.id === accepting.id);
-    const amount = parseYen(accepting.amount);
-    const body: Record<string, unknown> = { category: accepting.category };
-    if (amount !== null && amount !== c?.amount) body.amount = amount;
-    if (await run(postJson(`/api/recurrence_candidates/${encodeURIComponent(accepting.id)}/accept`, body), () => '予定に追加しました。')) setAccepting(null);
-  };
-
   const save = async () => {
     if (!form) return;
     const body = draftBody(form.draft);
@@ -296,68 +373,85 @@ export function Schedule({
     if (ok && !active) setUndo(it);
   };
 
-  if (form) {
-    return (
-      <>
-        {msg && <p class="msg">{msg}</p>}
-        <ItemForm
-          draft={form.draft}
-          editing={form.editing}
-          busy={busy}
-          onChange={(draft) => setForm({ ...form, draft })}
-          onSave={() => void save()}
-          onToggle={() => form.editing && void setActive(form.editing, !form.editing.active)}
-          onClose={() => setForm(null)}
-        />
-      </>
-    );
-  }
-
+  const nextDue = nextDueMap(upcoming);
   return (
     <>
-      {msg && (
-        <div class="msg undo">
-          <span>{msg}</span>
-          {undo && (
-            <button type="button" class="btn" disabled={busy} onClick={() => void setActive(undo, true)}>
-              元に戻す
-            </button>
-          )}
-        </div>
-      )}
-      <h2 class="h">提案</h2>
-      {cands.length === 0 && <p class="sub">提案はありません。</p>}
-      {cands.length > 0 && (
-        <CandidateList
-          items={cands}
-          accounts={accounts}
-          accepting={accepting}
-          busy={busy}
-          onAccept={(c) => setAccepting({ id: c.id, category: guessCategory(c.description_norm), amount: String(c.amount) })}
-          onChange={setAccepting}
-          onConfirm={() => void confirmAccept()}
-          onDismiss={(c) => void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/dismiss`, {}), () => '予定にしないことにしました。')}
-        />
-      )}
-      <button
-        type="button"
-        class="btn"
-        disabled={busy}
-        onClick={() =>
-          void run(postJson('/api/recurrence_candidates/detect', {}), (b) => {
-            const r = b as { created?: number; updated?: number } | null;
-            return `探しました（新しい提案 ${r?.created ?? 0} 件、更新 ${r?.updated ?? 0} 件）。`;
-          })
-        }
-      >
-        明細から定期の支払いを探す
-      </button>
-      <h2 class="h">予定の台帳</h2>
-      {items && items.length === 0 && <p class="sub">予定はまだありません。</p>}
-      {items && items.length > 0 && <ItemRows items={items} nextDue={nextDue} onOpen={(it) => setForm({ draft: draftOf(it), editing: it })} />}
-      <button type="button" class="btn btn-primary" onClick={() => setForm({ draft: emptyDraft(today), editing: null })}>
-        予定を追加
-      </button>
+      <ScreenHead title="予定" locked={locked} onBack={onBack}>
+        {!form && (
+          <button type="button" class="m-btn m-btn-primary m-btn-round" onClick={() => setForm({ draft: emptyDraft(today), editing: null })}>
+            <Icon name="plus" size={18} />
+            追加
+          </button>
+        )}
+      </ScreenHead>
+      <div class="m-main">
+        {msg && (
+          <div class="m-msg m-row" role="status">
+            <span>{msg}</span>
+            {undo && (
+              <button type="button" class="m-btn" disabled={busy} onClick={() => void setActive(undo, true)}>
+                元に戻す
+              </button>
+            )}
+          </div>
+        )}
+        {form ? (
+          <ItemForm
+            draft={form.draft}
+            editing={form.editing}
+            busy={busy}
+            onChange={(draft) => setForm({ ...form, draft })}
+            onSave={() => void save()}
+            onToggle={() => form.editing && void setActive(form.editing, !form.editing.active)}
+            onClose={() => setForm(null)}
+          />
+        ) : (
+          <>
+            <section class="m-col" aria-labelledby="m-sugg">
+              <h2 id="m-sugg" class="m-h2 m-px4">
+                明細から見つけた定期の支払い（{cands.length}）
+              </h2>
+              {cands.length > 0 && <p class="m-sub13 m-px4">予定にすると見通しと残す額に入ります。</p>}
+              <CandidateList
+                items={cands}
+                accounts={accounts}
+                today={today}
+                busy={busy}
+                onAccept={(c) =>
+                  void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/accept`, { category: guessCategory(c.description_norm) }), () => `「${c.description_norm}」を予定にしました。`)
+                }
+                onDismiss={(c) => void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/dismiss`, {}), () => '予定にしないことにしました。')}
+              />
+              <button
+                type="button"
+                class="m-link"
+                disabled={busy}
+                onClick={() =>
+                  void run(postJson('/api/recurrence_candidates/detect', {}), (b) => {
+                    const r = b as { created?: number; updated?: number } | null;
+                    return `探しました（新しい提案 ${r?.created ?? 0} 件、更新 ${r?.updated ?? 0} 件）。`;
+                  })
+                }
+              >
+                明細から定期の支払いを探す
+              </button>
+            </section>
+            {items && <PeakCard peaks={peakMonths(upcoming, today)} fixed={monthlyFixed(items)} />}
+            {items && (
+              <Ledger
+                items={items}
+                nextDue={nextDue}
+                today={today}
+                filter={filter}
+                showInactive={showInactive}
+                onFilter={setFilter}
+                onShowInactive={setShowInactive}
+                onOpen={(it) => setForm({ draft: draftOf(it), editing: it })}
+              />
+            )}
+          </>
+        )}
+      </div>
     </>
   );
 }

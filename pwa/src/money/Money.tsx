@@ -1,75 +1,54 @@
-// 「お金」タブ（docs/mvp-plan-v3.md T111・T304）。上のセグメントで 明細 / 月次 / 予定 / 見通し（資金繰り）/ 口座 を切り替える。
-// 口座（GET /api/accounts）とカテゴリ（GET /api/categories）はここで 1 回読んで各画面に渡す。
-// 明細を開いているときは先頭に「はじめに」（setupSteps。済んだ手順は出さず、全部済めば出さない）。各手順は該当の画面へ移る。
-// 画面の移動は go(view, intent)。intent は移った先の初期状態（明細の絞り込み・口座の設定・予定の追加フォーム）。
-// フォームを開いている間（onLock）はセグメントを押せない。
+// 「お金」タブ（docs/mvp-plan-v3.md T111・T304。UI はモック 7 画面に合わせる）。開くとホーム。各画面へは行を押して進み、ヘッダの「戻る」でホームへ。
+// 口座（GET /api/accounts）とカテゴリ（GET /api/categories）はここで読んで各画面に渡す。口座はホームに戻るたびに読み直す（他の画面で直した設定を映すため）。
+// 画面の移動は go(view, intent)。intent は移った先の初期状態（明細の絞り込み・口座の設定・予定の追加フォーム・月次の月・見通しの月）。
+// フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。
+import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
 import { Accounts } from './Accounts.tsx';
 import { Cashflow } from './Cashflow.tsx';
-import { setupSteps, UNCATEGORIZED_QUERY, type Account, type Categories, type Candidate, type Direction, type ScheduledItem, type SetupStep, type TxnFilter, type TxnPage } from './model.ts';
+import { Home } from './Home.tsx';
+import { Icon } from './Icons.tsx';
+import type { Account, Categories, Direction, TxnFilter } from './model.ts';
 import { Monthly } from './Monthly.tsx';
 import { Schedule } from './Schedule.tsx';
 import { Txns } from './Txns.tsx';
 
-export type MoneyView = 'txns' | 'monthly' | 'schedule' | 'cashflow' | 'accounts';
-export const MONEY_VIEWS: readonly { id: MoneyView; label: string }[] = [
-  { id: 'txns', label: '明細' },
-  { id: 'monthly', label: '月次' },
-  { id: 'schedule', label: '予定' },
-  { id: 'cashflow', label: '見通し' },
-  { id: 'accounts', label: '口座' },
-];
-type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction };
-const UNSET_LIMIT = 100;
+export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts';
+export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string };
+export type Go = (view: MoneyView, intent?: Intent) => void;
 
-export function MoneySeg({ view, locked, onView }: { view: MoneyView; locked: boolean; onView: (v: MoneyView) => void }) {
+// 各画面の上の帯: 「戻る」・題・右端（任意）。
+export function ScreenHead({ title, sub, locked, flat, onBack, children }: { title: string; sub?: string; locked?: boolean; flat?: boolean; onBack: () => void; children?: ComponentChildren }) {
   return (
-    <div class="seg seg-5" role="group" aria-label="お金">
-      {MONEY_VIEWS.map((v) => (
-        <button type="button" key={v.id} class={view === v.id ? 'seg-on' : ''} disabled={locked && view !== v.id} onClick={() => onView(v.id)}>
-          {v.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-export function SetupCard({ steps, onStep }: { steps: SetupStep[]; onStep: (s: SetupStep) => void }) {
-  if (steps.length === 0) return null;
-  const text = (s: SetupStep) => {
-    if (s.kind === 'card_settlement') return `引落元が未設定のカードが ${s.count} 件あります`;
-    if (s.kind === 'income') return '収入の予定がまだありません';
-    if (s.kind === 'candidates') return `定期の支払いの提案が ${s.count} 件あります`;
-    return `タグが未設定の明細が ${s.count}${s.more ? '+' : ''} 件あります`;
-  };
-  return (
-    <div class="item setup">
-      <span class="item-name">はじめに</span>
-      <ul class="list">
-        {steps.map((s) => (
-          <li key={s.kind}>
-            <button type="button" class="btn setup-step" onClick={() => onStep(s)}>
-              <span class="item-name">{text(s)}</span> ▸
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <header class={flat ? 'm-head m-head-flat' : 'm-head'}>
+      <button type="button" class="m-icon" aria-label="お金に戻る" disabled={locked} onClick={onBack}>
+        <Icon name="back" size={22} />
+      </button>
+      {sub ? (
+        <div class="m-head-titles">
+          <h1>{title}</h1>
+          <span class="m-sub">{sub}</span>
+        </div>
+      ) : (
+        <h1>{title}</h1>
+      )}
+      {children}
+    </header>
   );
 }
 
 export function Money({ today }: { today: string }) {
-  const [nav, setNav] = useState<{ view: MoneyView; intent: Intent; key: number }>({ view: 'txns', intent: {}, key: 0 });
+  const [nav, setNav] = useState<{ view: MoneyView; intent: Intent; key: number }>({ view: 'home', intent: {}, key: 0 });
   const [locked, setLocked] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [cats, setCats] = useState<Categories | null>(null);
-  const [setup, setSetup] = useState<{ items: ScheduledItem[] | null; candidates: number; unset: { count: number; more: boolean } | null }>({ items: null, candidates: 0, unset: null });
 
-  const go = (view: MoneyView, intent: Intent = {}) => {
+  const go: Go = (view, intent = {}) => {
     setLocked(false);
     setNav((n) => ({ view, intent, key: n.key + 1 }));
   };
+  const home = () => go('home');
 
   const loadAccounts = useCallback(async () => {
     const r = await getJson<{ accounts: Account[] }>('/api/accounts');
@@ -83,48 +62,20 @@ export function Money({ today }: { today: string }) {
     })();
   }, []);
 
-  // 明細に戻るたびに口座と「はじめに」の材料を読み直す（他の画面で済ませた手順を消すため）。
   useEffect(() => {
-    if (nav.view !== 'txns') return;
-    void loadAccounts();
-    void (async () => {
-      const [s, c, u] = await Promise.all([
-        getJson<{ items: ScheduledItem[] }>('/api/scheduled_items'),
-        getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open'),
-        getJson<TxnPage>(`/api/bank_txns?tag=unset&limit=${UNSET_LIMIT}`),
-      ]);
-      setSetup({
-        items: s.ok ? s.data.items : null,
-        candidates: c.ok ? c.data.candidates.length : 0,
-        unset: u.ok ? { count: u.data.items.length, more: u.data.next_cursor !== null } : null,
-      });
-    })();
+    if (nav.view === 'home') void loadAccounts();
+    window.scrollTo(0, 0);
   }, [nav.view, nav.key, loadAccounts]);
-
-  const onStep = (s: SetupStep) => {
-    if (s.kind === 'card_settlement') go('accounts', { account: s.accountId });
-    else if (s.kind === 'income') go('schedule', { add: 'in' });
-    else if (s.kind === 'candidates') go('schedule');
-    else go('txns', { filter: { period: 'all', tag: 'unset' } });
-  };
 
   const { view, intent, key } = nav;
   return (
-    <section class="screen">
-      {view === 'txns' && <SetupCard steps={setupSteps({ accounts, ...setup })} onStep={onStep} />}
-      <MoneySeg view={view} locked={locked} onView={(v) => go(v)} />
-      {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} />}
-      {view === 'monthly' && (
-        <Monthly
-          key={key}
-          today={today}
-          cats={cats}
-          onCategory={(month, category) => go('txns', { filter: { period: 'month', month, category: category ?? UNCATEGORIZED_QUERY } })}
-        />
-      )}
-      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} onLock={setLocked} />}
-      {view === 'cashflow' && <Cashflow key={key} accounts={accounts} onAddIncome={() => go('schedule', { add: 'in' })} />}
-      {view === 'accounts' && <Accounts key={key} accounts={accounts} focus={intent.account} onChanged={loadAccounts} onLock={setLocked} />}
+    <section class="m">
+      {view === 'home' && <Home key={key} today={today} accounts={accounts} cats={cats} go={go} />}
+      {view === 'monthly' && <Monthly key={key} today={today} cats={cats} initialMonth={intent.month} onBack={home} go={go} />}
+      {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} />}
+      {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
+      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} />}
+      {view === 'accounts' && <Accounts key={key} today={today} accounts={accounts} focus={intent.account} locked={locked} onChanged={loadAccounts} onLock={setLocked} onBack={home} />}
     </section>
   );
 }
