@@ -104,6 +104,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 |---|---|---|---|
 | monthly | 28〜31 日 | 3 回以上 | 46 日超 |
 | bimonthly | 58〜62 日 | 3 回以上 | 93 日超 |
+| quarterly | 85〜97 日 | 3 回以上 | 145 日超 |
 | yearly | 350〜380 日 | 2 回以上 | 570 日超 |
 | biennial | 715〜745 日 | 2 回以上 | 1,117 日超 |
 
@@ -129,6 +130,8 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | reserve（トップ） | 今日から reserve_months か月（今日を含み、応当日の前日まで）の予定支出の合計 |
 | margin | balance_end − その月の reserve |
 | first_shortfall_month | margin が初めて負になる月（無ければ null） |
+| min_month | margin が最小の月 `{month, balance_end, margin}`（同じなら早い月） |
+| cut_per_month_to_survive | 予定外の支出の目安を毎月いくら減らせば全期間で margin ≥ 0 になるかの最小の整数（今月の按分も減らした目安でし直す。二分探索）。不足が無ければ 0、目安を 0 にしても足りなければ null |
 
 警告: `no_balance`（残高が無い口座。カードは出さない）、`stale_balance`（as_of_date が今日 − 7 日より前）、`short_history`（使える月が lookback に満たない。0 か月なら目安は 0）。
 中央値は偶数個なら中央の 2 つの平均を丸める。
@@ -147,11 +150,13 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | GET /api/bank/status | ― | 口座ごとの last_sync_at・last_ok_at・last_error・last_csv_at・backfill_done_until |
 | GET /api/bank_txns | from・to・account_id・tag・category（none = 未分類）・side・amount_min・amount_max・q（正規化して部分一致）・cursor・limit（1〜100） | `{items, next_cursor}`。items に tag・category・tag_source・excluded・transfer_kind |
 | GET /api/summary/monthly | `month=YYYY-MM` か `from&to`（最大 36 か月） | MonthlySummary か `{months}` |
+| GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は全口座、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）と一致させるため全口座・sync（`src/bank/overview.ts`） |
+| GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
 | GET /api/categories | ― | 12 種と未分類のラベル |
 | GET /api/scheduled_items | `all=1` で停止中も | `{items}` |
-| POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category・recurrence（once/monthly/bimonthly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14） | out に income は不可。origin は変えられない |
+| POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category・recurrence（once/monthly/bimonthly/quarterly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14） | out に income は不可。origin は変えられない |
 | POST /api/scheduled_items/:id/deactivate・/activate | ― | active を切り替え |
 | GET /api/scheduled_items/upcoming | days（1〜1096、既定 30） | 今日〜今日 + days（両端を含む）の期日順 |
 | GET /api/recurrence_candidates | state? | `{candidates}` |

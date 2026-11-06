@@ -124,6 +124,7 @@ describe('detectRecurrences', () => {
   const BOUNDS: [string, number, number, string | null][] = [
     ['毎月', 27, 3, null], ['毎月', 28, 3, 'monthly'], ['毎月', 31, 3, 'monthly'], ['毎月', 32, 3, null],
     ['隔月', 57, 3, null], ['隔月', 58, 3, 'bimonthly'], ['隔月', 62, 3, 'bimonthly'], ['隔月', 63, 3, null],
+    ['3 か月', 84, 3, null], ['3 か月', 85, 3, 'quarterly'], ['3 か月', 97, 3, 'quarterly'], ['3 か月', 98, 3, null], ['3 か月', 91, 2, null],
     ['毎年', 349, 2, null], ['毎年', 350, 2, 'yearly'], ['毎年', 380, 2, 'yearly'], ['毎年', 381, 2, null],
     ['隔年', 714, 2, null], ['隔年', 715, 2, 'biennial'], ['隔年', 745, 2, 'biennial'], ['隔年', 746, 2, null],
   ];
@@ -185,10 +186,13 @@ describe('detectRecurrences', () => {
     // 毎月の上限は 31 + 15 = 46 日。today − 46 日は出て、today − 47 日は出ない。
     for (const d of series(30, 3, addDays(TODAY, -46))) txn(db, A, d, 1000, 'まだ');
     for (const d of series(30, 3, addDays(TODAY, -47))) txn(db, A, d, 1000, '止まった');
+    // 3 か月ごとの上限は 97 + 48 = 145 日。
+    for (const d of series(91, 3, addDays(TODAY, -145))) txn(db, A, d, 1000, '3か月まだ');
+    for (const d of series(91, 3, addDays(TODAY, -146))) txn(db, A, d, 1000, '3か月止まった');
     // 毎年の上限は 380 + 190 = 570 日。
     for (const d of series(365, 2, addDays(TODAY, -570))) txn(db, A, d, 1000, '年まだ');
     for (const d of series(365, 2, addDays(TODAY, -571))) txn(db, A, d, 1000, '年止まった');
-    assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 40 }).map((d) => d.descriptionNorm).sort(), ['まだ', '年まだ'].sort());
+    assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 40 }).map((d) => d.descriptionNorm).sort(), ['まだ', '3か月まだ', '年まだ'].sort());
     db.close();
   });
 
@@ -397,6 +401,25 @@ describe('acceptCandidate / dismissCandidate', () => {
     assert.throws(() => acceptCandidate(db, byName('家賃').id, by, {}, T0), /not_open/);
     assert.throws(() => dismissCandidate(db, byName('家賃').id, by, T0), /not_open/);
     assert.equal(listScheduledItems(db).length, 3);
+    db.close();
+  });
+
+  test('3 か月ごと: 検出して受け入れると quarterly の項目になり、次の期日は最後の出現月 + 3 か月', () => {
+    const { db, A } = fresh();
+    for (const d of ['2026-02-20', '2026-05-20', '2026-08-20']) txn(db, A, d, 45000, '国保');
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
+    const c = listRecurrenceCandidates(db)[0];
+    assert.equal(c.interval, 'quarterly');
+    assert.equal(nextDueFromCandidate(c), '2026-11-20');
+    const { candidate, item } = acceptCandidate(db, c.id, by, { category: 'insurance' }, T0);
+    assert.equal(candidate.state, 'accepted');
+    assert.equal(item.recurrence, 'quarterly');
+    assert.equal(item.anchor_date, '2026-11-20');
+    assert.equal(item.category, 'insurance');
+    assert.equal(item.origin, 'detected');
+    // 受け入れた後は再検出で作らない。
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
+    assert.equal(verifyAudit(db).ok, true);
     db.close();
   });
 

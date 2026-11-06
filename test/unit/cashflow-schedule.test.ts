@@ -99,6 +99,77 @@ describe('0006_cashflow のマイグレーション', () => {
   });
 });
 
+describe('0007_recurrence_quarterly のマイグレーション', () => {
+  const schema = (db: Db) =>
+    (db.prepare(`SELECT type, name, tbl_name FROM sqlite_master WHERE tbl_name IN ('scheduled_items', 'recurrence_candidates') AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY type, name`).all() as { type: string; name: string; tbl_name: string }[]).map((r) => `${r.type}:${r.name}:${r.tbl_name}`);
+  const WANT_SCHEMA = [
+    'index:recurrence_candidates_account:recurrence_candidates',
+    'index:scheduled_items_active:scheduled_items',
+    'table:recurrence_candidates:recurrence_candidates',
+    'table:scheduled_items:scheduled_items',
+    'trigger:recurrence_candidates_immutable:recurrence_candidates',
+    'trigger:recurrence_candidates_no_delete:recurrence_candidates',
+    'trigger:scheduled_items_immutable:scheduled_items',
+    'trigger:scheduled_items_no_delete:scheduled_items',
+  ];
+
+  test('空の DB から上がり、quarterly を入れられる', () => {
+    const db = openDb(path.join(root, `${n++}.db`));
+    try {
+      assert.ok(migrate(db).includes('0007_recurrence_quarterly.sql'));
+      assert.deepEqual(integrityCheck(db), []);
+      assert.deepEqual(schema(db), WANT_SCHEMA);
+      const acc = insertAccount(db, { provider: 'freee', name: '普通預金', kind: 'bank', source: 'csv', now });
+      assert.equal(createItem(db, { ...base, recurrence: 'quarterly', accountId: acc.id }, by, T0).recurrence, 'quarterly');
+      assert.equal(insertRecurrenceCandidate(db, { accountId: acc.id, descriptionNorm: 'x', amount: 1, interval: 'quarterly', occurrences: [], now }).interval, 'quarterly');
+    } finally {
+      db.close();
+    }
+  });
+
+  test('0006 まで上げた DB（行あり）から上がり、行・参照・トリガーが残る', () => {
+    const db = openDb(path.join(root, `${n++}.db`));
+    try {
+      const ms = listMigrations();
+      const upTo6 = ms.filter((m) => m.version <= 6);
+      assert.equal(upTo6.at(-1)!.name, '0006_cashflow.sql');
+      migrate(db, upTo6);
+      const acc = insertAccount(db, { provider: 'freee', name: '普通預金', kind: 'bank', source: 'csv', now }).id;
+      const item = createItem(db, { ...base, accountId: acc }, by, T0);
+      const stopped = deactivateItem(db, createItem(db, { ...base, name: '保険', recurrence: 'monthly' }, by, T0).id, by, T1);
+      const open = insertRecurrenceCandidate(db, { accountId: acc, descriptionNorm: 'ﾃﾞﾝｷ', amount: 5000, interval: 'monthly', occurrences: [{ id: 'T1' }], now });
+      const acc2 = insertRecurrenceCandidate(db, { accountId: acc, descriptionNorm: 'ｼﾞﾄﾞｳｼｬｾﾞｲ', amount: 39500, interval: 'yearly', occurrences: [], now });
+      setRecurrenceCandidateState(db, acc2.id, 'accepted', item.id, now);
+      const beforeItems = db.prepare('SELECT * FROM scheduled_items ORDER BY id').all();
+      const beforeCands = db.prepare('SELECT * FROM recurrence_candidates ORDER BY id').all();
+      assert.throws(() => createItem(db, { ...base, recurrence: 'quarterly' }, by, T0), /CHECK/);
+
+      assert.deepEqual(migrate(db, ms), ms.filter((m) => m.version > 6).map((m) => m.name));
+      assert.deepEqual(integrityCheck(db), []);
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.deepEqual(schema(db), WANT_SCHEMA);
+      assert.equal((db.prepare(`SELECT count(*) n FROM sqlite_master WHERE instr(name, '_old') > 0 OR instr(sql, '_old') > 0`).get() as { n: number }).n, 0);
+      assert.deepEqual(db.prepare('SELECT * FROM scheduled_items ORDER BY id').all(), beforeItems);
+      assert.deepEqual(db.prepare('SELECT * FROM recurrence_candidates ORDER BY id').all(), beforeCands);
+      assert.equal(getItem(db, stopped.id)!.active, 0);
+      assert.equal(getRecurrenceCandidate(db, open.id)!.state, 'open');
+
+      // 新しい表でも外部キー・CHECK・トリガーが効く。
+      assert.throws(() => db.prepare('UPDATE recurrence_candidates SET scheduled_item_id = ? WHERE id = ?').run('NOPE', acc2.id), /FOREIGN KEY/);
+      assert.throws(() => db.prepare(`UPDATE scheduled_items SET account_id = 'NOPE' WHERE id = ?`).run(item.id), /FOREIGN KEY/);
+      assert.throws(() => db.prepare('DELETE FROM scheduled_items WHERE id = ?').run(item.id), /削除できない/);
+      assert.throws(() => db.prepare('DELETE FROM recurrence_candidates WHERE id = ?').run(open.id), /削除できない/);
+      assert.throws(() => db.prepare('UPDATE scheduled_items SET origin = ? WHERE id = ?').run('detected', item.id), /不変/);
+      assert.throws(() => db.prepare('UPDATE recurrence_candidates SET amount = 1 WHERE id = ?').run(open.id), /state・scheduled_item_id 以外/);
+      assert.throws(() => db.prepare(`UPDATE scheduled_items SET recurrence = 'weekly' WHERE id = ?`).run(item.id), /CHECK/);
+      assert.equal(createItem(db, { ...base, recurrence: 'quarterly', accountId: acc }, by, T0).recurrence, 'quarterly');
+      assert.equal(verifyAudit(db).ok, true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe('0006_cashflow の制約', () => {
   let db: Db;
   let acc: string;
@@ -213,6 +284,8 @@ describe('次の期日（表駆動）', () => {
     { name: 'monthly、起点より前の期間は出ない', item: item('monthly', '2027-01-10'), from: '2026-11-01', to: '2026-12-31', want: [] },
     { name: 'bimonthly 31 日起点', item: item('bimonthly', '2026-12-31'), from: '2026-12-01', to: '2027-08-31', want: ['2026-12-31', '2027-02-28', '2027-04-30', '2027-06-30', '2027-08-31'] },
     { name: 'bimonthly、from と to の両端を含む', item: item('bimonthly', '2026-01-10'), from: '2026-03-10', to: '2026-07-10', want: ['2026-03-10', '2026-05-10', '2026-07-10'] },
+    { name: 'quarterly 31 日起点', item: item('quarterly', '2026-12-31'), from: '2026-12-01', to: '2027-12-31', want: ['2026-12-31', '2027-03-31', '2027-06-30', '2027-09-30', '2027-12-31'] },
+    { name: 'quarterly 11/30 起点は 2 月が月末', item: item('quarterly', '2026-11-30'), from: '2026-11-01', to: '2027-05-31', want: ['2026-11-30', '2027-02-28', '2027-05-30'] },
     { name: 'yearly 2/29 起点は平年 2/28、閏年 2/29', item: item('yearly', '2024-02-29'), from: '2024-01-01', to: '2029-12-31', want: ['2024-02-29', '2025-02-28', '2026-02-28', '2027-02-28', '2028-02-29', '2029-02-28'] },
     { name: 'yearly 5/31', item: item('yearly', '2026-05-31'), from: '2026-11-06', to: '2028-11-06', want: ['2027-05-31', '2028-05-31'] },
     { name: 'biennial', item: item('biennial', '2025-03-15'), from: '2025-01-01', to: '2031-12-31', want: ['2025-03-15', '2027-03-15', '2029-03-15', '2031-03-15'] },
@@ -239,6 +312,8 @@ describe('次の期日（表駆動）', () => {
     { name: 'monthly、長く前の起点', item: item('monthly', '2010-08-31'), today: '2026-11-06', want: '2026-11-30' },
     { name: 'bimonthly', item: item('bimonthly', '2026-01-31'), today: '2026-11-06', want: '2026-11-30' },
     { name: 'bimonthly、偶数月だけ', item: item('bimonthly', '2026-02-10'), today: '2026-11-11', want: '2026-12-10' },
+    { name: 'quarterly', item: item('quarterly', '2026-01-25'), today: '2026-11-06', want: '2027-01-25' },
+    { name: 'quarterly、当日は当日', item: item('quarterly', '2026-01-25'), today: '2026-10-25', want: '2026-10-25' },
     { name: 'yearly 2/29 起点の平年', item: item('yearly', '2024-02-29'), today: '2026-11-06', want: '2027-02-28' },
     { name: 'yearly 2/29 起点の閏年', item: item('yearly', '2024-02-29'), today: '2027-03-01', want: '2028-02-29' },
     { name: 'biennial', item: item('biennial', '2025-03-15'), today: '2026-11-06', want: '2027-03-15' },
