@@ -47,6 +47,8 @@ export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
 // [cashflow]（docs/mvp-plan-v3.md T303、V11 の初期案）。予定外の支出の目安は直近 6 か月の中央値、残す額は今後 3 か月分の予定支出。
 export const DEFAULT_UNPLANNED_LOOKBACK_MONTHS = 6;
 export const DEFAULT_RESERVE_MONTHS = 3;
+export const MAX_UNPLANNED_LOOKBACK_MONTHS = 24;
+export const MAX_RESERVE_MONTHS = 12;
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -108,8 +110,8 @@ export type Config = {
   // matchDateWindowDays: 領収書の日付から明細の日付までの幅。
   bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number };
   // 資金繰り表（src/cashflow/forecast.ts）。unplannedLookbackMonths: 予定外の収支の目安を出すのに見る月数。
-  // reserveMonths: 「月末に残す額」に積む予定支出の月数。
-  cashflow: { unplannedLookbackMonths: number; reserveMonths: number };
+  // reserveMonths: 「月末に残す額」に積む予定支出の月数。includeUnplannedIncome: 予定外の収入の目安を残高に足すか（既定 false）。
+  cashflow: { unplannedLookbackMonths: number; reserveMonths: number; includeUnplannedIncome: boolean };
   secrets: Secrets;
 };
 
@@ -154,7 +156,7 @@ const KNOWN: Record<string, string[]> = {
   worker: ['linger_ms', 'reauth_wait_days'],
   reconcile: ['verified_lookback_days', 'max_list_pages'],
   bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days'],
-  cashflow: ['unplanned_lookback_months', 'reserve_months'],
+  cashflow: ['unplanned_lookback_months', 'reserve_months', 'include_unplanned_income'],
 };
 
 function readConfigToml(file: string): Table {
@@ -210,6 +212,12 @@ function optPositiveInt(t: Table, sec: string, key: string): number | null {
   if (v === undefined) return null;
   if (typeof v === 'bigint') v = Number(v);
   if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1) throw new ConfigError(`config.toml の ${sec}.${key} は正の整数で指定する`);
+  return v;
+}
+
+function optIntUpTo(t: Table, sec: string, key: string, max: number): number | null {
+  const v = optPositiveInt(t, sec, key);
+  if (v !== null && v > max) throw new ConfigError(`config.toml の ${sec}.${key} は 1〜${max} で指定する`);
   return v;
 }
 
@@ -344,8 +352,9 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       matchDateWindowDays: optNonNegativeInt(t, 'bank', 'match_date_window_days') ?? DEFAULT_MATCH_DATE_WINDOW_DAYS,
     },
     cashflow: {
-      unplannedLookbackMonths: optPositiveInt(t, 'cashflow', 'unplanned_lookback_months') ?? DEFAULT_UNPLANNED_LOOKBACK_MONTHS,
-      reserveMonths: optPositiveInt(t, 'cashflow', 'reserve_months') ?? DEFAULT_RESERVE_MONTHS,
+      unplannedLookbackMonths: optIntUpTo(t, 'cashflow', 'unplanned_lookback_months', MAX_UNPLANNED_LOOKBACK_MONTHS) ?? DEFAULT_UNPLANNED_LOOKBACK_MONTHS,
+      reserveMonths: optIntUpTo(t, 'cashflow', 'reserve_months', MAX_RESERVE_MONTHS) ?? DEFAULT_RESERVE_MONTHS,
+      includeUnplannedIncome: optBool(t, 'cashflow', 'include_unplanned_income') ?? false,
     },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };

@@ -106,6 +106,7 @@ export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
         months,
         unplannedLookbackMonths: cf?.unplannedLookbackMonths,
         reserveMonths: cf?.reserveMonths,
+        includeUnplannedIncome: cf?.includeUnplannedIncome,
       }),
     );
   });
