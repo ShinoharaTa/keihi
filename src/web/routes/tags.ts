@@ -1,6 +1,6 @@
 // 明細のタグ・カテゴリとタグのルールの API（docs/mvp-plan-v3.md T108。src/bank/tags.ts）。
 //   POST   /api/bank_txns/:id/tag   body {tag: 'business'|'private'|'unset', category?: string|null（省略は null = 未分類）}
-//          → 200 {bank_txn_id, version, tag, category, learned_rule: {rule, created} | null, effective: ResolvedTag} / 400 / 404
+//          → 200 {bank_txn_id, version, tag, category, learned_rule: {rule, action: 'created'|'hit'|'superseded'} | null, effective: ResolvedTag} / 400 / 404
 //   GET    /api/tag_rules            → 200 {items: [TagRule]}
 //   POST   /api/tag_rules            body {account_id?: string|null, pattern, match: 'exact'|'prefix'|'partial', tag, category?}
 //          → 201 TagRule（origin=manual）/ 400

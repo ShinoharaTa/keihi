@@ -1,22 +1,27 @@
 // 明細の事業/私用タグとカテゴリ（docs/mvp-plan-v3.md T108・V5・V10、requirements-v2.md B3）。
-// 効くタグの順: 明細の上書き（txn_tags の最新版）> keihi のルール（tag_rules。口座のルール > 全口座のルール、同じ順位なら hit_count の多い方）
-//   > 口座の既定（money_accounts.default_tag）> unset。
-// 人（または agent）が上書きしたら版を追記する。同じ口座・同じ正規化摘要で同じ上書き（tag と category）が 3 回続いたら
-// tag_rules を 1 件作る（origin=learned、match=exact）。同じルールが既にあれば hit_count を +1 するだけ。
+// 効くタグの順: 明細の上書き（txn_tags の最新版）> keihi のルール（tag_rules）> 口座の既定（money_accounts.default_tag）> unset。
+//   上書きとみなす版は source が human / agent のものだけ。source=rule の版は上書きにしない（ルールの結果の記録で、人の判断ではない）。
+//   ルールの順: 口座のルール > 全口座のルール → exact > prefix > partial → hit_count の多い方 → 新しい方（created_at 降順, id 降順）。
+// 人（または agent）が上書きしたら版を追記する。同じ口座・同じ正規化摘要の別々の明細 3 件で、最新の上書きが人の同じ上書き
+// （tag と category）なら tag_rules を学習する（origin=learned、match=exact）。agent の上書き・同じ明細の繰り返し・unset は数えない。
+// 同じ口座・同じパターンの学習ルールが既にあれば、同じタグなら hit_count を +1、違うタグなら置き換える（2 件目は作らない）。
+// 監査ログには摘要（パターン）を入れない（銀行の摘要には個人名が入りうる）。
 // ルールのパターンは取引先辞書の正規化（src/vendors/normalize.ts）を通し、明細の description_norm と比べる。
+import { createHash } from 'node:crypto';
 import { appendAudit } from '../audit.ts';
 import { tx, type Db } from '../db/index.ts';
 import { normalizeVendor } from '../vendors/normalize.ts';
 import { appendTxnTag, getAccount, getBankTxn, latestTxnTag, TAGS, type Tag, type TxnTagRow } from './repo.ts';
 import {
   deleteTagRule,
-  findSameTagRule,
+  findLearnedTagRule,
   getTagRule,
   incrementTagRuleHit,
   insertTagRule,
-  latestTxnTags,
+  latestOverrides,
   listTagRules,
-  recentOverrides,
+  recentHumanOverrides,
+  replaceTagRule,
   RULE_MATCHES,
   tagRulesForAccounts,
   txnsForTag,
@@ -85,13 +90,17 @@ export function ruleMatches(rule: Pick<TagRuleRow, 'pattern' | 'match'>, descrip
   }
 }
 
-// 口座のルール > 全口座のルール、同じ順位なら hit_count の多い方（それも同じなら先に作った方）。
-function compareRules(a: TagRuleRow, b: TagRuleRow): number {
+const MATCH_RANK: Record<RuleMatch, number> = { exact: 0, prefix: 1, partial: 2 };
+
+// 口座のルール > 全口座のルール → exact > prefix > partial → hit_count の多い方 → 新しい方（created_at 降順, id 降順）。
+export function compareRules(a: TagRuleRow, b: TagRuleRow): number {
   const sa = a.account_id === null ? 1 : 0;
   const sb = b.account_id === null ? 1 : 0;
   if (sa !== sb) return sa - sb;
+  if (a.match !== b.match) return MATCH_RANK[a.match] - MATCH_RANK[b.match];
   if (a.hit_count !== b.hit_count) return b.hit_count - a.hit_count;
-  return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? 1 : -1;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 
 // 明細ごとの効くタグ。無い明細は結果に入らない。クエリは件数によらず 3 本。
@@ -99,7 +108,7 @@ export function resolveTagsBulk(db: Db, txnIds: readonly string[]): Map<string, 
   const out = new Map<string, ResolvedTag>();
   if (txnIds.length === 0) return out;
   const txns = txnsForTag(db, txnIds);
-  const overrides = new Map(latestTxnTags(db, txnIds).map((r) => [r.bank_txn_id, r]));
+  const overrides = new Map(latestOverrides(db, txnIds).map((r) => [r.bank_txn_id, r]));
   const rules = tagRulesForAccounts(db, [...new Set(txns.map((t) => t.account_id))]).sort(compareRules);
   for (const t of txns) {
     const o = overrides.get(t.id);
@@ -132,10 +141,10 @@ export type SetTxnTagInput = {
   now?: Date;
 };
 
-export type LearnedRule = { rule: TagRuleRow; created: boolean };
+export type LearnedRule = { rule: TagRuleRow; action: 'created' | 'hit' | 'superseded' };
 export type SetTxnTagResult = { version: TxnTagRow; learned: LearnedRule | null };
 
-// 上書きの版を追記し、監査に残す。続けて 3 回同じ上書きならルールを作る（あれば hit_count +1）。
+// 上書きの版を追記し、監査に残す。人の上書きなら学習を試す。
 export function setTxnTag(db: Db, input: SetTxnTagInput): SetTxnTagResult {
   const category = input.category ?? null;
   checkTagAndCategory(input.tag, category);
@@ -164,29 +173,44 @@ export function setTxnTag(db: Db, input: SetTxnTagInput): SetTxnTagResult {
       },
       now,
     );
-    return { version, learned: learn(db, txn.account_id, txn.description_norm, input.tag, category, input.actor, now) };
+    const learned = input.source === 'human' ? learn(db, txn.account_id, txn.description_norm, input.tag, category, input.actor, now) : null;
+    return { version, learned };
   });
 }
 
 function learn(db: Db, accountId: string, descriptionNorm: string, tag: Tag, category: string | null, actor: string, now: Date): LearnedRule | null {
-  if (descriptionNorm === '') return null;
-  const recent = recentOverrides(db, accountId, descriptionNorm, LEARN_THRESHOLD);
+  if (descriptionNorm === '' || tag === 'unset') return null;
+  const recent = recentHumanOverrides(db, accountId, descriptionNorm, LEARN_THRESHOLD);
   if (recent.length < LEARN_THRESHOLD || !recent.every((r) => r.tag === tag && r.category === category)) return null;
-  const key = { accountId, pattern: descriptionNorm, match: 'exact' as const, tag, category };
-  const same = findSameTagRule(db, key);
   const at = now.toISOString();
-  if (same) {
-    const rule = incrementTagRuleHit(db, same.id, at)!;
-    appendAudit(db, { actor, action: 'tag_rule.hit', entity: 'tag_rule', entityId: rule.id, payload: { hit_count: rule.hit_count } }, now);
-    return { rule, created: false };
+  const cur = findLearnedTagRule(db, accountId, descriptionNorm);
+  if (cur && cur.tag === tag && cur.category === category) {
+    const rule = incrementTagRuleHit(db, cur.id, at)!;
+    appendAudit(db, { actor, action: 'tag_rule.hit', entity: 'tag_rule', entityId: rule.id, payload: { ...ruleAuditPayload(rule), hit_count: rule.hit_count } }, now);
+    return { rule, action: 'hit' };
   }
-  const rule = insertTagRule(db, { ...key, origin: 'learned', now: at });
+  if (cur) {
+    const rule = replaceTagRule(db, cur.id, { tag, category, now: at })!;
+    appendAudit(
+      db,
+      { actor, action: 'tag_rule.superseded', entity: 'tag_rule', entityId: rule.id, payload: { ...ruleAuditPayload(rule), from: { tag: cur.tag, category: cur.category } } },
+      now,
+    );
+    return { rule, action: 'superseded' };
+  }
+  const rule = insertTagRule(db, { accountId, pattern: descriptionNorm, match: 'exact', tag, category, origin: 'learned', now: at });
   appendAudit(db, { actor, action: 'tag_rule.learned', entity: 'tag_rule', entityId: rule.id, payload: ruleAuditPayload(rule) }, now);
-  return { rule, created: true };
+  return { rule, action: 'created' };
 }
 
+// 監査に残すルールの中身。パターン（摘要）は入れない。
 function ruleAuditPayload(r: TagRuleRow): Record<string, unknown> {
-  return { account_id: r.account_id, pattern: r.pattern, match: r.match, tag: r.tag, category: r.category, origin: r.origin, hit_count: r.hit_count };
+  return { account_id: r.account_id, match: r.match, tag: r.tag, category: r.category, origin: r.origin };
+}
+
+// 消したルールのパターンの代わりに残す、sha256 の先頭 16 桁。
+export function patternDigest(pattern: string): string {
+  return createHash('sha256').update(pattern).digest('hex').slice(0, 16);
 }
 
 // ---- ルールの手動管理 ----
@@ -224,14 +248,14 @@ export function createRule(db: Db, input: CreateRuleInput): TagRuleRow {
   });
 }
 
-// 消したルールの中身は監査に残す。無ければ false。
+// 消したルールの中身は監査に残す（パターンは sha256 の先頭 16 桁だけ）。無ければ false。
 export function deleteRule(db: Db, id: string, by: { actor: string; user?: string | null; now?: Date }): boolean {
   const now = by.now ?? new Date();
   return tx(db, () => {
     const rule = getTagRule(db, id);
     if (!rule) return false;
     deleteTagRule(db, id);
-    appendAudit(db, { actor: by.actor, action: 'tag_rule.deleted', entity: 'tag_rule', entityId: id, payload: { ...ruleAuditPayload(rule), user: by.user ?? null } }, now);
+    appendAudit(db, { actor: by.actor, action: 'tag_rule.deleted', entity: 'tag_rule', entityId: id, payload: { ...ruleAuditPayload(rule), pattern_sha256_16: patternDigest(rule.pattern), user: by.user ?? null } }, now);
     return true;
   });
 }

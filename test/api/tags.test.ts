@@ -9,6 +9,8 @@ import { verifyAudit } from '../../src/audit.ts';
 import { insertAccount, insertBankTxn } from '../../src/bank/repo.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
+import { createApp } from '../../src/web/app.ts';
+import { createAuth } from '../../src/web/auth.ts';
 import { tagRoutes } from '../../src/web/routes/tags.ts';
 
 const T0 = new Date('2026-11-06T03:00:00.000Z');
@@ -98,8 +100,8 @@ describe('POST /api/bank_txns/:id/tag', () => {
     }
     assert.equal(results[0], null);
     assert.equal(results[1], null);
-    assert.equal((results[2] as { created: boolean }).created, true);
-    assert.equal((results[3] as { created: boolean }).created, false);
+    assert.equal((results[2] as { action: string }).action, 'created');
+    assert.equal((results[3] as { action: string }).action, 'hit');
     const rules = (await (await send('GET', '/api/tag_rules')).json()) as { items: { origin: string; hit_count: number }[] };
     assert.equal(rules.items.length, 1);
     assert.equal(rules.items[0].origin, 'learned');
@@ -156,4 +158,30 @@ test('GET /api/categories は 12 種と日本語のラベル', async () => {
   assert.equal(j.items.length, 12);
   assert.deepEqual(j.items[0], { id: 'food', label: '食費' });
   assert.equal(j.uncategorized_label, '未分類');
+});
+
+test('createApp に登録されていて、認証を通らないと 401 / 403（何も書かない）', async () => {
+  const LOCAL = '127.0.0.1:8795';
+  const full = createApp({
+    db,
+    objectsDir: path.join(root, 'objects'),
+    config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' }, retention: { years: 7, extraYears: 1, start: 'next_year_0316' } },
+    auth: createAuth({ allowedUsers: ['me@example.com'], allowedHosts: [LOCAL] }),
+    triggerWorker: () => {},
+    now: () => T0,
+  });
+  const id = txn();
+  const call = (method: string, p: string, user?: string, body?: unknown) =>
+    full.request(`http://${LOCAL}${p}`, {
+      method,
+      headers: { Host: LOCAL, 'content-type': 'application/json', ...(user ? { 'Tailscale-User-Login': user } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  assert.equal((await call('POST', `/api/bank_txns/${id}/tag`, undefined, { tag: 'business' })).status, 401);
+  assert.equal((await call('GET', '/api/tag_rules')).status, 401);
+  assert.equal((await call('GET', '/api/categories')).status, 401);
+  assert.equal((await call('POST', `/api/bank_txns/${id}/tag`, 'other@example.com', { tag: 'business' })).status, 403);
+  assert.equal(audits().length, 0);
+  assert.equal((await call('POST', `/api/bank_txns/${id}/tag`, 'me@example.com', { tag: 'business' })).status, 200);
+  assert.equal((await call('GET', '/api/categories', 'me@example.com')).status, 200);
 });

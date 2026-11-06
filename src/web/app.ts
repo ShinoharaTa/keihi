@@ -12,6 +12,7 @@ import { ingestRoutes } from './routes/ingest.ts';
 import { reviewRoutes } from './routes/review.ts';
 import { staticRoutes } from './routes/static.ts';
 import { statusRoutes } from './routes/status.ts';
+import { tagRoutes } from './routes/tags.ts';
 
 export type AppDeps = {
   db: Db;
@@ -33,6 +34,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', reviewRoutes(deps));
   app.route('/api', attentionRoutes(deps));
   app.route('/api', exportRoutes(deps));
+  app.route('/api', tagRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
   return app;
 }

@@ -2,7 +2,7 @@
 // 効くタグの決定と学習は src/bank/tags.ts。監査ログは呼ぶ側が同じトランザクションで残す。
 import type { Db } from '../db/index.ts';
 import { ulid } from '../db/ids.ts';
-import type { Tag, TagSource, TxnTagRow } from './repo.ts';
+import type { Tag, TxnTagRow } from './repo.ts';
 
 export const RULE_MATCHES = ['exact', 'prefix', 'partial'] as const;
 export type RuleMatch = (typeof RULE_MATCHES)[number];
@@ -34,31 +34,34 @@ export function txnsForTag(db: Db, ids: readonly string[]): TxnForTag[] {
     .all(JSON.stringify(ids)) as TxnForTag[];
 }
 
-// 明細ごとの最新版（version 最大）。
-export function latestTxnTags(db: Db, ids: readonly string[]): TxnTagRow[] {
+// 明細ごとの上書きの最新版。上書きとみなすのは source が human / agent の版だけ（rule の版は上書きにしない）。
+export function latestOverrides(db: Db, ids: readonly string[]): TxnTagRow[] {
   return db
     .prepare(
       `SELECT g.* FROM txn_tags g
-       JOIN (SELECT bank_txn_id, max(version) AS v FROM txn_tags WHERE bank_txn_id IN (SELECT value FROM json_each(?)) GROUP BY bank_txn_id) m
+       JOIN (SELECT bank_txn_id, max(version) AS v FROM txn_tags
+             WHERE bank_txn_id IN (SELECT value FROM json_each(?)) AND source IN ('human', 'agent') GROUP BY bank_txn_id) m
          ON m.bank_txn_id = g.bank_txn_id AND m.v = g.version`,
     )
     .all(JSON.stringify(ids)) as TxnTagRow[];
 }
 
-// 同じ口座・同じ正規化摘要の明細への上書き（human / agent）を新しい順に limit 件。追記した順（rowid）で並べる。
-export function recentOverrides(
+// 同じ口座・同じ正規化摘要の明細のうち、上書きの最新版が human のものを、その版を追記した順（rowid）の新しい順に limit 件。
+// 1 明細 1 件。最新の上書きが agent の明細は入れない。
+export function recentHumanOverrides(
   db: Db,
   accountId: string,
   descriptionNorm: string,
   limit: number,
-): { bank_txn_id: string; tag: Tag; category: string | null; source: TagSource }[] {
+): { bank_txn_id: string; tag: Tag; category: string | null }[] {
   return db
     .prepare(
-      `SELECT g.bank_txn_id, g.tag, g.category, g.source FROM txn_tags g JOIN bank_txns t ON t.id = g.bank_txn_id
-       WHERE t.account_id = ? AND t.description_norm = ? AND g.source IN ('human', 'agent')
+      `SELECT g.bank_txn_id, g.tag, g.category FROM txn_tags g JOIN bank_txns t ON t.id = g.bank_txn_id
+       WHERE t.account_id = ? AND t.description_norm = ? AND g.source = 'human'
+         AND g.version = (SELECT max(version) FROM txn_tags x WHERE x.bank_txn_id = g.bank_txn_id AND x.source IN ('human', 'agent'))
        ORDER BY g.rowid DESC LIMIT ?`,
     )
-    .all(accountId, descriptionNorm, limit) as { bank_txn_id: string; tag: Tag; category: string | null; source: TagSource }[];
+    .all(accountId, descriptionNorm, limit) as { bank_txn_id: string; tag: Tag; category: string | null }[];
 }
 
 // ---- tag_rules ----
@@ -78,17 +81,12 @@ export function getTagRule(db: Db, id: string): TagRuleRow | null {
   return (db.prepare('SELECT * FROM tag_rules WHERE id = ?').get(id) as TagRuleRow | undefined) ?? null;
 }
 
-// 口座・パターン・照合のしかた・タグ・カテゴリが全部同じルール。
-export function findSameTagRule(
-  db: Db,
-  r: { accountId: string | null; pattern: string; match: RuleMatch; tag: Tag; category: string | null },
-): TagRuleRow | null {
+// 学習で作ったルールのうち、同じ口座・同じパターンの exact のもの（タグ・カテゴリは問わない）。
+export function findLearnedTagRule(db: Db, accountId: string, pattern: string): TagRuleRow | null {
   return (
     (db
-      .prepare(
-        `SELECT * FROM tag_rules WHERE account_id IS ? AND pattern = ? AND match = ? AND tag = ? AND category IS ? ORDER BY created_at, id LIMIT 1`,
-      )
-      .get(r.accountId, r.pattern, r.match, r.tag, r.category) as TagRuleRow | undefined) ?? null
+      .prepare(`SELECT * FROM tag_rules WHERE origin = 'learned' AND match = 'exact' AND account_id IS ? AND pattern = ? ORDER BY created_at, id LIMIT 1`)
+      .get(accountId, pattern) as TagRuleRow | undefined) ?? null
   );
 }
 
@@ -106,6 +104,12 @@ export function insertTagRule(
 export function incrementTagRuleHit(db: Db, id: string, now: string): TagRuleRow | null {
   const r = db.prepare('UPDATE tag_rules SET hit_count = hit_count + 1, updated_at = ? WHERE id = ?').run(now, id);
   return r.changes === 0 ? null : getTagRule(db, id);
+}
+
+// 学習したルールのタグ・カテゴリを置き換える。hit_count は 0 に戻す。
+export function replaceTagRule(db: Db, id: string, r: { tag: Tag; category: string | null; now: string }): TagRuleRow | null {
+  const res = db.prepare('UPDATE tag_rules SET tag = ?, category = ?, hit_count = 0, updated_at = ? WHERE id = ?').run(r.tag, r.category, r.now, id);
+  return res.changes === 0 ? null : getTagRule(db, id);
 }
 
 export function deleteTagRule(db: Db, id: string): boolean {
