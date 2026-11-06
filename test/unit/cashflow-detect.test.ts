@@ -124,6 +124,7 @@ describe('detectRecurrences', () => {
   const BOUNDS: [string, number, number, string | null][] = [
     ['毎月', 27, 3, null], ['毎月', 28, 3, 'monthly'], ['毎月', 31, 3, 'monthly'], ['毎月', 32, 3, null],
     ['隔月', 57, 3, null], ['隔月', 58, 3, 'bimonthly'], ['隔月', 62, 3, 'bimonthly'], ['隔月', 63, 3, null],
+    ['3 か月', 84, 3, null], ['3 か月', 85, 3, 'quarterly'], ['3 か月', 97, 3, 'quarterly'], ['3 か月', 98, 3, null], ['3 か月', 91, 2, null],
     ['毎年', 349, 2, null], ['毎年', 350, 2, 'yearly'], ['毎年', 380, 2, 'yearly'], ['毎年', 381, 2, null],
     ['隔年', 714, 2, null], ['隔年', 715, 2, 'biennial'], ['隔年', 745, 2, 'biennial'], ['隔年', 746, 2, null],
   ];
@@ -185,10 +186,13 @@ describe('detectRecurrences', () => {
     // 毎月の上限は 31 + 15 = 46 日。today − 46 日は出て、today − 47 日は出ない。
     for (const d of series(30, 3, addDays(TODAY, -46))) txn(db, A, d, 1000, 'まだ');
     for (const d of series(30, 3, addDays(TODAY, -47))) txn(db, A, d, 1000, '止まった');
+    // 3 か月ごとの上限は 97 + 48 = 145 日。
+    for (const d of series(91, 3, addDays(TODAY, -145))) txn(db, A, d, 1000, '3か月まだ');
+    for (const d of series(91, 3, addDays(TODAY, -146))) txn(db, A, d, 1000, '3か月止まった');
     // 毎年の上限は 380 + 190 = 570 日。
     for (const d of series(365, 2, addDays(TODAY, -570))) txn(db, A, d, 1000, '年まだ');
     for (const d of series(365, 2, addDays(TODAY, -571))) txn(db, A, d, 1000, '年止まった');
-    assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 40 }).map((d) => d.descriptionNorm).sort(), ['まだ', '年まだ'].sort());
+    assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 40 }).map((d) => d.descriptionNorm).sort(), ['まだ', '3か月まだ', '年まだ'].sort());
     db.close();
   });
 

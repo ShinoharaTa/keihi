@@ -10,6 +10,9 @@
 //   使える月が N か月に満たなければ short_history の警告を出す（0 か月なら目安は 0）。
 // 月末に残す額: 各月について、その月末の翌日から [cashflow] reserve_months か月の予定支出の合計。
 //   トップレベルの reserve は今日から reserve_months か月（今日を含み、応当日の前日まで）の予定支出の合計。
+// min_month: margin が最小の月（同じなら早い月）。
+// cut_per_month_to_survive: 予定外の支出の目安（unplanned_out_per_month）を毎月いくら減らせば、全期間で margin ≥ 0 になるかの最小の整数。
+//   減らした目安で今月の按分もし直す。不足が無ければ 0、目安を 0 にしても足りなければ null。margin は減らすほど増えるので二分探索。
 // 金額は整数の円。中央値（偶数個は中の 2 つの平均）と今月の按分は Math.round で丸める。
 import { listActiveTransfers, matchesSettlementPattern } from '../bank/transfers.ts';
 import { addDays, addMonths } from '../calendar/businessDays.ts';
@@ -59,6 +62,8 @@ export type Forecast = {
   unplanned_in_per_month: number;
   months: ForecastMonth[];
   first_shortfall_month: string | null;
+  min_month: { month: string; balance_end: number; margin: number } | null; // months が空のときだけ null
+  cut_per_month_to_survive: number | null;
   warnings: ForecastWarning[];
 };
 
@@ -183,32 +188,60 @@ export function buildForecast(db: Db, opts: ForecastOptions): Forecast {
   // 5. 今日時点の月末に残す額
   const reserve = sumBy(dueItems(items, today, addDays(addMonths(today, reserveMonths), -1)), 'out');
 
-  // 4. 月末残高
-  const out: ForecastMonth[] = [];
-  let balance = opening;
-  let shortfall: string | null = null;
-  for (let k = 0; k < months; k++) {
+  // 4. 月末残高。予定外の支出の目安だけを変えて引き直せるよう、月ごとの予定・残す額・按分を先に出す。
+  const plans = Array.from({ length: months }, (_, k) => {
     const s = addMonths(cur, k);
     const e = monthEnd(s);
     const due = dueItems(items, k === 0 ? addDays(today, 1) : s, e);
     let uIn = includeIn ? unplannedIn : 0;
-    let uOut = unplannedOut;
+    // 今月は残りの日数で按分する（share = 残り日数 / 月の日数）。
+    let share: [number, number] | null = null;
     if (k === 0) {
       const days = Number(e.slice(8, 10));
-      const left = days - Number(today.slice(8, 10));
-      uIn = Math.round((uIn * left) / days);
-      uOut = Math.round((uOut * left) / days);
+      share = [days - Number(today.slice(8, 10)), days];
+      uIn = Math.round((uIn * share[0]) / share[1]);
     }
-    const pIn = sumBy(due, 'in');
-    const pOut = sumBy(due, 'out');
-    balance += pIn - pOut + uIn - uOut;
-    const monthReserve = sumBy(dueItems(items, addMonths(s, 1), monthEnd(addMonths(s, reserveMonths))), 'out');
-    const margin = balance - monthReserve;
-    const month = s.slice(0, 7);
-    if (shortfall === null && margin < 0) shortfall = month;
-    out.push({
-      month, planned_in: pIn, planned_out: pOut, unplanned_in: uIn, unplanned_out: uOut, balance_end: balance, reserve: monthReserve, margin, items: due,
+    return {
+      month: s.slice(0, 7),
+      due,
+      pIn: sumBy(due, 'in'),
+      pOut: sumBy(due, 'out'),
+      uIn,
+      share,
+      reserve: sumBy(dueItems(items, addMonths(s, 1), monthEnd(addMonths(s, reserveMonths))), 'out'),
+    };
+  });
+  const project = (perMonthOut: number): ForecastMonth[] => {
+    let balance = opening;
+    return plans.map((p) => {
+      const uOut = p.share ? Math.round((perMonthOut * p.share[0]) / p.share[1]) : perMonthOut;
+      balance += p.pIn - p.pOut + p.uIn - uOut;
+      return {
+        month: p.month, planned_in: p.pIn, planned_out: p.pOut, unplanned_in: p.uIn, unplanned_out: uOut, balance_end: balance, reserve: p.reserve,
+        margin: balance - p.reserve, items: p.due,
+      };
     });
+  };
+  const out = project(unplannedOut);
+  const shortfall = out.find((m) => m.margin < 0)?.month ?? null;
+  let minMonth: ForecastMonth | null = null;
+  for (const m of out) if (minMonth === null || m.margin < minMonth.margin) minMonth = m;
+
+  // 6. 不足を避けるのに要る、予定外の支出の毎月の削減額（cut 円減らせば足りる最小の cut）。
+  const survives = (cut: number) => project(unplannedOut - cut).every((m) => m.margin >= 0);
+  let cut: number | null = 0;
+  if (shortfall !== null) {
+    if (!survives(unplannedOut)) cut = null;
+    else {
+      let lo = 0; // lo では足りない
+      let hi = unplannedOut; // hi なら足りる
+      while (hi - lo > 1) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (survives(mid)) hi = mid;
+        else lo = mid;
+      }
+      cut = hi;
+    }
   }
 
   return {
@@ -219,6 +252,8 @@ export function buildForecast(db: Db, opts: ForecastOptions): Forecast {
     unplanned_in_per_month: unplannedIn,
     months: out,
     first_shortfall_month: shortfall,
+    min_month: minMonth && { month: minMonth.month, balance_end: minMonth.balance_end, margin: minMonth.margin },
+    cut_per_month_to_survive: cut,
     warnings,
   };
 }

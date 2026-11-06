@@ -314,6 +314,18 @@ export function listBankTxnsBetween(db: Db, from: string, to: string): BankTxnLi
     .all(from, to) as BankTxnListRow[];
 }
 
+// すべての明細の ID（GET /api/bank/overview の untagged_count）。
+export function listAllBankTxnIds(db: Db): string[] {
+  return (db.prepare('SELECT id FROM bank_txns ORDER BY txn_date, id').all() as { id: string }[]).map((r) => r.id);
+}
+
+// 口座の、残高（balance）付きの明細の日付と残高（to 以前。txn_date, id の昇順）。GET /api/balance_history。
+export function listTxnBalances(db: Db, accountId: string, to: string): { txn_date: string; balance: number }[] {
+  return db
+    .prepare('SELECT txn_date, balance FROM bank_txns WHERE account_id = ? AND balance IS NOT NULL AND txn_date <= ? ORDER BY txn_date, id')
+    .all(accountId, to) as { txn_date: string; balance: number }[];
+}
+
 // 使っている口座（active = 1）の明細の最新の日付（無ければ null）。/api/status の bank.latest_txn_date。
 export function latestTxnDateActive(db: Db): string | null {
   return (

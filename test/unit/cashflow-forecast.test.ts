@@ -182,6 +182,32 @@ describe('buildForecast', () => {
     assert.equal(f.first_shortfall_month, '2027-08');
   });
 
+  test('min_month と cut_per_month_to_survive: 不足が無ければ 0、margin 最小の月を返す', () => {
+    const { db } = setup();
+    const f = buildForecast(db, { today: TODAY, includeUnplannedIncome: true });
+    // 上の手計算: 今月の margin 1,064,166 が最小（来月からは毎月 +172,499、reserve の増減は 36,000 まで）
+    assert.deepEqual(f.min_month, { month: '2026-11', balance_end: 1_304_166, margin: 1_064_166 });
+    assert.equal(f.cut_per_month_to_survive, 0);
+  });
+
+  test('cut_per_month_to_survive: 10 か月なら 2027-08 の −19,343 を埋める最小の削減額', () => {
+    const { db } = setup();
+    const f = buildForecast(db, { today: TODAY, months: 10 });
+    assert.deepEqual(f.min_month, { month: '2027-08', balance_end: 220_657, margin: -19_343 });
+    // x 円減らすと 2027-08 の margin は −19,343 + 9x + (15,834 − round((47,501 − x) × 10/30))。
+    //   x = 2,072: −19,343 + 18,648 + (15,834 − 15,143) = −4、x = 2,073: −19,343 + 18,657 + 691 = 5。他の月は余裕がある。
+    assert.equal(f.cut_per_month_to_survive, 2_073);
+  });
+
+  test('cut_per_month_to_survive: 予定外を 0 にしても足りなければ null', () => {
+    const { db } = setup();
+    const f = buildForecast(db, { today: TODAY });
+    // 36 か月目 2029-10: 1,204,166 − 35 × 127,501 + 200,000 − 3 × 36,000 = −3,166,369、reserve 240,000
+    assert.deepEqual(f.min_month, { month: '2029-10', balance_end: -3_166_369, margin: -3_406_369 });
+    // 予定外 0 でも 1,300,000 − 36 × 80,000 + 200,000 − 108,000 = −1,488,000
+    assert.equal(f.cut_per_month_to_survive, null);
+  });
+
   test('月末と 2 月: 家賃は月末、2 月は 28 日（閏年は 29 日）。同じ月の項目は期日順', () => {
     const { db } = setup();
     const f = buildForecast(db, { today: TODAY });
