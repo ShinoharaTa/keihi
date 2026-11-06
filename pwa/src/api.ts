@@ -14,13 +14,14 @@ export const sendIngest: Send = async (body) => {
   return { status: res.status, body: await jsonOrNull(res) };
 };
 
-export async function getJson<T>(url: string): Promise<{ ok: true; data: T } | { ok: false; status: number }> {
+// 失敗の body は 400 の理由（{error}）を文言にするために返す（読めなければ null）。
+export async function getJson<T>(url: string): Promise<{ ok: true; data: T } | { ok: false; status: number; body: unknown }> {
   try {
     const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
-    if (!res.ok) return { ok: false, status: res.status };
+    if (!res.ok) return { ok: false, status: res.status, body: await jsonOrNull(res) };
     return { ok: true, data: (await res.json()) as T };
   } catch {
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0, body: null };
   }
 }
 

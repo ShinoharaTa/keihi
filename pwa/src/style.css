@@ -371,9 +371,24 @@ button:disabled {
 }
 /* 下のタブは 5 つ（T111）。小さい画面でも 1 行に収まるよう字を詰める。 */
 .tabs button {
+  position: relative;
   font-size: 14px;
   padding: 6px 2px;
   min-width: 0;
+}
+.tab-pill {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: var(--bg);
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 /* 「お金」タブ（T111・T304）。表は列幅を固定の割合にして、縦向きのスマホで横にはみ出さない。 */
 .seg-4 {
@@ -387,7 +402,7 @@ button:disabled {
 .seg-5 button {
   padding: 8px 2px;
   min-width: 0;
-  font-size: 15px;
+  font-size: 14px;
 }
 .field {
   width: 100%;
@@ -489,7 +504,7 @@ button:disabled {
   width: 100%;
   table-layout: fixed;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 13px;
 }
 .tbl caption {
   text-align: left;
@@ -498,12 +513,15 @@ button:disabled {
 }
 .tbl th,
 .tbl td {
-  padding: 6px 4px;
+  padding: 6px 3px;
   border-bottom: 1px solid var(--line);
   overflow-wrap: anywhere;
 }
+.tbl td.num {
+  overflow-wrap: normal;
+}
 .tbl th[scope='row'] {
-  width: 34%;
+  width: 28%;
   text-align: left;
   font-weight: normal;
 }
@@ -511,9 +529,6 @@ button:disabled {
   color: var(--muted);
   font-weight: normal;
   text-align: right;
-}
-.tbl td.num {
-  white-space: normal;
 }
 .tbl-divider th {
   color: var(--muted);
@@ -569,4 +584,68 @@ button:disabled {
 .cf-items li {
   display: flex;
   gap: 8px;
+}
+/* 下から出るシートの暗幕。押すと閉じる。 */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  background: rgb(0 0 0 / 0.4);
+}
+.link {
+  font: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 6px 0;
+  min-height: 32px;
+  text-align: left;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+.verdict {
+  margin: 0;
+  font: inherit;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+button.verdict {
+  color: var(--danger);
+  min-height: 48px;
+}
+.verdict-sub {
+  font-size: 15px;
+  font-weight: normal;
+}
+.setup {
+  border-color: var(--accent);
+}
+.setup .item-name {
+  font-weight: 700;
+}
+.setup-step {
+  justify-content: space-between;
+  text-align: left;
+  gap: 8px;
+}
+.setup-step .item-name {
+  font-weight: normal;
+}
+.undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.undo span {
+  flex: 1;
+}
+.undo .btn {
+  width: auto;
 }

@@ -47,6 +47,11 @@ function reportText(r: FlushReport): string {
   return parts.join('');
 }
 
+// タブの件数。ラベルの右上に数字のピル（0 なら出さない）。
+function Pill({ n }: { n: number }) {
+  return n > 0 ? <span class="tab-pill">{n > 99 ? '99+' : n}</span> : null;
+}
+
 function App() {
   const notice = useMemo(shareNotice, []);
   const [tab, setTab] = useState<Tab>(notice?.toQueue ? 'queue' : 'capture');
@@ -141,16 +146,19 @@ function App() {
           撮影
         </button>
         <button type="button" class={tab === 'review' ? 'tab-on' : ''} onClick={() => setTab('review')}>
-          確認{counts && counts.review + counts.attention ? `（${counts.review + counts.attention}）` : ''}
+          確認
+          <Pill n={counts ? counts.review + counts.attention : 0} />
         </button>
         <button type="button" class={tab === 'queue' ? 'tab-on' : ''} onClick={() => setTab('queue')}>
-          送信待ち{waiting ? `（${waiting}）` : ''}
+          送信待ち
+          <Pill n={waiting} />
         </button>
         <button type="button" class={tab === 'sent' ? 'tab-on' : ''} onClick={() => setTab('sent')}>
           送信済み
         </button>
         <button type="button" class={tab === 'money' ? 'tab-on' : ''} onClick={() => setTab('money')}>
-          お金{upcoming ? `（${upcoming}）` : ''}
+          お金
+          <Pill n={upcoming} />
         </button>
       </nav>
     </div>

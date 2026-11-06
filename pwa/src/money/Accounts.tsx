@@ -1,5 +1,6 @@
 // 口座（GET /api/accounts・GET /api/bank/status、src/web/routes/bank.ts）。口座ごとに名前・種別・最新残高・最終同期・エラー・過去分の取り込みの進み。
-// 「設定」で既定タグ・資金繰りに含める・MCP の公開範囲・有効、カードなら引落元の口座とパターンを変えて PATCH /api/accounts/:id（変わった項目だけ）。
+// 「設定」で既定タグ・資金繰りに含める・AI に見せる範囲（mcp_visibility）・有効、カードなら引落元の口座（銀行だけ）とパターンを変えて
+// PATCH /api/accounts/:id（変わった項目だけ）。引落元が空のカードには二重計上の警告を出す。focus の口座は開いたときに設定を出す（はじめにから）。
 // 上に「今すぐ同期」（POST /api/bank/sync。created:false は 10 分以内に実行済み）。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, patchJson, postJson } from '../api.ts';
@@ -9,7 +10,10 @@ import {
   accountPatch,
   dateTime,
   failText,
+  settlementChoices,
+  SETTLEMENT_WARNING,
   syncText,
+  TEXT_MAX,
   TAG_LABELS,
   TAG_ORDER,
   VISIBILITY_LABELS,
@@ -55,8 +59,9 @@ export function AccountRows({ rows, onEdit }: { rows: Row[]; onEdit: (a: Account
                 </>
               )}
             </dl>
+            {a.kind === 'card' && a.card_settlement_account_id === null && <p class="msg">{SETTLEMENT_WARNING}</p>}
             <p class="sub">
-              既定 {TAG_LABELS[a.default_tag]}・{a.include_in_cashflow ? '資金繰りに含める' : '資金繰り対象外'}・MCP {VISIBILITY_LABELS[a.mcp_visibility]}
+              既定 {TAG_LABELS[a.default_tag]}・{a.include_in_cashflow ? '資金繰りに含める' : '資金繰り対象外'}・AI に {VISIBILITY_LABELS[a.mcp_visibility]}
             </p>
             <button type="button" class="btn" onClick={() => onEdit(a)}>
               設定
@@ -97,8 +102,8 @@ export function AccountForm({
           </button>
         ))}
       </div>
-      <span class="label">MCP の公開範囲</span>
-      <div class="seg seg-wrap" role="group" aria-label="MCP の公開範囲">
+      <span class="label">AI に見せる範囲</span>
+      <div class="seg seg-wrap" role="group" aria-label="AI に見せる範囲">
         {VISIBILITY_ORDER.map((v) => (
           <button type="button" key={v} class={draft.mcp_visibility === v ? 'seg-on' : ''} onClick={() => set('mcp_visibility', v)}>
             {VISIBILITY_LABELS[v]}
@@ -115,22 +120,28 @@ export function AccountForm({
       </label>
       {account.kind === 'card' && (
         <>
+          {!draft.card_settlement_account_id && <p class="msg">{SETTLEMENT_WARNING}</p>}
           <label class="fields">
             <span class="label">引落元の口座</span>
             <select class="field" value={draft.card_settlement_account_id} onChange={(e) => set('card_settlement_account_id', e.currentTarget.value)}>
               <option value="">なし</option>
-              {accounts
-                .filter((a) => a.id !== account.id)
-                .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
+              {settlementChoices(accounts).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
             </select>
           </label>
           <label class="fields">
             <span class="label">引落の摘要のパターン</span>
-            <input class="field" value={draft.card_settlement_pattern} onInput={(e) => set('card_settlement_pattern', e.currentTarget.value)} />
+            <input
+              class="field"
+              maxLength={TEXT_MAX}
+              placeholder="例: ミツイスミトモ"
+              value={draft.card_settlement_pattern}
+              onInput={(e) => set('card_settlement_pattern', e.currentTarget.value)}
+            />
+            <span class="sub">銀行の明細の摘要に含まれる文字。長音記号は入れない。</span>
           </label>
         </>
       )}
@@ -146,16 +157,34 @@ export function AccountForm({
   );
 }
 
-export function Accounts({ accounts, onChanged }: { accounts: Account[]; onChanged: () => Promise<void> }) {
+export function Accounts({
+  accounts,
+  focus,
+  onChanged,
+  onLock,
+}: {
+  accounts: Account[];
+  focus?: string;
+  onChanged: () => Promise<void>;
+  onLock: (locked: boolean) => void;
+}) {
   const [status, setStatus] = useState<BankStatus[]>([]);
-  const [edit, setEdit] = useState<{ account: Account; draft: AccountDraft } | null>(null);
+  const [edit, setEdit] = useState<{ account: Account; draft: AccountDraft } | null>(() => {
+    const a = accounts.find((x) => x.id === focus);
+    return a ? { account: a, draft: accountDraft(a) } : null;
+  });
+
+  useEffect(() => {
+    onLock(edit !== null);
+    return () => onLock(false);
+  }, [edit !== null]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
   const loadStatus = useCallback(async () => {
     const r = await getJson<{ accounts: BankStatus[] }>('/api/bank/status');
     if (r.ok) setStatus(r.data.accounts);
-    else setMsg(failText(r.status));
+    else setMsg(failText(r.status, r.body));
   }, []);
 
   useEffect(() => {

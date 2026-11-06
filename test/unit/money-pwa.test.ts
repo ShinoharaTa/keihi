@@ -16,6 +16,17 @@ import {
   parseYen,
   periodRange,
   syncText,
+  categoryRows,
+  draftError,
+  failText,
+  filterCount,
+  guessCategory,
+  lowestMonth,
+  nextUnset,
+  noIncome,
+  settlementChoices,
+  setupSteps,
+  txnSummary,
   txnsUrl,
   warningText,
   yen,
@@ -143,7 +154,7 @@ describe('純関数', () => {
     assert.deepEqual(accountPatch(account(), { ...base, card_settlement_account_id: 'X', include_in_cashflow: false }), { include_in_cashflow: false });
   });
   test('同期の結果と、資金繰りの警告の文', () => {
-    assert.equal(syncText(false), '10 分以内に実行済みです。');
+    assert.equal(syncText(false), '実行中か、10 分以内に実行済みです。');
     const name = (id: string) => (id === 'A1' ? '三井住友 普通' : id);
     assert.equal(warningText({ kind: 'no_balance', account_id: 'A1' }, name), '三井住友 普通 の残高がありません（0 円として計算しています）。');
     assert.equal(warningText({ kind: 'stale_balance', account_id: 'A1', as_of_date: '2026-10-20' }, name), '三井住友 普通 の残高が 2026-10-20 から更新されていません。');
@@ -152,8 +163,65 @@ describe('純関数', () => {
   });
 });
 
+describe('レビューで足した純関数', () => {
+  test('failText は 400 の理由を日本語に。知らないコードはそのまま', () => {
+    assert.equal(failText(400, { error: 'invalid_q' }), '検索語が短すぎるか、法人格だけです。');
+    assert.equal(failText(400, { error: 'weird_code' }), '受け付けられませんでした（weird_code）');
+    assert.match(failText(500, null), /HTTP 500/);
+    assert.match(failText(0), /通信できません/);
+  });
+  test('月を指定した期間・絞り込みの数・件数と支出の合計（集計外は数えない）', () => {
+    const f = { period: 'month' as const, month: '2026-02', accountId: '', tag: '' as const, category: 'food', q: ' ' };
+    assert.equal(txnsUrl(f, TODAY, null), '/api/bank_txns?limit=50&from=2026-02-01&to=2026-02-28&category=food');
+    assert.equal(filterCount(f), 1);
+    assert.deepEqual(txnSummary([txn(), txn({ id: 'T2', side: 'income', amount: 5 }), txn({ id: 'T3', amount: 100, excluded: true })]), { count: 3, expense: 1980 });
+  });
+  test('次の未設定の明細（今の行より下）', () => {
+    const xs = [txn({ id: 'a', tag: 'unset' }), txn({ id: 'b' }), txn({ id: 'c' }), txn({ id: 'd', tag: 'unset' })];
+    assert.equal(nextUnset(xs, 'b')?.id, 'd');
+    assert.equal(nextUnset(xs, 'd'), null);
+  });
+  test('カテゴリ別は支出の大きい順で、取った月の平均との差（無い月は 0）', () => {
+    const m = (month: string, rows: [string | null, number][]) => ({ ...monthlyEmpty(month), by_category: rows.map(([category, expense]) => ({ category, income: 0, expense })) });
+    const rows = categoryRows([m('2026-10', [['food', 30000]]), m('2026-11', [['food', 50000], ['tax', 90000]])], '2026-11');
+    assert.deepEqual(rows.map((r) => [r.category, r.diff]), [['tax', 45000], ['food', 10000]]);
+  });
+  test('提案の分類の初期値を摘要から推す（半角カナも）', () => {
+    assert.equal(guessCategory('ｿﾝﾎﾟｼﾞｬﾊﾟﾝ'), 'insurance');
+    assert.equal(guessCategory('ニッセイ生命'), 'insurance');
+    assert.equal(guessCategory('国保'), 'tax');
+    assert.equal(guessCategory('ｼﾞﾄﾞｳｼｬｾﾞｲ'), 'tax');
+    assert.equal(guessCategory('三井のリパーク駐車場'), 'car');
+    assert.equal(guessCategory('ネットフリックス'), 'other');
+  });
+  test('予定の下書きの検証（日数 0〜365・終わり ≥ 最初・名称 200 文字まで）', () => {
+    const d = { ...emptyDraft(TODAY), name: '税', amount: '100' };
+    assert.equal(draftError(d), null);
+    assert.equal(draftError({ ...d, notify_days_before: '0' }), null);
+    assert.match(draftError({ ...d, notify_days_before: '366' })!, /0〜365/);
+    assert.match(draftError({ ...d, end_date: '2026-11-05' })!, /最初の支払日より後/);
+    assert.equal(draftError({ ...d, end_date: TODAY }), null);
+    assert.match(draftError({ ...d, name: 'あ'.repeat(201) })!, /200 文字/);
+    assert.equal(emptyDraft(TODAY, 'in').category, 'income');
+  });
+  test('資金繰り: 収入の予定が無い・いちばん少ない月', () => {
+    assert.equal(noIncome(forecast), false);
+    assert.equal(noIncome({ ...forecast, months: forecast.months.map((x) => ({ ...x, planned_in: 0 })) }), true);
+    assert.equal(lowestMonth(forecast)?.month, '2027-01');
+  });
+  test('引落元に選べるのは銀行だけ。はじめにの手順は済んだものを出さない', () => {
+    assert.deepEqual(settlementChoices([account(), card, wallet]).map((a) => a.id), ['A1']);
+    const bare = account({ id: 'C2', kind: 'card', card_settlement_account_id: null });
+    const steps = setupSteps({ accounts: [account(), bare], items: [], candidates: 2, unset: { count: 100, more: true } });
+    assert.deepEqual(steps.map((s) => s.kind), ['card_settlement', 'income', 'candidates', 'unset_tags']);
+    assert.deepEqual(setupSteps({ accounts: [account(), card], items: [scheduled({ direction: 'in', category: 'income' })], candidates: 0, unset: { count: 0, more: false } }), []);
+    assert.deepEqual(setupSteps({ accounts: [], items: null, candidates: 0, unset: null }), [], '読めていないものは出さない');
+  });
+});
+
 // ---- SSR スナップショット ----
 
+const monthlyEmpty = (month: string): MonthlySummary => ({ month, by_account: [], by_category: [], by_tag: [], total: { income: 0, expense: 0, net: 0 }, excluded: [] });
 const monthly = (month: string, income: number, expense: number): MonthlySummary => ({
   month,
   by_account: [
@@ -230,9 +298,22 @@ describe('SSR スナップショット', () => {
   });
   const html = (c: (props: never) => unknown, props: object) => pretty(renderHtml(h(c as never, props as never)));
 
-  test('お金タブのセグメント', async (t) => {
+  test('お金タブのセグメント（フォーム中は他を押せない）と「はじめに」', async (t) => {
     const m = await load('/src/money/Money.tsx');
-    t.assert.snapshot(lines(html(m.MoneySeg!, { view: 'cashflow', onView: noop })));
+    const steps = [
+      { kind: 'card_settlement', count: 1, accountId: 'C2' },
+      { kind: 'income', count: 0 },
+      { kind: 'candidates', count: 2 },
+      { kind: 'unset_tags', count: 100, more: true },
+    ];
+    const out = [
+      html(m.MoneySeg!, { view: 'cashflow', locked: false, onView: noop }),
+      html(m.MoneySeg!, { view: 'schedule', locked: true, onView: noop }),
+      html(m.SetupCard!, { steps, onStep: noop }),
+    ].join('\n');
+    assert.equal(html(m.SetupCard!, { steps: [], onStep: noop }), '');
+    assert.equal((out.match(/disabled/g) ?? []).length, 4);
+    t.assert.snapshot(lines(out));
   });
 
   test('明細: 絞り込み・行（支出/収入/振替）・タグのシート', async (t) => {
@@ -243,22 +324,26 @@ describe('SSR スナップショット', () => {
       txn({ id: 'T3', amount: 45000, description: 'ラクテンカード', excluded: true, transfer_kind: 'card_settlement', tag: 'private', category: null }),
     ];
     const out = [
-      html(m.TxnFilters!, { f: { period: 'last', accountId: 'A1', tag: '', category: 'none', q: 'ドコモ' }, accounts: [account(), card], cats, onChange: noop }),
-      html(m.TxnRows!, { items: rows, cats, onOpen: noop }),
-      html(m.TagSheet!, { txn: rows[0], tag: 'business', category: 'telecom', cats, busy: false, onTag: noop, onCategory: noop, onSave: noop, onClose: noop }),
+      html(m.TxnFilters!, { f: { period: 'last', accountId: 'A1', tag: '', category: 'none', q: 'ドコモ' }, q: 'ドコ', expanded: true, accounts: [account(), card], cats, onChange: noop, onQ: noop, onExpand: noop }),
+      html(m.TxnFilters!, { f: { period: 'month', month: '2026-10', accountId: '', tag: '', category: 'food', q: '' }, q: '', expanded: false, accounts: [], cats, onChange: noop, onQ: noop, onExpand: noop }),
+      html(m.TxnRows!, { items: rows, more: true, cats, onOpen: noop }),
+      html(m.TagSheet!, { txn: rows[0], category: 'telecom', cats, saving: false, error: '通信できません。', onTag: noop, onCategory: noop, onClose: noop }),
     ].join('\n');
     assert.match(out, /class="num out">−1,980</);
     assert.match(out, /class="num in">\+300,000</);
-    assert.match(out, /txn-excluded[\s\S]*引落/);
+    assert.match(out, /txn-excluded[\s\S]*集計外[\s\S]*引落/);
+    assert.match(out, /絞り込み（3）/);
+    assert.match(out, /class="scrim"/);
     t.assert.snapshot(lines(out));
   });
 
   test('月次: 月のカードと、口座別（資金繰り対象外は区切りの下）・カテゴリ別・事業/私用・除外', async (t) => {
     const m = await load('/src/money/Monthly.tsx');
-    const out = html(m.MonthlyView!, { months: [monthly('2026-10', 500000, 230000), monthly('2026-11', 0, 52000)], selected: '2026-11', cats, onSelect: noop });
+    const out = html(m.MonthlyView!, { months: [monthly('2026-10', 500000, 230000), monthly('2026-11', 0, 52000)], selected: '2026-11', cats, onSelect: noop, onCategory: noop });
     const div = out.indexOf('資金繰り対象外');
     assert.ok(div > out.indexOf('三井住友 普通') && div < out.indexOf('PayPay'));
     assert.ok(out.indexOf('2026-11') < out.indexOf('2026-10'), '新しい月が先');
+    assert.ok(out.indexOf('未分類') < out.indexOf('通信'), 'カテゴリ別は支出の大きい順');
     t.assert.snapshot(lines(out));
   });
 
@@ -277,11 +362,16 @@ describe('SSR スナップショット', () => {
 
   test('資金繰り: 起点・目安・警告（口座名つき）と月の行、開いた月の内訳', async (t) => {
     const m = await load('/src/money/Cashflow.tsx');
-    const out = html(m.CashflowView!, { cf: forecast, accounts: [account(), wallet], open: '2027-01', onOpen: noop });
+    const out = html(m.CashflowView!, { cf: forecast, accounts: [account(), wallet], open: '2027-01', onOpen: noop, onAddIncome: noop });
     assert.match(out, /PayPay の残高が 2026-10-20 から更新されていません/);
     assert.match(out, /2027-01 に足りなくなります/);
     assert.match(out, /cf-short[\s\S]*class="num out">−304,933/);
     assert.match(out, /所得税（予定納税）/);
+    assert.ok(out.indexOf('更新されていません') < out.indexOf('足りなくなります') && out.indexOf('足りなくなります') < out.indexOf('起点残高'), '警告 → 結論 → 起点残高');
+    assert.doesNotMatch(out, /収入の予定がない/);
+    const noInc = html(m.CashflowView!, { cf: { ...forecast, first_shortfall_month: null, warnings: [], months: forecast.months.map((x) => ({ ...x, planned_in: 0 })) }, accounts: [], open: null, onOpen: noop, onAddIncome: noop });
+    assert.match(noInc, /収入の予定がないため[\s\S]*収入を予定に追加/);
+    assert.match(noInc, /36 か月の範囲で不足なし[\s\S]*いちばん少ないのは 2027-01/);
     t.assert.snapshot(lines(out));
   });
 
@@ -290,11 +380,14 @@ describe('SSR スナップショット', () => {
     const mm = await load('/src/money/model.ts');
     const withStatus = mm.withStatus as unknown as (a: Account[], s: BankStatus[]) => unknown[];
     const out = [
-      html(m.AccountRows!, { rows: withStatus([account(), card, wallet], status), onEdit: noop }),
-      html(m.AccountForm!, { account: card, draft: { default_tag: 'unset', include_in_cashflow: true, mcp_visibility: 'summary', active: true, card_settlement_account_id: 'A1', card_settlement_pattern: 'ラクテンカード' }, accounts: [account(), card, wallet], busy: false, onChange: noop, onSave: noop, onClose: noop }),
+      html(m.AccountRows!, { rows: withStatus([account(), card, wallet, account({ id: 'C2', name: 'イオンカード', kind: 'card', latest_balance: null })], status), onEdit: noop }),
+      html(m.AccountForm!, { account: card, draft: { default_tag: 'unset', include_in_cashflow: true, mcp_visibility: 'summary', active: true, card_settlement_account_id: '', card_settlement_pattern: '' }, accounts: [account(), card, wallet], busy: false, onChange: noop, onSave: noop, onClose: noop }),
     ].join('\n');
     assert.match(out, /freee_http_503/);
     assert.match(out, /2025-11-01 まで取り込み済み/);
+    assert.match(out, /イオンカード[\s\S]*二重に数えられます/);
+    assert.doesNotMatch(out.split('「楽天カード」の設定')[1]!, /value="W1"/, '引落元は銀行だけ');
+    assert.match(out, /placeholder="例: ミツイスミトモ"/);
     t.assert.snapshot(lines(out));
   });
 });

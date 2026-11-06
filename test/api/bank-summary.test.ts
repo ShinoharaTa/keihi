@@ -83,6 +83,7 @@ beforeEach(() => {
       deadline: { countFrom: 'receipt_day' },
       retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
       provider: { kind: 'fake' },
+      cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false },
     },
     auth: createAuth({ allowedUsers: [USER], allowedHosts: [LOCAL] }),
     triggerWorker: () => {},

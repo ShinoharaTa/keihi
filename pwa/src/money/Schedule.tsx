@@ -1,25 +1,31 @@
 // 予定（docs/mvp-plan-v3.md T301・T302。src/web/routes/cashflow.ts）。
 // 上に周期検出の提案（GET /api/recurrence_candidates?state=open）: 「予定に追加」で分類と金額を確かめて accept、「却下」で dismiss、「今すぐ検出」で detect。
 // 下に予定の台帳（GET /api/scheduled_items?all=1。次の期日は GET /api/scheduled_items/upcoming の最初の due_date）。
-// 「予定を追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。
+// 「予定を追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」を出す。
+// 提案の分類の初期値は摘要から推す（guessCategory）。フォームを開いている間は onLock(true) でセグメントの切り替えを止める。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, patchJson, postJson } from '../api.ts';
 import {
   categoriesFor,
   draftBody,
+  draftError,
   draftOf,
   emptyDraft,
   failText,
+  guessCategory,
   lastOccurrence,
   nextDueMap,
   parseYen,
   RECURRENCE_LABELS,
   RECURRENCES,
   SCHEDULE_CATEGORY_LABELS,
+  NOTIFY_MAX,
+  TEXT_MAX,
   UPCOMING_DAYS,
   yen,
   type Account,
   type Candidate,
+  type Direction,
   type ItemDraft,
   type ScheduleCategory,
   type ScheduledItem,
@@ -86,7 +92,7 @@ export function CandidateList({
                 予定に追加
               </button>
               <button type="button" class="btn" disabled={busy} onClick={() => onDismiss(c)}>
-                却下
+                予定にしない
               </button>
             </div>
           )}
@@ -138,12 +144,13 @@ export function ItemForm({
   onClose: () => void;
 }) {
   const set = <K extends keyof ItemDraft>(k: K, v: ItemDraft[K]) => onChange({ ...draft, [k]: v });
+  const err = draftError(draft);
   return (
     <div class="fields">
       <p class="sheet-title">{editing ? `「${editing.name}」を編集` : '予定を追加'}</p>
       <label class="fields">
         <span class="label">名称</span>
-        <input class="field" value={draft.name} onInput={(e) => set('name', e.currentTarget.value)} />
+        <input class="field" maxLength={TEXT_MAX} value={draft.name} onInput={(e) => set('name', e.currentTarget.value)} />
       </label>
       <label class="fields">
         <span class="label">金額（円）</span>
@@ -153,7 +160,7 @@ export function ItemForm({
         <button type="button" class={draft.direction === 'out' ? 'seg-on' : ''} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
           支出
         </button>
-        <button type="button" class={draft.direction === 'in' ? 'seg-on' : ''} onClick={() => set('direction', 'in')}>
+        <button type="button" class={draft.direction === 'in' ? 'seg-on' : ''} onClick={() => onChange({ ...draft, direction: 'in', category: draft.category === 'other' ? 'income' : draft.category })}>
           収入
         </button>
       </div>
@@ -178,19 +185,20 @@ export function ItemForm({
         </select>
       </label>
       <label class="fields">
-        <span class="label">起点の期日</span>
+        <span class="label">最初の支払日</span>
         <input class="field" type="date" value={draft.anchor_date} onInput={(e) => set('anchor_date', e.currentTarget.value)} />
       </label>
       <label class="fields">
         <span class="label">終わりの日（任意）</span>
-        <input class="field" type="date" value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
+        <input class="field" type="date" min={draft.anchor_date} value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
       </label>
       <label class="fields">
-        <span class="label">何日前から知らせるか</span>
-        <input class="field" inputMode="numeric" value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
+        <span class="label">何日前から知らせるか（0〜{NOTIFY_MAX}）</span>
+        <input class="field" inputMode="numeric" maxLength={3} value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
       </label>
+      {err && draft.name !== '' && <p class="msg">{err}</p>}
       <div class="row-btns">
-        <button type="button" class="btn btn-primary" disabled={busy || draftBody(draft) === null} onClick={onSave}>
+        <button type="button" class="btn btn-primary" disabled={busy || err !== null} onClick={onSave}>
           保存
         </button>
         <button type="button" class="btn" onClick={onClose}>
@@ -206,15 +214,35 @@ export function ItemForm({
   );
 }
 
-export function Schedule({ today, accounts }: { today: string; accounts: Account[] }) {
+export function Schedule({
+  today,
+  accounts,
+  addDirection,
+  onLock,
+}: {
+  today: string;
+  accounts: Account[];
+  // 開いたときに追加フォームを出す（資金繰り・はじめにから「収入を予定に追加」）。
+  addDirection?: Direction;
+  onLock: (locked: boolean) => void;
+}) {
   const [cands, setCands] = useState<Candidate[]>([]);
   const [items, setItems] = useState<ScheduledItem[] | null>(null);
   const [nextDue, setNextDue] = useState<Record<string, string>>({});
   const [accepting, setAccepting] = useState<Accepting | null>(null);
-  const [form, setForm] = useState<{ draft: ItemDraft; editing: ScheduledItem | null } | null>(null);
+  const [form, setForm] = useState<{ draft: ItemDraft; editing: ScheduledItem | null } | null>(() =>
+    addDirection ? { draft: emptyDraft(today, addDirection), editing: null } : null,
+  );
+  const [undo, setUndo] = useState<ScheduledItem | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
+  useEffect(() => {
+    onLock(form !== null);
+    return () => onLock(false);
+  }, [form !== null]);
+
+  // 読み直す。失敗したときだけ msg を書く（書き込みの結果の文を消さない）。
   const load = useCallback(async () => {
     const [c, s, u] = await Promise.all([
       getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open'),
@@ -222,7 +250,7 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
       getJson<{ items: { id: string; due_date: string }[] }>(`/api/scheduled_items/upcoming?days=${UPCOMING_DAYS}`),
     ]);
     const failed = [c, s, u].find((r) => !r.ok);
-    setMsg(failed && !failed.ok ? failText(failed.status) : '');
+    if (failed && !failed.ok) setMsg(failText(failed.status, failed.body));
     setCands(c.ok ? c.data.candidates : []);
     setItems(s.ok ? s.data.items : null);
     setNextDue(u.ok ? nextDueMap(u.data.items) : {});
@@ -232,14 +260,15 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
     void load();
   }, [load]);
 
-  // 書き込み → 結果の文 → 読み直し。成功なら true。
+  // 書き込み → 結果の文 → 読み直し → busy を戻す。成功なら true。
   const run = async (p: Promise<{ status: number; body: unknown }>, ok: (body: unknown) => string): Promise<boolean> => {
     setBusy(true);
+    setUndo(null);
     const r = await p;
-    setBusy(false);
     const good = r.status === 200 || r.status === 201;
     setMsg(good ? ok(r.body) : failText(r.status, r.body));
     if (good) await load();
+    setBusy(false);
     return good;
   };
 
@@ -260,11 +289,11 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
     if (await run(p, () => '保存しました。')) setForm(null);
   };
 
-  const toggle = async () => {
-    const it = form?.editing;
-    if (!it) return;
-    const action = it.active ? 'deactivate' : 'activate';
-    if (await run(postJson(`/api/scheduled_items/${encodeURIComponent(it.id)}/${action}`, {}), () => (it.active ? '停止しました。' : '再開しました。'))) setForm(null);
+  const setActive = async (it: ScheduledItem, active: boolean) => {
+    const action = active ? 'activate' : 'deactivate';
+    const ok = await run(postJson(`/api/scheduled_items/${encodeURIComponent(it.id)}/${action}`, {}), () => (active ? '再開しました。' : `「${it.name}」を停止しました。`));
+    if (ok) setForm(null);
+    if (ok && !active) setUndo(it);
   };
 
   if (form) {
@@ -277,7 +306,7 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
           busy={busy}
           onChange={(draft) => setForm({ ...form, draft })}
           onSave={() => void save()}
-          onToggle={() => void toggle()}
+          onToggle={() => form.editing && void setActive(form.editing, !form.editing.active)}
           onClose={() => setForm(null)}
         />
       </>
@@ -286,7 +315,16 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
 
   return (
     <>
-      {msg && <p class="msg">{msg}</p>}
+      {msg && (
+        <div class="msg undo">
+          <span>{msg}</span>
+          {undo && (
+            <button type="button" class="btn" disabled={busy} onClick={() => void setActive(undo, true)}>
+              元に戻す
+            </button>
+          )}
+        </div>
+      )}
       <h2 class="h">提案</h2>
       {cands.length === 0 && <p class="sub">提案はありません。</p>}
       {cands.length > 0 && (
@@ -295,10 +333,10 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
           accounts={accounts}
           accepting={accepting}
           busy={busy}
-          onAccept={(c) => setAccepting({ id: c.id, category: 'other', amount: String(c.amount) })}
+          onAccept={(c) => setAccepting({ id: c.id, category: guessCategory(c.description_norm), amount: String(c.amount) })}
           onChange={setAccepting}
           onConfirm={() => void confirmAccept()}
-          onDismiss={(c) => void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/dismiss`, {}), () => '却下しました。')}
+          onDismiss={(c) => void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/dismiss`, {}), () => '予定にしないことにしました。')}
         />
       )}
       <button
@@ -308,11 +346,11 @@ export function Schedule({ today, accounts }: { today: string; accounts: Account
         onClick={() =>
           void run(postJson('/api/recurrence_candidates/detect', {}), (b) => {
             const r = b as { created?: number; updated?: number } | null;
-            return `検出しました（新しい提案 ${r?.created ?? 0} 件、更新 ${r?.updated ?? 0} 件）。`;
+            return `探しました（新しい提案 ${r?.created ?? 0} 件、更新 ${r?.updated ?? 0} 件）。`;
           })
         }
       >
-        今すぐ検出
+        明細から定期の支払いを探す
       </button>
       <h2 class="h">予定の台帳</h2>
       {items && items.length === 0 && <p class="sub">予定はまだありません。</p>}
