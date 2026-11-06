@@ -2,7 +2,8 @@
 // REST generateContent を fetch で直接呼ぶ。SDK は使わない。
 // 画像は inline のみ（Files API・キャッシュ・Interactions API は使わない。classification-ocr.md B-2）。
 // API キーは x-goog-api-key ヘッダでだけ送り、URL・ログ・例外メッセージ・保存する応答本文には出さない。
-// - 設定（model・paid_tier_confirmed・thinking_level・media_resolution）は createGeminiFromConfig で読む。
+// - 設定（model・paid_tier_confirmed・thinking_level・media_resolution・max_output_tokens）は createGeminiFromConfig で読む。
+// - generationConfig.maxOutputTokens（思考トークン込み）を必ず付け、出力が上限なしに伸びないようにする。
 //   有料 tier の確認かキーが無ければ ConfigError（requireGemini）。
 // - 領収書の抽出（extractReceipt）は、原本から deriveForAi で作った派生画像だけを送り（D13）、
 //   応答は schema.ts の構造化出力（responseJsonSchema）で受ける。応答の検証は呼び出し側が validate.ts で行う。
@@ -32,6 +33,7 @@ export type GenerateInput = {
   responseJsonSchema: unknown;
   thinkingLevel: ThinkingLevel;
   mediaResolution: MediaResolution;
+  maxOutputTokens: number;
 };
 
 export type Usage = { tokensIn: number; tokensOut: number; tokensThoughts: number };
@@ -105,6 +107,7 @@ export function buildGenerateContentBody(input: GenerateInput): Record<string, u
       responseJsonSchema: input.responseJsonSchema,
       thinkingConfig: { thinkingLevel: input.thinkingLevel },
       mediaResolution: MEDIA_RESOLUTION[input.mediaResolution],
+      maxOutputTokens: input.maxOutputTokens,
     },
   };
 }
@@ -195,7 +198,7 @@ export function createGeminiClient(opts: {
 
 // ---- 設定から作る / 領収書の抽出 ----
 
-export type GeminiSettings = { model: string; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution };
+export type GeminiSettings = { model: string; thinkingLevel: ThinkingLevel; mediaResolution: MediaResolution; maxOutputTokens: number };
 export type Gemini = GeminiSettings & { client: GeminiClient };
 
 // 有料 tier の確認とキーが無ければ ConfigError（classification-ocr.md 受け入れ条件）。
@@ -205,6 +208,7 @@ export function createGeminiFromConfig(cfg: Config, opts: { fetch?: typeof fetch
     model: g.model,
     thinkingLevel: cfg.gemini.thinkingLevel,
     mediaResolution: cfg.gemini.mediaResolution,
+    maxOutputTokens: cfg.gemini.maxOutputTokens,
     client: createGeminiClient({ apiKey: g.apiKey, fetch: opts.fetch, baseUrl: opts.baseUrl, timeoutMs: opts.timeoutMs }),
   };
 }
@@ -229,6 +233,7 @@ export async function buildReceiptInput(req: ReceiptRequest, s: GeminiSettings):
     responseJsonSchema: buildResponseSchema(req.accounts),
     thinkingLevel: s.thinkingLevel,
     mediaResolution: s.mediaResolution,
+    maxOutputTokens: s.maxOutputTokens,
   };
 }
 

@@ -63,7 +63,7 @@ const goodOutput = {
     description: null,
     confidence: 0.9,
   },
-  account_candidates: [{ account_id: '消耗品費', tax_id: 'taxable_10', confidence: 0.9, reason: '文具' }],
+  account_candidates: [{ account_id: 'a10', tax_id: 'taxable_10', confidence: 0.9, reason: '文具' }],
   questions: [],
 };
 
@@ -245,7 +245,7 @@ describe('リクエスト形（fetch モック）', () => {
     await assert.rejects(
       client.generate({
         model: DEFAULT_MODEL, systemInstruction: 's', prompt: 'p', inline: { mimeType: 'image/jpeg', data: Buffer.from([1]) },
-        responseJsonSchema: {}, thinkingLevel: 'low', mediaResolution: 'medium',
+        responseJsonSchema: {}, thinkingLevel: 'low', mediaResolution: 'medium', maxOutputTokens: 8192,
       }),
       (e: unknown) => e instanceof GeminiError && e.status === 400 && !e.message.includes(API_KEY) && !String(e.stack).includes(API_KEY),
     );
@@ -312,7 +312,7 @@ describe('一致率と要約', () => {
     assert.deepEqual([s.date, s.total, s.vendor, s.reg_no, s.account], [true, true, true, true, true]);
     const bad = scoreOutput(truth(), {
       extraction: { txn_date: '2026-09-12', amount_total: 1000000, vendor_name: '別の店', invoice_reg_no: null },
-      account_candidates: [{ account_id: '接待交際費' }],
+      account_candidates: [{ account_id: 'a07' }],
     });
     assert.deepEqual([bad.date, bad.total, bad.vendor, bad.reg_no, bad.account], [false, false, false, false, false]);
     const none = scoreOutput(truth({ registration_number: null }), { extraction: { invoice_reg_no: null } });
@@ -362,7 +362,7 @@ describe('応答スキーマの範囲（命令文混入）', () => {
           component: 'ChoiceQuestion',
           text: '用途は？',
           options: [
-            { label: '事業', effect: { field: 'account_id', value: '会議費' } },
+            { label: '事業', effect: { field: 'account_id', value: 'a21' } },
             { label: '私用', effect: { field: 'decision', value: 'personal' } },
           ],
         },

@@ -84,7 +84,7 @@ const fetchMock = (async (url: string | URL | Request, init?: RequestInit) => {
 }) as typeof fetch;
 
 function gemini(): Gemini {
-  return { model: 'gemini-3.8-flash', thinkingLevel: 'low', mediaResolution: 'medium', client: createGeminiClient({ apiKey: API_KEY, fetch: fetchMock }) };
+  return { model: 'gemini-3.8-flash', thinkingLevel: 'low', mediaResolution: 'medium', maxOutputTokens: 8192, client: createGeminiClient({ apiKey: API_KEY, fetch: fetchMock }) };
 }
 
 let geminiCreated = 0;

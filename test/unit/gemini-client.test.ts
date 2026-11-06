@@ -82,6 +82,7 @@ describe('extractReceipt', () => {
     assert.equal(body.generationConfig.responseMimeType, 'application/json');
     assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, 'low');
     assert.equal(body.generationConfig.mediaResolution, 'MEDIA_RESOLUTION_MEDIUM');
+    assert.equal(body.generationConfig.maxOutputTokens, 8192);
     assert.match(body.contents[0].parts[1].text, /101: 消耗品費/);
     assert.match(body.contents[0].parts[1].text, /辞書の集計: なし/);
     assert.ok(!/fileData|fileUri|cachedContent|"store"/.test(String(m.calls[0].init.body)));

@@ -10,6 +10,8 @@ paid_tier_confirmed = false
 # U7 の暫定値（T0-3r の結果で変える）。"low" / "medium" / "high"
 # thinking_level = "low"
 # media_resolution = "medium"
+# 出力トークン（思考込み）の上限。トークン爆発の防止。既定 8192
+# max_output_tokens = 8192
 
 [freee]
 # テスト事業所と本番事業所は別の名前で持つ。
