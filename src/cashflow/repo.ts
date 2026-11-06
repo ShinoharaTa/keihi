@@ -201,3 +201,56 @@ export function setRecurrenceCandidateState(db: Db, id: string, state: Candidate
   const r = db.prepare('UPDATE recurrence_candidates SET state = ?, scheduled_item_id = ?, updated_at = ? WHERE id = ?').run(state, scheduledItemId, now, id);
   return r.changes === 0 ? null : getRecurrenceCandidate(db, id);
 }
+
+// ---- forecast（T303） ----
+
+// 資金繰りに入れる口座（include_in_cashflow = 1 かつ active = 1）と、その最新の残高（as_of_date DESC, seq DESC。無ければ NULL）。
+export type CashflowAccountRow = {
+  id: string;
+  name: string;
+  kind: string;
+  card_settlement_account_id: string | null;
+  card_settlement_pattern: string | null;
+  balance: number | null;
+  as_of_date: string | null;
+};
+
+export function listCashflowAccounts(db: Db): CashflowAccountRow[] {
+  return db.prepare(
+    `SELECT a.id, a.name, a.kind, a.card_settlement_account_id, a.card_settlement_pattern, b.balance, b.as_of_date
+       FROM money_accounts a
+       LEFT JOIN account_balances b ON b.seq = (
+         SELECT seq FROM account_balances WHERE account_id = a.id ORDER BY as_of_date DESC, seq DESC LIMIT 1)
+      WHERE a.include_in_cashflow = 1 AND a.active = 1
+      ORDER BY a.created_at, a.id`,
+  ).all() as CashflowAccountRow[];
+}
+
+// 資金繰りに入れる口座の明細（from〜to、両端を含む）。
+export type CashflowTxnRow = { id: string; account_id: string; txn_date: string; amount: number; side: 'income' | 'expense' };
+
+export function listCashflowTxns(db: Db, from: string, to: string): CashflowTxnRow[] {
+  return db.prepare(
+    `SELECT t.id, t.account_id, t.txn_date, t.amount, t.side
+       FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
+      WHERE a.include_in_cashflow = 1 AND a.active = 1 AND t.txn_date >= ? AND t.txn_date <= ?
+      ORDER BY t.txn_date, t.id`,
+  ).all(from, to) as CashflowTxnRow[];
+}
+
+// 資金繰りに入れる口座の、いちばん古い明細の日付（無ければ null）。
+export function firstCashflowTxnDate(db: Db): string | null {
+  const r = db.prepare(
+    `SELECT min(t.txn_date) d FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
+      WHERE a.include_in_cashflow = 1 AND a.active = 1`,
+  ).get() as { d: string | null };
+  return r.d;
+}
+
+// 明細の口座と摘要（振替の組の相手の口座を調べる）。
+export function txnAccounts(db: Db, ids: string[]): Map<string, { account_id: string; description: string }> {
+  const rows = db.prepare(
+    'SELECT id, account_id, description FROM bank_txns WHERE id IN (SELECT value FROM json_each(?))',
+  ).all(JSON.stringify(ids)) as { id: string; account_id: string; description: string }[];
+  return new Map(rows.map((r) => [r.id, { account_id: r.account_id, description: r.description }]));
+}

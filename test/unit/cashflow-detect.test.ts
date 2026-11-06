@@ -444,7 +444,7 @@ describe('/api/recurrence_candidates', () => {
     seed(db, f.A, f.B);
     app = new Hono();
     app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }));
-    app.route('/api', cashflowRoutes({ db, now: () => T0 }));
+    app.route('/api', cashflowRoutes({ db, now: () => T0, config: { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } }));
   });
   const headers = { Host: HOST, 'Tailscale-User-Login': USER, 'content-type': 'application/json' };
   const get = (url: string) => app.request(url, { headers });

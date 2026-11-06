@@ -61,6 +61,7 @@ function make() {
       calendar: { deadlineMode: 'early', yearEndHolidays: false },
       deadline: { countFrom: 'receipt_day' },
       retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
+      cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false },
     },
     auth: allow,
     triggerWorker: () => trigger(),

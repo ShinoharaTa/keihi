@@ -20,7 +20,7 @@ export type AppDeps = {
   db: Db;
   objectsDir: string;
   // provider は口座（money_accounts.provider）に使う。省略時は freee。
-  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention'> & Partial<Pick<Config, 'provider'>>;
+  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention' | 'cashflow'> & Partial<Pick<Config, 'provider'>>;
   auth: MiddlewareHandler;
   triggerWorker: () => void;
   now?: () => Date;
