@@ -1,6 +1,6 @@
 // 「お金」タブのグラフ（インライン SVG。外部ライブラリは使わない）。座標は chart.ts の純関数で計算し、色は style.css の c-* / f-* / t-* で当てる。
 // どれも hooks を使わない描画だけの部品（SSR のスナップショットで試す）。押せるグラフは onPick / onSelect を受ける。
-import { areaPoints, lineChart, pairBars, pct, r1, spans, stackBars, xAt, type Plot } from './chart.ts';
+import { areaPoints, gapLineChart, lineChart, pairBars, pct, r1, spans, stackBars, xAt, type Plot } from './chart.ts';
 import { man, markSize, signedMan, type ForecastMonth, type MonthMarks, type PeakMonth } from './model.ts';
 
 const mon = (month: string) => `${Number(month.slice(5, 7))}月`;
@@ -45,26 +45,26 @@ export function CatBar({ value, avg, max }: { value: number; avg: number; max: n
 const TREND: Plot = { w: 340, h: 150, l: 36, r: 8, t: 12, b: 30 };
 
 // ホームの残高の推移（月末・直近 12 か月）。残す額の点線、最低の月と今月に印。
-export function BalanceTrend({ months, reserve }: { months: { month: string; total: number }[]; reserve: number | null }) {
-  if (months.length === 0) return null;
+// months は balanceSeries の系列（最初の月は残高あり）。残高の無い月（null）は点を打たず線もつながない。残す額が 0 のときは線のラベルを出さない（軸の 0 と重なる）。
+export function BalanceTrend({ months, reserve }: { months: { month: string; total: number | null }[]; reserve: number | null }) {
+  const have = months.map((m, i) => ({ month: m.month, total: m.total, i })).filter((m): m is { month: string; total: number; i: number } => m.total !== null);
+  if (have.length === 0) return null;
   const p = TREND;
-  const c = lineChart(
+  const c = gapLineChart(
     months.map((m) => m.total),
     p,
     reserve === null ? [] : [reserve],
   );
   const n = months.length;
-  let lo = 0;
-  months.forEach((m, i) => {
-    if (m.total < months[lo]!.total) lo = i;
-  });
-  const first = months[0]!;
-  const last = months[n - 1]!;
-  const lastPt = c.pts[n - 1]!;
-  const loPt = c.pts[lo]!;
+  let lo = have[0]!;
+  for (const m of have) if (m.total < lo.total) lo = m;
+  const first = have[0]!;
+  const last = have[have.length - 1]!;
+  const lastPt = c.pts[last.i]!;
+  const loPt = c.pts[lo.i]!;
   const ry = reserve === null ? null : c.y(reserve);
   const xs = months.map((m, i) => ({ m, i })).filter(({ i }) => i === n - 1 || (i % 3 === 0 && n - 1 - i >= 2));
-  const label = `直近 ${n} か月の月末残高。${first.month} の ${man(first.total)}円から ${last.month} の ${man(last.total)}円へ。最低は ${months[lo]!.month} の ${man(months[lo]!.total)}円${reserve === null ? '' : `。残す額は ${man(reserve)}円`}`;
+  const label = `直近 ${n} か月の月末残高。${first.month} の ${man(first.total)}円から ${last.month} の ${man(last.total)}円へ。最低は ${lo.month} の ${man(lo.total)}円${reserve === null ? '' : `。残す額は ${man(reserve)}円`}`;
   return (
     <svg class="m-svg" role="img" aria-label={label} viewBox={`0 0 ${p.w} ${p.h}`}>
       {c.ticks.map((t) => (
@@ -78,17 +78,21 @@ export function BalanceTrend({ months, reserve }: { months: { month: string; tot
       {ry !== null && reserve !== null && (
         <>
           <line class="c-dash" x1={p.l} x2={p.w - p.r} y1={ry} y2={ry} />
-          <text class="c-label" x={p.l + 4} y={ry + 12} font-size="10">
-            残す額 {man(reserve)}
-          </text>
+          {reserve !== 0 && (
+            <text class="c-label" x={p.l + 4} y={ry + 12} font-size="10">
+              残す額 {man(reserve)}
+            </text>
+          )}
         </>
       )}
-      <polyline class="c-line" points={c.points} />
-      {lo !== n - 1 && (
+      {c.segs.map((s) =>
+        s.includes(' ') ? <polyline key={s} class="c-line" points={s} /> : <circle key={s} class="c-dot" cx={s.split(',')[0]} cy={s.split(',')[1]} r="2" />,
+      )}
+      {lo.i !== last.i && (
         <>
           <circle class="c-ring" cx={loPt.x} cy={loPt.y} r="3" />
           <text class="c-fg2" x={loPt.x} y={loPt.y + 14} font-size="10" text-anchor="middle">
-            {man(months[lo]!.total)}
+            {man(lo.total)}
           </text>
         </>
       )}

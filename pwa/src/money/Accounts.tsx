@@ -9,6 +9,7 @@ import {
   ACCOUNT_KIND_LABELS,
   accountDraft,
   accountPatch,
+  cardUsage,
   failText,
   md,
   needsSettlement,
@@ -25,6 +26,7 @@ import {
   type Account,
   type AccountDraft,
   type BankStatus,
+  type MonthlySummary,
 } from './model.ts';
 import { ScreenHead } from './Money.tsx';
 
@@ -79,6 +81,7 @@ export function AccountCard({
   a,
   today,
   accounts,
+  usage,
   edit,
   open,
   busy,
@@ -89,6 +92,8 @@ export function AccountCard({
   a: Row;
   today: string;
   accounts: Account[];
+  // カードの今月の利用（月次集計を読めたときだけ）。
+  usage?: number;
   // 書きかけの設定（この口座のときだけ）と、設定を開いているか。
   edit: AccountDraft | null;
   open: boolean;
@@ -124,8 +129,18 @@ export function AccountCard({
           )}
         </span>
         <span class="m-acct-bal">
-          {a.latest_balance ? yen(a.latest_balance.balance) : '—'}
-          {a.latest_balance && (
+          {a.kind === 'card' && usage !== undefined ? (
+            <>
+              {usage > 0 ? yen(-usage) : '0'}
+              <br />
+              <span class="m-sub">今月の利用</span>
+            </>
+          ) : a.latest_balance ? (
+            yen(a.latest_balance.balance)
+          ) : (
+            '—'
+          )}
+          {!(a.kind === 'card' && usage !== undefined) && a.latest_balance && (
             <>
               <br />
               <span class="m-sub">{md(a.latest_balance.as_of_date)} 時点</span>
@@ -195,6 +210,7 @@ export function AccountsView({
   rows,
   today,
   accounts,
+  usage = {},
   edit,
   busy,
   onOpen,
@@ -204,6 +220,7 @@ export function AccountsView({
   rows: Row[];
   today: string;
   accounts: Account[];
+  usage?: Record<string, number>;
   edit: Edit | null;
   busy: boolean;
   onOpen: (a: Account, open: boolean) => void;
@@ -222,6 +239,7 @@ export function AccountsView({
             a={a}
             today={today}
             accounts={accounts}
+            usage={usage[a.id]}
             edit={mine?.draft ?? null}
             open={mine?.open ?? false}
             busy={busy}
@@ -256,6 +274,7 @@ export function Accounts({
   const [edit, setEdit] = useState<Edit | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
+  const [summary, setSummary] = useState<MonthlySummary | null>(null);
 
   const dirty = (() => {
     const a = edit ? accounts.find((x) => x.id === edit.id) : null;
@@ -282,6 +301,13 @@ export function Accounts({
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
+
+  // カードの「今月の利用」（今月の月次集計の口座別の支出）。読めなければ出さない。
+  useEffect(() => {
+    void getJson<MonthlySummary>(`/api/summary/monthly?month=${today.slice(0, 7)}`).then((r) => {
+      if (r.ok) setSummary(r.data);
+    });
+  }, [today]);
 
   const sync = async () => {
     setBusy(true);
@@ -330,6 +356,7 @@ export function Accounts({
           rows={withStatus(accounts, status)}
           today={today}
           accounts={accounts}
+          usage={cardUsage(accounts, summary)}
           edit={edit}
           busy={busy}
           onOpen={(a, open) => setEdit(open ? { id: a.id, draft: edit?.id === a.id ? edit.draft : accountDraft(a), open: true } : null)}

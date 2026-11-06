@@ -68,8 +68,7 @@ body {
   border-bottom: 1px solid var(--danger);
 }
 .btn,
-.seg button,
-.tabs button {
+.seg button {
   min-height: 48px;
   font: inherit;
   border-radius: 10px;
@@ -136,8 +135,7 @@ button:disabled {
 .seg-wrap {
   grid-template-columns: repeat(3, 1fr);
 }
-.seg-on,
-.tabs .tab-on {
+.seg-on {
   background: var(--accent);
   color: var(--accent-fg);
   border-color: var(--accent);
@@ -176,11 +174,11 @@ button:disabled {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 4px;
-  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
-  background: var(--bg);
-  border-top: 1px solid var(--line);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  height: calc(64px + env(safe-area-inset-bottom));
+  padding: 0 0 env(safe-area-inset-bottom);
+  background: var(--m-card);
+  border-top: 1px solid var(--m-line);
 }
 .list {
   list-style: none;
@@ -369,26 +367,50 @@ button:disabled {
 .item-warn {
   border-color: var(--danger);
 }
-/* 下のタブは 5 つ（T111）。小さい画面でも 1 行に収まるよう字を詰める。 */
+/* 下のタブは 5 つ（T111）。アイコン + 小さいラベル、件数はアイコンの右上のピル（モック Main.dc.html）。選択中はお金タブの青。 */
 .tabs button {
   position: relative;
-  font-size: 14px;
-  padding: 6px 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
   min-width: 0;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--m-sub);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.tabs .tab-on {
+  color: var(--m-accent);
+  font-weight: 700;
 }
 .tab-pill {
   position: absolute;
-  top: 2px;
-  right: 4px;
+  top: 6px;
+  left: 50%;
+  margin-left: 6px;
   min-width: 18px;
+  height: 18px;
   padding: 0 5px;
-  border-radius: 999px;
-  background: var(--danger);
-  color: var(--bg);
-  font-size: 11px;
+  border-radius: 9px;
+  background: var(--m-fg2);
+  color: var(--m-card);
+  font-size: 10px;
   line-height: 18px;
+  text-align: center;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+.tab-on .tab-pill {
+  background: var(--m-accent);
+  color: var(--m-on-accent);
 }
 /* 「お金」タブ（モック 390×844: ホーム・月次・明細・タグ付け・見通し・予定・口座）。色は m- のトークンで持ち、暗い表示でも読めるようにする。
    収入は青系、支出はオレンジ系。押す所は 44px 以上。360px 幅でも横にはみ出さない（グリッドの列は minmax(0, …)）。 */

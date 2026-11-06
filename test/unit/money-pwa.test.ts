@@ -5,14 +5,16 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { h } from 'preact';
 import type { ViteDevServer } from 'vite';
-import { areaPoints, lineChart, niceTicks, pairBars, pct, spans, stackBars, xAt, yScale, type Plot } from '../../pwa/src/money/chart.ts';
+import { areaPoints, gapLineChart, lineChart, niceTicks, pairBars, pct, spans, stackBars, xAt, yScale, type Plot } from '../../pwa/src/money/chart.ts';
 import {
   accountPatch,
   addMonth,
   applyRuleLocally,
   applyTag,
+  balanceSeries,
+  candidateName,
   candidateNext,
-  cardsOutstanding,
+  cardUsage,
   categoryRows,
   countLabel,
   dateShort,
@@ -232,6 +234,12 @@ describe('グラフの座標（chart.ts）', () => {
     assert.equal(areaPoints(c.pts, 50), '10,50 50,30 90,10 90,50 10,50');
     assert.equal(areaPoints([], 50), '');
   });
+  test('欠けた値のある折れ線: 欠けた所で線を切り、目盛りは値のある所だけ', () => {
+    const c = gapLineChart([0, null, 100, 50], { w: 100, h: 60, l: 10, r: 0, t: 10, b: 10 }, [], 2);
+    assert.deepEqual(c.segs, ['10,50', '70,10 100,30']);
+    assert.equal(c.pts[1], null);
+    assert.deepEqual(gapLineChart([null, null], P).segs, []);
+  });
   test('足りない期間は続きをまとめ、左右は隣との中点まで（端は描画域で止める）', () => {
     assert.deepEqual(spans([false, true, true, false, true], P), [
       { x: 20, w: 40 },
@@ -308,11 +316,15 @@ describe('ホームの純関数', () => {
     assert.equal(needsSettlement({ ...bareCard, active: false }), false);
     assert.equal(needsSettlement(account()), false);
   });
-  test('一覧の件数は集計外を除き、上限を超えたら +', () => {
-    const c = pageCount({ items: [txn({ tag: 'unset' }), txn({ id: 'x', tag: 'unset', excluded: true })], next_cursor: 'n' });
-    assert.deepEqual(c, { n: 1, more: true });
-    assert.equal(countLabel(c), '1+');
-    assert.equal(countLabel(pageCount({ items: [], next_cursor: null })), '0');
+  test('一覧の件数は集計外を除き、上限まで返ったか次があれば返った件数に +', () => {
+    const c = pageCount({ items: [txn({ tag: 'unset' }), txn({ id: 'x', tag: 'unset', excluded: true })], next_cursor: null }, 100);
+    assert.deepEqual(c, { n: 1, more: false });
+    assert.equal(countLabel(c), '1');
+    assert.equal(countLabel(pageCount({ items: [], next_cursor: null }, 100)), '0');
+    // 100 件中 1 件が集計外でも、上限まで返ってきたら 100+（99 件と出さない）。
+    const full = Array.from({ length: 100 }, (_, i) => txn({ id: `F${i}`, tag: 'unset', excluded: i === 0 }));
+    assert.equal(countLabel(pageCount({ items: full, next_cursor: null }, 100)), '100+');
+    assert.equal(countLabel(pageCount({ items: full, next_cursor: 'n' }, 100)), '100+');
   });
   test('確認すること: 引落元 → 提案 → 未設定 → 収入なし', () => {
     const o = overviewFallback({ today: TODAY, accounts: [bareCard], cf: forecast, month: null, untagged: { n: 4, more: false }, candidates: 2, lastOkAt: null })!;
@@ -341,7 +353,27 @@ describe('ホームの純関数', () => {
     assert.equal(syncErrorCount(['x', 'y']), 2);
     assert.equal(syncErrorCount(3), 3);
     assert.equal(syncErrorCount(null), 0);
-    assert.deepEqual(cardsOutstanding([account(), card, bareCard]), [{ name: '楽天カード', amount: 294061 }]);
+    const nov = { ...monthlyEmpty('2026-11'), by_account: [{ account_id: 'C1', name: '楽天カード', include_in_cashflow: true, active: true, net: -36420, income: 0, expense: 36420 }] };
+    assert.deepEqual(cardUsage([account(), card, bareCard, { ...card, id: 'C9', active: false }], nov), { C1: 36420, C2: 0 });
+    assert.deepEqual(cardUsage([card], null), {});
+  });
+  test('残高の推移: 最初に残高がある月より前は落とし、全口座の残高が無い月は null', () => {
+    const m = (month: string, total: number | null, by_account: Record<string, number | null>) => ({ month, total, by_account });
+    assert.deepEqual(
+      balanceSeries([m('2025-12', 0, { A1: 0 }), m('2026-01', 400000, { A1: 400000 }), m('2026-02', 0, { A1: null }), m('2026-03', null, {}), m('2026-04', 105000, { A1: 105000 })]),
+      [
+        { month: '2026-01', total: 400000 },
+        { month: '2026-02', total: null },
+        { month: '2026-03', total: null },
+        { month: '2026-04', total: 105000 },
+      ],
+    );
+    assert.deepEqual(balanceSeries([m('2026-01', -5000, { A1: 5000, A2: -10000 })]), [{ month: '2026-01', total: -5000 }], '負の合計も残高あり');
+    assert.deepEqual(balanceSeries([m('2026-01', 0, { A1: 0 })]), []);
+  });
+  test('提案の表示名は正規化前の摘要（無ければ description_norm）', () => {
+    assert.equal(candidateName(candidate), 'さくらインターネット');
+    assert.equal(candidateName({ ...candidate, description: 'ｻｸﾗｲﾝﾀｰﾈｯﾄ（株）' }), 'ｻｸﾗｲﾝﾀｰﾈｯﾄ（株）');
   });
 });
 
@@ -588,14 +620,14 @@ describe('SSR スナップショット', () => {
       o: overview,
       history,
       cf,
-      months: [monthly('2026-09', 650000, 600000), monthly('2026-10', 680000, 700000, 98000)],
+      months: [monthly('2026-09', 650000, 600000), monthly('2026-10', 680000, 700000, 98000), { ...monthlyEmpty('2026-11'), by_account: [{ account_id: 'C1', name: '楽天カード', include_in_cashflow: true, active: true, net: -36420, income: 0, expense: 36420 }] }],
       upcoming: [up(scheduled({ id: 'L1', name: '生命保険', amount: 12300, category: 'insurance' }), '2026-11-27')],
       status,
     };
     const out = html(m.HomeView!, { today: TODAY, d, accounts: [account(), card, bareCard, wallet], cats, go: noop });
     assert.match(out, /830,000<small>円/);
     assert.match(out, /残高の合計（1 口座）/, '残高の無いカードは数えない');
-    assert.match(out, /楽天カードの未引落 294,061 円/);
+    assert.match(out, /カードの今月の利用 36,420 円はまだ残高から引かれていません。/);
     assert.match(out, /11 月の進み[\s\S]*6 日目 \/ 30 日/);
     assert.match(out, /見込み 680,000/);
     assert.match(out, /width="26.4"/);
@@ -609,7 +641,15 @@ describe('SSR スナップショット', () => {
     const bare = html(m.HomeView!, { today: TODAY, d: { o: null, history: null, cf: null, months: [], upcoming: [], status: [] }, accounts: [], cats, go: noop });
     assert.match(bare, /残高を読めませんでした/);
     assert.doesNotMatch(bare, /<svg class="m-svg"/, '推移が無ければ隠す');
+    // 最初の 2 か月は残高が無い（0）、6 月も無い。残す額 0。
+    const gaps = { months: history.months.map((x, i) => (i < 2 || i === 6 ? { ...x, total: 0 } : x)) };
+    const gap = html(m.HomeView!, { today: TODAY, d: { ...d, o: { ...overview, reserve: 0 }, history: gaps, months: [] }, accounts: [account()], cats, go: noop });
+    assert.match(gap, /月末・直近 10 か月/, '最初に残高がある月より前は描かない');
+    assert.equal((gap.match(/<polyline class="c-line"/g) ?? []).length, 2, '残高の無い月で線を切る');
+    assert.doesNotMatch(gap, /残す額 0/, '残す額 0 のラベルは出さない');
+    assert.doesNotMatch(gap, /今月の利用/, '利用が 0 なら注記を出さない');
     t.assert.snapshot(lines(out));
+    t.assert.snapshot(lines(gap));
   });
 
   test('画面の上の帯（戻る・題・右端）', async (t) => {
@@ -718,7 +758,7 @@ describe('SSR スナップショット', () => {
     const due = nextDueMap(upcoming);
     const peaks = peakMonths(upcoming, TODAY);
     const out = [
-      html(m.CandidateList!, { items: [candidate, { ...candidate, id: 'R2', description_norm: 'JAF 年会費', amount: 4000, interval: 'yearly', account_id: 'A1', occurrences_json: '[{"date":"2024-12-10","amount":4000},{"date":"2025-12-10","amount":4000}]' }], accounts: [account(), card], today: TODAY, busy: false, onAccept: noop, onDismiss: noop }),
+      html(m.CandidateList!, { items: [candidate, { ...candidate, id: 'R2', description_norm: 'JAF 年会費', description: 'ＪＡＦ　年会費', account_name: '三井住友（普通）', amount: 4000, interval: 'yearly', account_id: 'A1', occurrences_json: '[{"date":"2024-12-10","amount":4000},{"date":"2025-12-10","amount":4000}]' }], accounts: [account(), card], today: TODAY, busy: false, onAccept: noop, onDismiss: noop }),
       html(m.PeakCard!, { peaks, fixed: monthlyFixed([life, ntt, sales]) }),
       html(m.Ledger!, { items: [tax, ins, life, sales, ntt, off], nextDue: due, today: TODAY, filter: '', showInactive: false, onFilter: noop, onShowInactive: noop, onOpen: noop }),
       html(m.Ledger!, { items: [tax, ins, life, off], nextDue: due, today: TODAY, filter: 'insurance', showInactive: true, onFilter: noop, onShowInactive: noop, onOpen: noop }),
@@ -727,7 +767,8 @@ describe('SSR スナップショット', () => {
     ].join('\n');
     assert.match(out, /予定にする（その他）/);
     assert.match(out, /楽天カード · 最後 10\/15（2 回） · 次は 11\/15 ごろ/);
-    assert.match(out, /三井住友 普通 · 最後 2025-12-10（2 回） · 次は 12\/10 ごろ/);
+    assert.match(out, /三井住友（普通） · 最後 2025-12-10（2 回） · 次は 12\/10 ごろ/, '口座名は account_name があればそれ');
+    assert.match(out, /<h3 class="m-h3">ＪＡＦ　年会費<\/h3>/, '摘要は正規化前');
     assert.match(out, /毎月の 17,767 は除く/);
     assert.match(out, /class="f-insurance"/);
     assert.match(out, /あと 19 日[\s\S]*売上の入金[\s\S]*\+680,000/);
@@ -747,7 +788,7 @@ describe('SSR スナップショット', () => {
     const accounts = [account(), card, wallet, bareCard];
     const draft = { default_tag: 'unset', include_in_cashflow: true, mcp_visibility: 'summary', active: true, card_settlement_account_id: 'A1', card_settlement_pattern: 'ラクテンカード' };
     const out = [
-      html(m.AccountsView!, { rows: withStatus(accounts, status), today: TODAY, accounts, edit: { id: 'C1', draft, open: true }, busy: false, onOpen: noop, onDraft: noop, onSave: noop }),
+      html(m.AccountsView!, { rows: withStatus(accounts, status), today: TODAY, accounts, usage: { C1: 36420, C2: 0 }, edit: { id: 'C1', draft, open: true }, busy: false, onOpen: noop, onDraft: noop, onSave: noop }),
       html(m.AccountsView!, { rows: withStatus([wallet], status), today: TODAY, accounts: [wallet], edit: { id: 'W1', draft: { ...draft, default_tag: 'private', mcp_visibility: 'none', include_in_cashflow: false }, open: true }, busy: false, onOpen: noop, onDraft: noop, onSave: noop }),
     ].join('\n');
     assert.ok(out.indexOf('PayPay カード') < out.indexOf('三井住友 普通'), '引落元が未設定のカードを先に');
@@ -756,6 +797,8 @@ describe('SSR スナップショット', () => {
     assert.match(out, /過去分 2024-11 まで済み/);
     assert.match(out, /CSV · 最後の取り込み 10\/31/);
     assert.match(out, /CSV を取り込む（準備中）/);
+    assert.match(out, /−36,420<br\/?>\s*<span class="m-sub">今月の利用<\/span>/, 'カードは残高ではなく今月の利用');
+    assert.doesNotMatch(out, /294,061/);
     assert.match(out, /見せない<\/button>[\s\S]*合計だけ<\/button>[\s\S]*明細も<\/button>/);
     assert.doesNotMatch(out.split('aria-expanded="true"')[1]!.split('</article>')[0]!, /value="W1"/, '引落元は銀行だけ');
     t.assert.snapshot(lines(out));

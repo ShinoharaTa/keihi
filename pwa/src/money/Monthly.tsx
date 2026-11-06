@@ -221,7 +221,7 @@ export function MonthlyView({
   );
 }
 
-const countOf = (r: { ok: true; data: TxnPage } | { ok: false }): Count => (r.ok ? pageCount(r.data) : null);
+const countOf = (r: { ok: true; data: TxnPage } | { ok: false }): Count => (r.ok ? pageCount(r.data, 100) : null);
 
 export function Monthly({ today, cats, initialMonth, onBack, go }: { today: string; cats: Categories | null; initialMonth?: string; onBack: () => void; go: Go }) {
   const cur = today.slice(0, 7);

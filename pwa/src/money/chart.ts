@@ -50,6 +50,27 @@ export function lineChart(values: number[], p: Plot, extra: number[] = [], nTick
   return { ticks: ticks.map((v) => ({ v, y: y(v) })), pts, points: pts.map((q) => `${q.x},${q.y}`).join(' '), y };
 }
 
+// 欠けた値（null）のある折れ線。欠けた所は点を打たず線もつながない（続いている所ごとに segs の 1 本）。目盛りは値のある所だけで決める。
+export type GapLineChart = { ticks: { v: number; y: number }[]; pts: (Pt | null)[]; segs: string[]; y: (v: number) => number };
+export function gapLineChart(values: (number | null)[], p: Plot, extra: number[] = [], nTicks = 4): GapLineChart {
+  const have = values.filter((v): v is number => v !== null);
+  const all = [...have, ...extra];
+  const ticks = niceTicks(Math.min(...all, 0), Math.max(...all, 0), nTicks);
+  const y = yScale(ticks, p);
+  const pts = values.map((v, i) => (v === null ? null : { x: xAt(i, values.length, p), y: y(v) }));
+  const segs: string[] = [];
+  let run: Pt[] = [];
+  for (const q of [...pts, null]) {
+    if (q) {
+      run.push(q);
+      continue;
+    }
+    if (run.length) segs.push(run.map((r) => `${r.x},${r.y}`).join(' '));
+    run = [];
+  }
+  return { ticks: ticks.map((v) => ({ v, y: y(v) })), pts, segs, y };
+}
+
 // 下端（0 の線）から値までの面（残す額の帯）。
 export function areaPoints(pts: Pt[], baseY: number): string {
   if (pts.length === 0) return '';

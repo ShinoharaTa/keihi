@@ -83,11 +83,17 @@ export type Candidate = {
   id: string;
   account_id: string;
   description_norm: string;
+  // 追加中の項目（古いサーバーには無い）: 正規化前の摘要と口座名。
+  description?: string;
+  account_name?: string;
   amount: number;
   interval: Exclude<Recurrence, 'once'>;
   occurrences_json: string;
   state: string;
 };
+
+// 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。
+export const candidateName = (c: Candidate) => c.description || c.description_norm;
 
 export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string };
 export type ForecastMonth = {
@@ -137,7 +143,18 @@ export type Overview = {
   sync: { last_ok_at: string | null; errors: unknown };
 };
 // GET /api/balance_history?months=12（追加中。古い順、最後が今月）。
-export type BalanceHistory = { months: { month: string; total: number; by_account: Record<string, number> }[] };
+// 今のサーバーは残高の無い口座を 0 で返す（null で返すようになっても読めるようにしておく）。
+export type BalanceHistory = { months: { month: string; total: number | null; by_account: Record<string, number | null> }[] };
+// 残高の推移の系列。全口座の残高が無い月（total が null、または 0 で口座ごとも全部 null か 0）は null。
+// 最初に残高がある月より前は落とす（0 に落ちた線を描かない）。どの月にも無ければ空。
+export function balanceSeries(months: BalanceHistory['months']): { month: string; total: number | null }[] {
+  const out = months.map((m) => {
+    const none = m.total === null || (m.total === 0 && Object.values(m.by_account).every((v) => v === null || v === 0));
+    return { month: m.month, total: none ? null : m.total };
+  });
+  const first = out.findIndex((m) => m.total !== null);
+  return first < 0 ? [] : out.slice(first);
+}
 // GET /api/scheduled_items/upcoming の項目（台帳の項目 + 期日）。
 export type Upcoming = ScheduledItem & { due_date: string };
 
@@ -421,9 +438,11 @@ export const noIncome = (cf: Forecast) => cf.months.every((m) => m.planned_in ==
 // 引落の設定が済んでいないカード（引落元か摘要の文字が空。サーバーの cards_without_settlement と同じ条件）。二重計上になる。
 export const needsSettlement = (a: Account) => a.kind === 'card' && a.active && (!a.card_settlement_account_id || !a.card_settlement_pattern);
 
-// GET /api/bank_txns（tag=unset・category=none など）の 1 ページから件数（集計外は数えない）。次がある（上限を超えた）なら more。
-export function pageCount(p: TxnPage): { n: number; more: boolean } {
-  return { n: p.items.filter((t) => !t.excluded).length, more: p.next_cursor !== null };
+// GET /api/bank_txns（tag=unset・category=none など）の 1 ページから件数（集計外は数えない）。
+// 上限（limit）まで返ってきたか次があるなら、集計外を除いた数に関係なく返ってきた件数で more（limit=100 なら「100+」）。
+export function pageCount(p: TxnPage, limit: number): { n: number; more: boolean } {
+  if (p.next_cursor !== null || p.items.length >= limit) return { n: p.items.length, more: true };
+  return { n: p.items.filter((t) => !t.excluded).length, more: false };
 }
 export const countLabel = (c: { n: number; more: boolean }) => `${c.n}${c.more ? '+' : ''}`;
 
@@ -605,11 +624,15 @@ export function monthlyLine(months: MonthlySummary[], month: string, cats: Categ
   return top ? `${head}（${categoryLabel(cats, top.category)}が平均より多い）` : head;
 }
 
-// カードのうち、最新残高（まだ引かれていない利用分）のある有効なカード。ホームの注記に使う。
-export function cardsOutstanding(accounts: Account[]): { name: string; amount: number }[] {
-  return accounts
-    .filter((a) => a.kind === 'card' && a.active && a.latest_balance && a.latest_balance.balance !== 0)
-    .map((a) => ({ name: a.name, amount: Math.abs(a.latest_balance!.balance) }));
+// 有効なカードの今月の利用（月次集計の口座別の支出）。口座 id → 額。カードは残高を持たないので、口座の画面とホームの注記はこれを出す。
+export function cardUsage(accounts: Account[], s: MonthlySummary | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!s) return out;
+  for (const a of accounts) {
+    if (a.kind !== 'card' || !a.active) continue;
+    out[a.id] = s.by_account.find((r) => r.account_id === a.id)?.expense ?? 0;
+  }
+  return out;
 }
 
 // ---- 見通し ----
