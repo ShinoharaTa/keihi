@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderableComponents } from '../../pwa/src/review/catalog.ts';
 import { reasonText, resolveMessage, resolveUrl } from '../../pwa/src/review/attention.ts';
-import { backupWarning } from '../../pwa/src/status.ts';
+import { backupWarning, reauthWarning } from '../../pwa/src/status.ts';
 import { canApprove, changedValues, errorText, missingRequired, parseAmount, pickCandidate, requestBody, type DataModel, type Values } from '../../pwa/src/review/model.ts';
 
 const values = (over: Partial<Values> = {}): Values => ({
@@ -109,5 +109,13 @@ describe('バックアップの警告帯', () => {
     assert.match(backupWarning({ last_success_at: null, last_drill: null }, now)!, /一度も成功していません/);
     assert.match(backupWarning({ last_success_at: '2026-10-16T04:00:00.000Z', last_drill: drill(false) }, now)!, /drill/);
     assert.equal(backupWarning(undefined, now), null);
+  });
+});
+
+describe('freee の再認可の帯', () => {
+  test('freee_reauth_required が true のときだけ出す', () => {
+    assert.equal(reauthWarning({ freee_reauth_required: true }), 'freee の再認可が必要です。サーバーで keihi freee auth を実行してください');
+    assert.equal(reauthWarning({ freee_reauth_required: false }), null);
+    assert.equal(reauthWarning({}), null);
   });
 });

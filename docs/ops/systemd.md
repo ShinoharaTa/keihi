@@ -61,3 +61,65 @@ systemctl --user enable --now keihi-worker.timer
 systemctl --user list-timers keihi-worker.timer
 journalctl --user -u keihi-worker.service -n 50
 ```
+
+## 5. daily（keihi-daily.service / keihi-daily.timer）
+
+`keihi-daily.service` は oneshot。daily ジョブ（トークンの更新・マスタ同期・検索項目の期限チェック・needs_attention の集計）を
+キューに積み、keihi-worker.service を起動して終わる（処理そのものは worker が行う。`src/jobs/trigger.ts daily`）。
+
+- `keihi-daily.timer` は `OnCalendar=*-*-* 03:30:00 Asia/Tokyo`（毎日 JST 03:30。本機は UTC なのでタイムゾーンを明示する）。
+- `Persistent=true`: 止まっていた間の分は、次に起動したときに 1 回だけ実行する。
+- freee のリフレッシュトークンが失効していたら settings.freee_reauth_required = 1 になり、PWA の上に再認可の帯が出る
+  （`GET /api/status` の `freee_reauth_required`）。`keihi freee auth` で 0 に戻る。
+
+```sh
+ln -s ~/workspace/keihi/deploy/systemd/keihi-daily.service ~/.config/systemd/user/
+ln -s ~/workspace/keihi/deploy/systemd/keihi-daily.timer ~/.config/systemd/user/
+systemd-analyze --user verify ~/.config/systemd/user/keihi-daily.{service,timer}
+systemctl --user daemon-reload
+systemctl --user enable --now keihi-daily.timer
+systemctl --user list-timers keihi-daily.timer
+journalctl --user -u keihi-daily.service -n 50
+```
+
+## 6. バックアップ（keihi-backup.service / keihi-backup.timer）
+
+`keihi-backup.service` は oneshot。スナップショット → restic backup → 週 1 回 restic check（prune はしない。`tools/backup/run.ts`）。
+restic は `~/.local/bin/restic`。シークレットは run.ts が secrets.env から restic 用の値だけを読む（EnvironmentFile にしない）。
+詳細は [backup.md](backup.md)。
+
+- `keihi-backup.timer` は `OnCalendar=*-*-* 03:30:00 Asia/Tokyo` + `RandomizedDelaySec=15m`（毎日 JST 03:30〜03:45）。
+- `Persistent=true`: 止まっていた間の分は、次に起動したときに 1 回実行する。
+- 上限は `MemoryMax=512M`・`CPUQuota=50%`・`IOSchedulingClass=idle`・`TimeoutStartSec=6h`。
+- 失敗は監査ログ（backup.run）に記録し、終了コード非 0。最後の成功が 2 日より古いと PWA の上に警告帯が出る。
+
+```sh
+ln -s ~/workspace/keihi/deploy/systemd/keihi-backup.service ~/.config/systemd/user/
+ln -s ~/workspace/keihi/deploy/systemd/keihi-backup.timer ~/.config/systemd/user/
+systemd-analyze --user verify ~/.config/systemd/user/keihi-backup.{service,timer}
+systemctl --user daemon-reload
+systemctl --user enable --now keihi-backup.timer
+systemctl --user list-timers keihi-backup.timer
+journalctl --user -u keihi-backup.service -n 50
+```
+
+## 7. リストア訓練（keihi-drill.service / keihi-drill.timer）
+
+`keihi-drill.service` は oneshot。restic check --read-data-subset=5% → 全量 restore → sha256 と DB の照合（`tools/backup/drill.ts`）。
+詳細は [restore-drill.md](restore-drill.md)。
+
+- `keihi-drill.timer` は `OnCalendar=quarterly` + `RandomizedDelaySec=1h`（`*-01,04,07,10-01 00:00:00`。本機は UTC なので JST の 09:00〜10:00）。
+  日次バックアップ（JST 03:30 頃）と重ならない。
+- `Persistent=true`: 止まっていた間の分は、次に起動したときに 1 回実行する。
+- 上限は `MemoryMax=1G`・`CPUQuota=50%`・`IOSchedulingClass=idle`・`TimeoutStartSec=12h`。
+- 結果は監査ログ（backup.drill）と journal。失敗は終了コード非 0 で、PWA の上に警告帯が出る。
+
+```sh
+ln -s ~/workspace/keihi/deploy/systemd/keihi-drill.service ~/.config/systemd/user/
+ln -s ~/workspace/keihi/deploy/systemd/keihi-drill.timer ~/.config/systemd/user/
+systemd-analyze --user verify ~/.config/systemd/user/keihi-drill.{service,timer}
+systemctl --user daemon-reload
+systemctl --user enable --now keihi-drill.timer
+systemctl --user list-timers keihi-drill.timer
+journalctl --user -u keihi-drill.service -n 50
+```
