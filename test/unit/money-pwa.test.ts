@@ -518,14 +518,14 @@ const status: BankStatus[] = [
 ];
 const overview: Overview = {
   today: TODAY,
-  balances: { total: 1250000, by_account: [{ account_id: 'A1', name: '三井住友 普通', kind: 'bank', balance: 1250000, as_of_date: TODAY }] },
+  balances: { total: 1250000, by_account: [{ account_id: 'A1', name: '三井住友 普通', kind: 'bank', balance: 1250000, as_of_date: TODAY }, { account_id: 'C1', name: '楽天カード', kind: 'card', balance: null, as_of_date: null }] },
   reserve: 420000,
   available: 830000,
   untagged_count: 12,
   cards_without_settlement: [{ account_id: 'C2', name: 'PayPay カード' }],
   open_candidates: 3,
   this_month: { month: '2026-11', income: 0, expense: 212400, planned_out_remaining: 80300, unplanned_out_estimate: 512000, projected_end_balance: 1337700 },
-  sync: { last_ok_at: '2026-11-06T00:12:00.000Z', errors: [] },
+  sync: { last_ok_at: '2026-11-06T00:12:00.000Z', errors: 0 },
 };
 const history = { months: Array.from({ length: 12 }, (_, i) => ({ month: addMonth('2025-12', i), total: [980000, 1010000, 1050000, 950000, 1030000, 1100000, 1080000, 1150000, 1130000, 1090000, 1160000, 1250000][i]!, by_account: {} })) };
 const candidate: Candidate = {
@@ -562,6 +562,7 @@ describe('SSR スナップショット', () => {
     };
     const out = html(m.HomeView!, { today: TODAY, d, accounts: [account(), card, bareCard, wallet], cats, go: noop });
     assert.match(out, /830,000<small>円/);
+    assert.match(out, /残高の合計（1 口座）/, '残高の無いカードは数えない');
     assert.match(out, /楽天カードの未引落 294,061 円/);
     assert.match(out, /11 月の進み[\s\S]*6 日目 \/ 30 日/);
     assert.match(out, /見込み 680,000/);

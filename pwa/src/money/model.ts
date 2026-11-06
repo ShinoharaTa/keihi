@@ -119,11 +119,12 @@ export type Forecast = {
   cut_per_month_to_survive?: number | null;
 };
 
-// GET /api/bank/overview（追加中。404 のときは overviewFallback で代わりを作る）。
+// GET /api/bank/overview（src/bank/overview.ts。404 の古いサーバーでは overviewFallback で代わりを作る）。
 export type ThisMonth = { month: string; income: number; expense: number; planned_out_remaining: number; unplanned_out_estimate: number; projected_end_balance: number };
 export type Overview = {
   today: string;
-  balances: { total: number; by_account: { account_id: string; name: string; kind: AccountKind; balance: number; as_of_date: string }[] };
+  // 残高の無い口座（カードなど）は balance null で入り、total には入らない。
+  balances: { total: number; by_account: { account_id: string; name: string; kind: string; balance: number | null; as_of_date: string | null }[] };
   reserve: number;
   available: number;
   untagged_count: number;

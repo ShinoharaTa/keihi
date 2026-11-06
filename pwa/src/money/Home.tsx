@@ -137,7 +137,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
             </p>
           </div>
           <dl class="m-dl">
-            <dt>残高の合計（{o.balances.by_account.length} 口座）</dt>
+            <dt>残高の合計（{o.balances.by_account.filter((b) => b.balance !== null).length} 口座）</dt>
             <dd>{yen(o.balances.total)}</dd>
             <dt>残す額（この先の予定支出）</dt>
             <dd>− {yen(o.reserve)}</dd>
