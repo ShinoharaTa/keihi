@@ -1,27 +1,37 @@
-// 明細（GET /api/bank_txns）。日付の新しい順に 50 件ずつ、「さらに読む」で続きを読む。
-// 絞り込みは「期間」と「絞り込み（n）」だけを常に出し、口座・タグ・カテゴリ・検索語は折りたたむ。結果の上に件数と支出の合計（読み込んだ分）。
-// 行を押すと下からシート（暗幕つき。背景を押すと閉じる）。カテゴリは任意で選び、事業/私用/未設定を押した時点で
-// POST /api/bank_txns/:id/tag で保存し、次の未設定の明細へ進む。応答は連番で古いものを捨てる。
-// 描画だけの部品（TxnFilters・TxnRows・TagSheet）は SSR のスナップショットで試す（test/unit/money-pwa.test.ts）。
+// 明細（モック Txns・TagSheet。GET /api/bank_txns）。日付の新しい順に 50 件ずつ、日付ごとにまとめ、「続きを読み込む」で続き（keyset cursor）。
+// 上に 期間 と「未設定だけ（n）」の 1 タップ絞り込み、口座・タグ・カテゴリ・検索は折りたたむ。絞り込みを変えたら cursor を捨てて読み直す。応答は連番で古いものを捨てる。
+// 行の右端のタグを押すと 事業 ⇄ 私用（未設定は事業）をその場で保存（POST /api/bank_txns/:id/tag。押した行だけ busy）。行を押すとタグ付けシート（暗幕つき）。
+// シート: 事業/私用/未設定・カテゴリ 12 種・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
+// 「保存して閉じる」「保存して次の未設定へ」。描画だけの部品（TxnFilters・TxnList・TagSheet）は SSR のスナップショットで試す。
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { getJson, postJson } from '../api.ts';
+import { Icon } from './Icons.tsx';
 import {
+  applyRuleLocally,
+  countLabel,
   applyTag,
   categoryLabel,
+  dayLabel,
   emptyFilter,
   failText,
   filterCount,
+  groupByDate,
   KIND_LABELS,
+  nextTag,
   nextUnset,
+  periodText,
   PERIOD_LABELS,
   PERIODS,
   signedYen,
   TAG_LABELS,
   TAG_ORDER,
   TEXT_MAX,
+  txnIncome,
   txnsUrl,
   txnSummary,
   UNCATEGORIZED_QUERY,
+  pageCount,
+  unsetPosition,
   yen,
   type Account,
   type Categories,
@@ -31,11 +41,22 @@ import {
   type TxnFilter,
   type TxnPage,
 } from './model.ts';
+import { ScreenHead } from './Money.tsx';
+
+const HINT_KEY = 'keihi.money.tagHint';
+const seenHint = () => {
+  try {
+    return localStorage.getItem(HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
 
 export function TxnFilters({
   f,
   q,
   expanded,
+  unsetCount,
   accounts,
   cats,
   onChange,
@@ -45,173 +66,305 @@ export function TxnFilters({
   f: TxnFilter;
   q: string;
   expanded: boolean;
+  unsetCount: string;
   accounts: Account[];
   cats: Categories | null;
   onChange: (f: TxnFilter) => void;
   onQ: (q: string) => void;
   onExpand: (v: boolean) => void;
 }) {
-  const n = filterCount(f);
+  const more = [f.accountId, f.tag && f.tag !== 'unset' ? f.tag : '', f.category, f.q.trim()].filter((x) => x !== '').length;
+  const month = f.period === 'month' && f.month;
   return (
-    <div class="fields">
-      <div class={f.period === 'month' ? 'seg seg-5' : 'seg seg-4'} role="group" aria-label="期間">
+    <div class="m-filters">
+      <div class={month ? 'm-seg m-seg-5' : 'm-seg m-seg-4'} role="group" aria-label="期間">
         {PERIODS.map((p) => (
-          <button type="button" key={p} class={f.period === p ? 'seg-on' : ''} onClick={() => onChange({ ...f, period: p, month: undefined })}>
+          <button type="button" key={p} aria-pressed={f.period === p} onClick={() => onChange({ ...f, period: p, month: undefined })}>
             {PERIOD_LABELS[p]}
           </button>
         ))}
-        {f.period === 'month' && f.month && (
-          <button type="button" class="seg-on" aria-pressed="true">
+        {month && (
+          <button type="button" aria-pressed="true">
             {f.month}
           </button>
         )}
       </div>
-      <button type="button" class="btn" aria-expanded={expanded} onClick={() => onExpand(!expanded)}>
-        絞り込み{n ? `（${n}）` : ''} {expanded ? '▴' : '▾'}
-      </button>
+      <div class="m-pills">
+        <button type="button" class="m-pill m-pill-dashed" aria-pressed={f.tag === 'unset'} onClick={() => onChange({ ...f, tag: f.tag === 'unset' ? '' : 'unset' })}>
+          未設定だけ{unsetCount ? `（${unsetCount}）` : ''}
+        </button>
+        <button type="button" class="m-pill" aria-expanded={expanded} aria-controls="m-txn-more" onClick={() => onExpand(!expanded)}>
+          <Icon name="filter" size={18} />
+          口座・カテゴリ・検索{more ? `（${more}）` : ''}
+        </button>
+      </div>
       {expanded && (
-        <>
-          <div class="filters">
-            <select class="field" aria-label="口座" value={f.accountId} onChange={(e) => onChange({ ...f, accountId: e.currentTarget.value })}>
-              <option value="">口座: 全部</option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-            <select class="field" aria-label="タグ" value={f.tag} onChange={(e) => onChange({ ...f, tag: e.currentTarget.value as TxnFilter['tag'] })}>
-              <option value="">タグ: 全部</option>
-              {TAG_ORDER.map((t) => (
-                <option key={t} value={t}>
-                  {TAG_LABELS[t]}
-                </option>
-              ))}
-            </select>
-            <select class="field" aria-label="カテゴリ" value={f.category} onChange={(e) => onChange({ ...f, category: e.currentTarget.value })}>
-              <option value="">カテゴリ: 全部</option>
-              <option value={UNCATEGORIZED_QUERY}>{categoryLabel(cats, null)}</option>
-              {(cats?.items ?? []).map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div class="m-filter-more" id="m-txn-more">
+          <select class="m-field" aria-label="口座" value={f.accountId} onChange={(e) => onChange({ ...f, accountId: e.currentTarget.value })}>
+            <option value="">口座: 全部</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          <select class="m-field" aria-label="カテゴリ" value={f.category} onChange={(e) => onChange({ ...f, category: e.currentTarget.value })}>
+            <option value="">カテゴリ: 全部</option>
+            <option value={UNCATEGORIZED_QUERY}>{categoryLabel(cats, null)}</option>
+            {(cats?.items ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          <select class="m-field" aria-label="タグ" value={f.tag} onChange={(e) => onChange({ ...f, tag: e.currentTarget.value as TxnFilter['tag'] })}>
+            <option value="">タグ: 全部</option>
+            {TAG_ORDER.map((t) => (
+              <option key={t} value={t}>
+                {TAG_LABELS[t]}
+              </option>
+            ))}
+          </select>
           <form
-            class="search"
+            class="m-search"
             onSubmit={(e) => {
               e.preventDefault();
               onChange({ ...f, q });
             }}
           >
-            <input class="field" type="search" placeholder="摘要で検索" aria-label="摘要で検索" maxLength={TEXT_MAX} value={q} onInput={(e) => onQ(e.currentTarget.value)} />
-            <button type="submit" class="btn">
+            <input class="m-field" type="search" placeholder="摘要で検索" aria-label="摘要で検索" maxLength={TEXT_MAX} value={q} onInput={(e) => onQ(e.currentTarget.value)} />
+            <button type="submit" class="m-btn">
               検索
             </button>
           </form>
-        </>
+        </div>
       )}
     </div>
   );
 }
 
-export function TxnRows({ items, more, cats, onOpen }: { items: Txn[]; more: boolean; cats: Categories | null; onOpen: (t: Txn) => void }) {
+const TAG_NEXT_LABEL = (t: Tag) => `タグ: ${TAG_LABELS[t]}。押すと${TAG_LABELS[nextTag(t)]}に切り替え`;
+
+function TxnRow({ t, cats, busy, onOpen, onToggle }: { t: Txn; cats: Categories | null; busy: boolean; onOpen: (t: Txn) => void; onToggle: (t: Txn) => void }) {
+  return (
+    <li class={t.excluded ? 'm-txn m-txn-ex' : 'm-txn'}>
+      <button type="button" class="m-txn-main" onClick={() => onOpen(t)}>
+        <span class="m-txn-top">
+          <span class="m-txn-name">{t.description}</span>
+          {t.excluded ? (
+            <span class="m-amt m-amt-ex">{yen(t.amount)}</span>
+          ) : (
+            <span class={t.side === 'expense' ? 'm-amt m-amt-out' : 'm-amt m-amt-in'}>{signedYen(t.side, t.amount)}</span>
+          )}
+        </span>
+        <span class="m-txn-meta">
+          <span>{t.account_name}</span>
+          {t.excluded ? (
+            <span class="m-cat m-cat-ex">集計外{t.transfer_kind ? ` · ${KIND_LABELS[t.transfer_kind]}` : ''}</span>
+          ) : (
+            <span class="m-cat">{categoryLabel(cats, t.category)}</span>
+          )}
+          {t.tag_source === 'rule' && <span>ルール</span>}
+        </span>
+      </button>
+      {t.excluded ? (
+        <span class="m-tagspace" />
+      ) : (
+        <button type="button" class="m-tagbtn" aria-label={TAG_NEXT_LABEL(t.tag)} disabled={busy} onClick={() => onToggle(t)}>
+          <span class={`m-tag m-tag-${t.tag}`}>{TAG_LABELS[t.tag]}</span>
+        </button>
+      )}
+    </li>
+  );
+}
+
+export function TxnList({
+  items,
+  f,
+  today,
+  more,
+  cats,
+  busyIds,
+  hint,
+  onHint,
+  onOpen,
+  onToggle,
+}: {
+  items: Txn[];
+  f: TxnFilter;
+  today: string;
+  more: boolean;
+  cats: Categories | null;
+  busyIds: string[];
+  hint: boolean;
+  onHint: () => void;
+  onOpen: (t: Txn) => void;
+  onToggle: (t: Txn) => void;
+}) {
   const sum = txnSummary(items);
   return (
     <>
-      <p class="sub">
-        {sum.count}
-        {more ? '+' : ''} 件・支出 {yen(sum.expense)} 円{more ? '（読み込んだ分）' : ''}
-      </p>
-      <ul class="list">
-        {items.map((t) => (
-          <li key={t.id}>
-            <button type="button" class={t.excluded ? 'item item-btn txn txn-excluded' : 'item item-btn txn'} onClick={() => onOpen(t)}>
-              <div class="item-head">
-                <span class="txn-date">{t.txn_date.slice(5).replace('-', '/')}</span>
-                <span class="item-name">{t.description}</span>
-                <span class={t.side === 'expense' ? 'num out' : 'num in'}>{signedYen(t.side, t.amount)}</span>
-              </div>
-              <div class="chips chips-sm">
-                <span class="sub">{t.account_name}</span>
-                {t.excluded && <span class="badge">集計外</span>}
-                {t.transfer_kind && <span class="badge">{KIND_LABELS[t.transfer_kind]}</span>}
-                <span class={t.tag === 'unset' ? 'badge' : `badge badge-${t.tag}`}>{TAG_LABELS[t.tag]}</span>
-                <span class="badge">{categoryLabel(cats, t.category)}</span>
-              </div>
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div class="m-sumline">
+        <span>
+          {periodText(f, today)} · {sum.count}
+          {more ? '+' : ''} 件
+        </span>
+        <span>
+          支出 <b>{yen(sum.expense)}</b> · 収入 <b>{yen(txnIncome(items))}</b>
+          {more ? '（読み込んだ分）' : ''}
+        </span>
+      </div>
+      {hint && (
+        <div class="m-hint">
+          <Icon name="info" size={18} />
+          <span>右端のタグを押すと事業/私用が切り替わります。行を押すとカテゴリも選べます。</span>
+          <button type="button" class="m-icon" aria-label="ヒントを閉じる" onClick={onHint}>
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+      )}
+      {groupByDate(items).map((g) => (
+        <section key={g.date} aria-labelledby={`m-d-${g.date}`}>
+          <div class="m-dayhead">
+            <h2 id={`m-d-${g.date}`}>{dayLabel(g.date, today)}</h2>
+            <span>{g.net > 0 ? `+${yen(g.net)}` : yen(g.net)}</span>
+          </div>
+          <ul class="m-txns">
+            {g.items.map((t) => (
+              <TxnRow key={t.id} t={t} cats={cats} busy={busyIds.includes(t.id)} onOpen={onOpen} onToggle={onToggle} />
+            ))}
+          </ul>
+        </section>
+      ))}
     </>
   );
 }
+
+export type SheetDraft = { tag: Tag; category: string | null; rule: boolean };
 
 export function TagSheet({
   txn,
-  category,
+  draft,
+  pos,
   cats,
   saving,
   error,
-  onCategory,
-  onTag,
+  onDraft,
+  onSave,
   onClose,
 }: {
   txn: Txn;
-  category: string | null;
+  draft: SheetDraft;
+  pos: { index: number; total: number };
   cats: Categories | null;
   saving: boolean;
   error: string;
-  onCategory: (c: string | null) => void;
-  onTag: (t: Tag) => void;
+  onDraft: (d: SheetDraft) => void;
+  onSave: (next: boolean) => void;
   onClose: () => void;
 }) {
-  const options: (string | null)[] = [null, ...(cats?.items ?? []).map((c) => c.id)];
+  const canRule = draft.tag !== 'unset';
+  const what = `${TAG_LABELS[draft.tag]}${draft.category ? ` · ${categoryLabel(cats, draft.category)}` : ''}`;
   return (
     <>
-      <div class="scrim" onClick={onClose} />
-      <div class="sheet" role="dialog" aria-label="タグとカテゴリ">
-        <p class="sheet-title">
-          {txn.txn_date} {txn.description} {signedYen(txn.side, txn.amount)}
-        </p>
-        <span class="label">カテゴリ（任意）</span>
-        <div class="chips sheet-list" role="group" aria-label="カテゴリ">
-          {options.map((c) => (
-            <button type="button" key={c ?? 'none'} class={category === c ? 'chip seg-on' : 'chip'} onClick={() => onCategory(c)}>
-              {categoryLabel(cats, c)}
-            </button>
-          ))}
+      <div class="m-scrim" onClick={onClose} />
+      <section
+        class="m-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="m-sheet-title"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+      >
+        <div class="m-grip" aria-hidden="true">
+          <span />
         </div>
-        {error && <p class="msg">{error}</p>}
-        <span class="label">押すと保存して次の未設定へ</span>
-        <div class="seg seg-wrap" role="group" aria-label="タグ">
-          {TAG_ORDER.map((t) => (
-            <button type="button" key={t} class={txn.tag === t ? 'seg-on' : ''} disabled={saving} onClick={() => onTag(t)}>
-              {TAG_LABELS[t]}
-            </button>
-          ))}
+        <div class="m-sheet-head">
+          <h2 id="m-sheet-title">タグを付ける</h2>
+          {pos.index > 0 && (
+            <span class="m-sub13">
+              未設定 {pos.index} / {pos.total}
+            </span>
+          )}
+          <button type="button" class="m-icon" aria-label="閉じる" onClick={onClose}>
+            <Icon name="close" size={22} />
+          </button>
         </div>
-        <button type="button" class="btn" onClick={onClose}>
-          閉じる
-        </button>
-      </div>
+        <div class="m-sheet-body">
+          <div class="m-sheet-txn">
+            <div>
+              <b>{txn.description}</b>
+              <span class="m-sub13">
+                {dayLabel(txn.txn_date, '')} · {txn.account_name}
+              </span>
+            </div>
+            <span class={txn.side === 'expense' ? 'm-sheet-amt m-amt-out' : 'm-sheet-amt m-amt-in'}>{signedYen(txn.side, txn.amount)}</span>
+          </div>
+          <fieldset class="m-fs">
+            <legend>事業 / 私用</legend>
+            <div class="m-seg m-seg-3 m-seg-lg m-seg-tag">
+              {TAG_ORDER.map((t) => (
+                <button type="button" key={t} class={t} aria-pressed={draft.tag === t} onClick={() => onDraft({ ...draft, tag: t, rule: t === 'unset' ? false : draft.rule })}>
+                  {TAG_LABELS[t]}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset class="m-fs">
+            <legend>カテゴリ</legend>
+            <div class="m-catgrid">
+              {(cats?.items ?? []).map((c) => (
+                <button type="button" key={c.id} aria-pressed={draft.category === c.id} onClick={() => onDraft({ ...draft, category: draft.category === c.id ? null : c.id })}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <label class="m-switchrow m-switchrow-box">
+            <span>
+              <b>同じ摘要にも適用（ルール化）</b>
+              <span class="m-sub13">
+                {canRule ? `${txn.account_name} の「${txn.description}」すべて（未設定の明細と、これから来る明細）を ${what} にします。` : '未設定のままではルールにできません。'}
+              </span>
+            </span>
+            <input type="checkbox" role="switch" checked={draft.rule} disabled={!canRule} onChange={(e) => onDraft({ ...draft, rule: e.currentTarget.checked })} />
+            <span class="m-knob" aria-hidden="true" />
+          </label>
+          {error && <p class="m-msg">{error}</p>}
+        </div>
+        <div class="m-sheet-foot">
+          <button type="button" class="m-btn m-btn-big" disabled={saving} onClick={() => onSave(false)}>
+            保存して閉じる
+          </button>
+          <button type="button" class="m-btn m-btn-big m-btn-primary" disabled={saving} onClick={() => onSave(true)}>
+            保存して次の未設定へ
+            <Icon name="next" size={18} />
+          </button>
+        </div>
+      </section>
     </>
   );
 }
 
-export function Txns({ today, accounts, cats, initial }: { today: string; accounts: Account[]; cats: Categories | null; initial?: Partial<TxnFilter> }) {
+const draftOfTxn = (t: Txn): SheetDraft => ({ tag: t.tag, category: t.category, rule: false });
+
+export function Txns({ today, accounts, cats, initial, onBack }: { today: string; accounts: Account[]; cats: Categories | null; initial?: Partial<TxnFilter>; onBack: () => void }) {
   const [filter, setFilter] = useState<TxnFilter>(() => ({ ...emptyFilter(), ...initial }));
   const [q, setQ] = useState(filter.q);
-  const [expanded, setExpanded] = useState(() => filterCount(filter) > 0);
+  const [expanded, setExpanded] = useState(() => filterCount({ ...filter, tag: filter.tag === 'unset' ? '' : filter.tag }) > 0);
   const [items, setItems] = useState<Txn[] | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
-  const [open, setOpen] = useState<{ txn: Txn; category: string | null } | null>(null);
+  const [unsetCount, setUnsetCount] = useState('');
+  const [open, setOpen] = useState<{ txn: Txn; draft: SheetDraft } | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [busyIds, setBusyIds] = useState<string[]>([]);
+  const [hint, setHint] = useState(() => !seenHint());
   const [sheetErr, setSheetErr] = useState('');
   const [msg, setMsg] = useState('');
   const seq = useRef(0);
+  const countSeq = useRef(0);
 
   const load = useCallback(
     async (f: TxnFilter, after: string | null) => {
@@ -222,8 +375,11 @@ export function Txns({ today, accounts, cats, initial }: { today: string; accoun
       setLoading(false);
       if (!r.ok) {
         setMsg(failText(r.status, r.body));
-        setCursor(null);
-        if (!after) setItems([]);
+        // 続きの読み込みの失敗は cursor を残す（「続きを読み込む」をもう一度押せる）。
+        if (!after) {
+          setCursor(null);
+          setItems([]);
+        }
         return;
       }
       setMsg('');
@@ -238,45 +394,112 @@ export function Txns({ today, accounts, cats, initial }: { today: string; accoun
     void load(filter, null);
   }, [filter, load]);
 
+  // 「未設定だけ（n）」の n: タグ以外の絞り込みはそのままで、未設定の件数（上限 100 件）。
+  useEffect(() => {
+    const n = ++countSeq.current;
+    void (async () => {
+      const r = await getJson<TxnPage>(txnsUrl({ ...filter, tag: 'unset' }, today, null, 100));
+      if (n !== countSeq.current) return;
+      setUnsetCount(r.ok ? countLabel(pageCount(r.data)) : '');
+    })();
+  }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, today]);
+
   const openTxn = (t: Txn | null) => {
     setSheetErr('');
-    setOpen(t ? { txn: t, category: t.category } : null);
+    setOpen(t ? { txn: t, draft: draftOfTxn(t) } : null);
   };
 
-  const saveTag = async (tag: Tag) => {
-    if (!open || !items) return;
-    setSaving(true);
-    const r = await postJson(`/api/bank_txns/${encodeURIComponent(open.txn.id)}/tag`, { tag, category: open.category });
-    setSaving(false);
+  const toggle = async (t: Txn) => {
+    if (busyIds.includes(t.id)) return;
+    setBusyIds((b) => [...b, t.id]);
+    const r = await postJson(`/api/bank_txns/${encodeURIComponent(t.id)}/tag`, { tag: nextTag(t.tag), category: t.category });
+    setBusyIds((b) => b.filter((x) => x !== t.id));
     if (r.status !== 200) {
+      setMsg(failText(r.status, r.body));
+      return;
+    }
+    setItems((cur) => (cur ? applyTag(cur, t.id, r.body as TagResult) : cur));
+  };
+
+  const save = async (next: boolean) => {
+    if (!open || !items) return;
+    const { txn, draft } = open;
+    setSaving(true);
+    const r = await postJson(`/api/bank_txns/${encodeURIComponent(txn.id)}/tag`, { tag: draft.tag, category: draft.category });
+    if (r.status !== 200) {
+      setSaving(false);
       setSheetErr(failText(r.status, r.body));
       return;
     }
-    const next = applyTag(items, open.txn.id, r.body as TagResult);
-    setItems(next);
-    openTxn(nextUnset(next, open.txn.id));
+    const result = r.body as TagResult;
+    let ruled = false;
+    if (draft.rule && draft.tag !== 'unset') {
+      const rr = await postJson('/api/tag_rules', { account_id: txn.account_id, pattern: txn.description, match: 'exact', tag: draft.tag, category: draft.category });
+      if (rr.status === 201) ruled = true;
+      else setMsg(`タグは保存しましたが、ルールは作れませんでした。${failText(rr.status, rr.body)}`);
+    }
+    // 待っている間に続きを読み込んでいても消さないよう、その時点の一覧（cur）に当てる。
+    const apply = (xs: Txn[]) => {
+      const tagged = applyTag(xs, txn.id, result);
+      return ruled ? applyRuleLocally(tagged, txn, draft.tag, draft.category) : tagged;
+    };
+    setSaving(false);
+    setItems((cur) => (cur ? apply(cur) : cur));
+    if (!next) return openTxn(null);
+    const out = apply(items);
+    const nx = nextUnset(out, txn.id) ?? out.find((t) => t.tag === 'unset' && !t.excluded && t.id !== txn.id) ?? null;
+    if (!nx) setMsg('読み込んだ分の未設定はこれで終わりです。');
+    openTxn(nx);
+  };
+
+  const closeHint = () => {
+    setHint(false);
+    try {
+      localStorage.setItem(HINT_KEY, '1');
+    } catch {
+      // 保存できなくても閉じるだけ
+    }
   };
 
   return (
     <>
-      <TxnFilters f={filter} q={q} expanded={expanded} accounts={accounts} cats={cats} onChange={setFilter} onQ={setQ} onExpand={setExpanded} />
-      {msg && <p class="msg">{msg}</p>}
-      {items && items.length === 0 && <p class="empty">明細はありません。</p>}
-      {items && items.length > 0 && <TxnRows items={items} more={cursor !== null} cats={cats} onOpen={openTxn} />}
-      {cursor && (
-        <button type="button" class="btn" disabled={loading} onClick={() => void load(filter, cursor)}>
-          さらに読む
-        </button>
-      )}
+      <ScreenHead title="明細" flat onBack={onBack} />
+      <TxnFilters
+        f={filter}
+        q={q}
+        expanded={expanded}
+        unsetCount={unsetCount}
+        accounts={accounts}
+        cats={cats}
+        onChange={setFilter}
+        onQ={setQ}
+        onExpand={setExpanded}
+      />
+      <div class="m-main m-main-flush">
+        {msg && <p class="m-msg m-inline-msg">{msg}</p>}
+        {items && items.length === 0 && <p class="m-empty">明細はありません。</p>}
+        {items && items.length > 0 && (
+          <TxnList items={items} f={filter} today={today} more={cursor !== null} cats={cats} busyIds={busyIds} hint={hint} onHint={closeHint} onOpen={openTxn} onToggle={(t) => void toggle(t)} />
+        )}
+        {!items && <p class="m-empty">読み込み中…</p>}
+        {cursor && (
+          <div class="m-more">
+            <button type="button" class="m-btn m-btn-round" disabled={loading} onClick={() => void load(filter, cursor)}>
+              続きを読み込む
+            </button>
+          </div>
+        )}
+      </div>
       {open && (
         <TagSheet
           txn={open.txn}
-          category={open.category}
+          draft={open.draft}
+          pos={unsetPosition(items ?? [], open.txn.id)}
           cats={cats}
           saving={saving}
           error={sheetErr}
-          onCategory={(category) => setOpen({ ...open, category })}
-          onTag={(t) => void saveTag(t)}
+          onDraft={(draft) => setOpen({ ...open, draft })}
+          onSave={(n) => void save(n)}
           onClose={() => openTxn(null)}
         />
       )}

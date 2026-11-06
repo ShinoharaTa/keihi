@@ -63,7 +63,8 @@ export type BankStatus = {
 
 export type Direction = 'in' | 'out';
 export type ScheduleCategory = 'tax' | 'insurance' | 'car' | 'other' | 'income';
-export type Recurrence = 'once' | 'monthly' | 'bimonthly' | 'yearly' | 'biennial';
+// quarterly は API 側で追加中（古いサーバーは invalid_recurrence で断る）。
+export type Recurrence = 'once' | 'monthly' | 'bimonthly' | 'quarterly' | 'yearly' | 'biennial';
 export type ScheduledItem = {
   id: string;
   name: string;
@@ -113,7 +114,32 @@ export type Forecast = {
   months: ForecastMonth[];
   first_shortfall_month: string | null;
   warnings: ForecastWarning[];
+  // 追加中の項目（古いサーバーには無い）。
+  min_month?: { month: string; balance_end: number; margin: number } | null;
+  cut_per_month_to_survive?: number | null;
 };
+
+// GET /api/bank/overview（src/bank/overview.ts。404 の古いサーバーでは overviewFallback で代わりを作る）。
+export type ThisMonth = { month: string; income: number; expense: number; planned_out_remaining: number; unplanned_out_estimate: number; projected_end_balance: number };
+export type Overview = {
+  today: string;
+  // 残高の無い口座（カードなど）は balance null で入り、total には入らない。
+  balances: { total: number; by_account: { account_id: string; name: string; kind: string; balance: number | null; as_of_date: string | null }[] };
+  reserve: number;
+  available: number;
+  untagged_count: number;
+  // クライアントだけの印: 代わりの計算で未設定が 100 件を超えた（「100+」と出す）。
+  untagged_more?: boolean;
+  cards_without_settlement: { account_id: string; name: string }[];
+  open_candidates: number;
+  upcoming_due?: unknown;
+  this_month: ThisMonth;
+  sync: { last_ok_at: string | null; errors: unknown };
+};
+// GET /api/balance_history?months=12（追加中。古い順、最後が今月）。
+export type BalanceHistory = { months: { month: string; total: number; by_account: Record<string, number> }[] };
+// GET /api/scheduled_items/upcoming の項目（台帳の項目 + 期日）。
+export type Upcoming = ScheduledItem & { due_date: string };
 
 // ---- 表示の文言 ----
 
@@ -121,12 +147,13 @@ export const TAG_LABELS: Record<Tag, string> = { business: '事業', private: '�
 export const TAG_ORDER: readonly Tag[] = ['business', 'private', 'unset'];
 export const KIND_LABELS: Record<TransferKind, string> = { transfer: '振替', card_settlement: '引落', charge: 'チャージ' };
 export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = { bank: '銀行', card: 'カード', wallet: '電子マネー', paypay: 'PayPay', cash: '現金' };
-export const VISIBILITY_LABELS: Record<McpVisibility, string> = { full: '明細まで', summary: '集計だけ', none: '見せない' };
-export const VISIBILITY_ORDER: readonly McpVisibility[] = ['full', 'summary', 'none'];
+export const VISIBILITY_LABELS: Record<McpVisibility, string> = { full: '明細も', summary: '合計だけ', none: '見せない' };
+export const VISIBILITY_ORDER: readonly McpVisibility[] = ['none', 'summary', 'full'];
 export const SCHEDULE_CATEGORY_LABELS: Record<ScheduleCategory, string> = { tax: '税金', insurance: '保険', car: '車', other: 'その他', income: '収入' };
 export const SCHEDULE_CATEGORIES: readonly ScheduleCategory[] = ['tax', 'insurance', 'car', 'other', 'income'];
-export const RECURRENCE_LABELS: Record<Recurrence, string> = { once: '1 回', monthly: '毎月', bimonthly: '隔月', yearly: '毎年', biennial: '隔年' };
-export const RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'bimonthly', 'yearly', 'biennial'];
+export const RECURRENCE_LABELS: Record<Recurrence, string> = { once: '1 回', monthly: '毎月', bimonthly: '隔月', quarterly: '3 か月ごと', yearly: '毎年', biennial: '隔年' };
+export const RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'];
+export const RECURRENCE_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, quarterly: 3, yearly: 12, biennial: 24 };
 export const DEFAULT_NOTIFY_DAYS = 14;
 
 // 3 桁区切りの円。負は「−」。
@@ -158,6 +185,8 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_notify_days_before: '知らせる日数は 0〜365 で入れてください。',
   end_before_anchor: '終わりの日は最初の支払日より後にしてください。',
   invalid_category_for_direction: '支出の予定に「収入」の分類は付けられません。',
+  invalid_recurrence: '周期が正しくありません（「3 か月ごと」はサーバーの更新後に使えます）。',
+  invalid_pattern: '摘要の文字が正しくありません。',
   invalid_card_settlement_account_id: '引落元の口座が正しくありません。',
   invalid_card_settlement_pattern: '引落の摘要の文字は 1〜200 文字で入れてください。',
   unknown_account: '口座が見つかりません。',
@@ -213,8 +242,8 @@ export const UNCATEGORIZED_QUERY = 'none';
 export const TXN_PAGE = 50;
 
 // GET /api/bank_txns の URL。category は '' = 全部、'none' = 未分類。q は前後の空白を落とし、空なら送らない。
-export function txnsUrl(f: TxnFilter, today: string, cursor: string | null): string {
-  const p = new URLSearchParams({ limit: String(TXN_PAGE) });
+export function txnsUrl(f: TxnFilter, today: string, cursor: string | null, limit = TXN_PAGE): string {
+  const p = new URLSearchParams({ limit: String(limit) });
   const r = periodRange(f.period, today, f.month);
   if (r.from) p.set('from', r.from);
   if (r.to) p.set('to', r.to);
@@ -241,16 +270,12 @@ export function txnSummary(items: Txn[]): { count: number; expense: number } {
 // タグを付けた後に開く、次の未設定の明細（今の行より下）。無ければ null。
 export function nextUnset(items: Txn[], id: string): Txn | null {
   const i = items.findIndex((t) => t.id === id);
-  return items.slice(i + 1).find((t) => t.tag === 'unset') ?? null;
+  return items.slice(i + 1).find((t) => t.tag === 'unset' && !t.excluded) ?? null;
 }
 
 // ---- 月次 ----
 
 export const MONTHLY_MONTHS = 6;
-export function monthlyUrl(today: string): string {
-  const to = today.slice(0, 7);
-  return `/api/summary/monthly?from=${addMonth(to, -(MONTHLY_MONTHS - 1))}&to=${to}`;
-}
 
 // カテゴリ別: 支出の大きい順に、取った月（最大 6 か月）の平均との差（支出）を付ける。無い月は 0 円として数える。
 export type CategoryRow = { category: string | null; income: number; expense: number; diff: number };
@@ -265,11 +290,6 @@ export function categoryRows(months: MonthlySummary[], month: string): CategoryR
     .sort((a, b) => b.expense - a.expense);
 }
 export const signed = (n: number) => (n > 0 ? `+${yen(n)}` : yen(n));
-
-// 口座別を資金繰りの対象と対象外に分ける（対象外は区切りの下に出す）。
-export function splitByCashflow(rows: MonthlySummary['by_account']) {
-  return { inside: rows.filter((r) => r.include_in_cashflow), outside: rows.filter((r) => !r.include_in_cashflow) };
-}
 
 // ---- 予定 ----
 
@@ -396,36 +416,19 @@ export function warningText(w: ForecastWarning, accountName: (id: string) => str
 
 // 予定収入が 36 か月で 0 なら、残高は減る一方の見通し（収入の予定を足すよう促す）。
 export const noIncome = (cf: Forecast) => cf.months.every((m) => m.planned_in === 0);
-// 推定月末残高のいちばん少ない月（同じなら早い月）。
-export function lowestMonth(cf: Forecast): ForecastMonth | null {
-  return cf.months.reduce<ForecastMonth | null>((lo, m) => (lo === null || m.balance_end < lo.balance_end ? m : lo), null);
-}
-
-// ---- はじめに ----
-
-// お金タブの先頭に出す手順。済んだものは出さない（全部済めば空）。
-export type SetupStep =
-  | { kind: 'card_settlement'; count: number; accountId: string }
-  | { kind: 'income'; count: 0 }
-  | { kind: 'candidates'; count: number }
-  | { kind: 'unset_tags'; count: number; more: boolean };
-export function setupSteps(x: { accounts: Account[]; items: ScheduledItem[] | null; candidates: number; unset: { count: number; more: boolean } | null }): SetupStep[] {
-  const out: SetupStep[] = [];
-  const cards = x.accounts.filter((a) => a.kind === 'card' && a.active && a.card_settlement_account_id === null);
-  if (cards.length > 0) out.push({ kind: 'card_settlement', count: cards.length, accountId: cards[0]!.id });
-  if (x.items !== null && !x.items.some((it) => it.active && it.direction === 'in')) out.push({ kind: 'income', count: 0 });
-  if (x.candidates > 0) out.push({ kind: 'candidates', count: x.candidates });
-  if (x.unset && x.unset.count > 0) out.push({ kind: 'unset_tags', count: x.unset.count, more: x.unset.more });
-  return out;
-}
-
 // ---- 口座 ----
+
+// 引落の設定が済んでいないカード（引落元か摘要の文字が空。サーバーの cards_without_settlement と同じ条件）。二重計上になる。
+export const needsSettlement = (a: Account) => a.kind === 'card' && a.active && (!a.card_settlement_account_id || !a.card_settlement_pattern);
+
+// GET /api/bank_txns（tag=unset・category=none など）の 1 ページから件数（集計外は数えない）。次がある（上限を超えた）なら more。
+export function pageCount(p: TxnPage): { n: number; more: boolean } {
+  return { n: p.items.filter((t) => !t.excluded).length, more: p.next_cursor !== null };
+}
+export const countLabel = (c: { n: number; more: boolean }) => `${c.n}${c.more ? '+' : ''}`;
 
 // カードの引落元に選べる口座（銀行だけ）。
 export const settlementChoices = (accounts: Account[]) => accounts.filter((a) => a.kind === 'bank');
-// カードで引落元が空のとき出す警告。
-export const SETTLEMENT_WARNING = '引落元が未設定のため、カードの支出が銀行の引落と二重に数えられます。';
-
 // 口座と同期の状態を id で結ぶ。
 export function withStatus(accounts: Account[], status: BankStatus[]): (Account & { status: BankStatus | null })[] {
   const by = new Map(status.map((s) => [s.account_id, s]));
@@ -467,10 +470,323 @@ export function accountPatch(a: Account, d: AccountDraft): Record<string, unknow
 
 export const syncText = (created: boolean) => (created ? '同期を始めました。しばらくしてから読み直してください。' : '実行中か、10 分以内に実行済みです。');
 
-// ISO の日時 → 「YYYY-MM-DD HH:MM」（端末のローカル時刻）。null は「—」。
-export function dateTime(iso: string | null): string {
+// ---- お金のホーム（今日使えるお金・今月の進み・確認すること・各画面への入口） ----
+
+// 「125万」「13.2万」「−1.8万」。100 万以上は整数、それ未満は小数 1 桁（.0 は落とす）。
+export function man(n: number): string {
+  if (Math.abs(n) < 10000) return yen(n);
+  const v = n / 10000;
+  const a = Math.abs(v);
+  const s = a >= 100 ? String(Math.round(a)) : String(Math.round(a * 10) / 10);
+  return `${v < 0 && s !== '0' ? '−' : ''}${s}万`;
+}
+// 差額の「+6.8万」。
+export const signedMan = (n: number) => (n > 0 ? `+${man(n)}` : man(n));
+
+// 今日は月の何日目か。
+export function dayOfMonth(today: string): { day: number; days: number } {
+  const days = new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0)).getUTCDate();
+  return { day: Number(today.slice(8, 10)), days };
+}
+
+// 「11/6」。
+export const md = (date: string) => `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))}`;
+const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
+export const weekday = (date: string) => WEEK[new Date(`${date}T00:00:00Z`).getUTCDay()]!;
+// 日付の差（b − a、日）。
+export function daysBetween(a: string, b: string): number {
+  return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+}
+
+// ISO の日時 → 「今日 9:12」「11/5 9:12」（端末のローカル時刻）。null は「—」。
+export function shortTime(iso: string | null, today: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const hm = `${d.getHours()}:${pad(d.getMinutes())}`;
+  return day === today ? `今日 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
+
+// overview の sync.errors（形は追加中）を件数にする。配列なら長さ、数ならそのまま。
+export function syncErrorCount(e: unknown): number {
+  if (Array.isArray(e)) return e.length;
+  return typeof e === 'number' && e > 0 ? e : 0;
+}
+
+// /api/bank/overview が無いサーバー向けの代わり。資金繰り（起点残高・残す額・今月の行）、今月の月次、口座から作る。
+// 資金繰りが読めなければ残高が分からないので null（その部分を隠す）。
+export function overviewFallback(x: {
+  today: string;
+  accounts: Account[];
+  cf: Forecast | null;
+  month: MonthlySummary | null;
+  untagged: { n: number; more: boolean };
+  candidates: number;
+  lastOkAt: string | null;
+}): Overview | null {
+  if (!x.cf) return null;
+  const cur = x.cf.months.find((m) => m.month === x.today.slice(0, 7)) ?? null;
+  // 今月の収支は資金繰りに入れる口座の分だけ（サーバーの overview と同じ）。
+  const inCf = (x.month?.by_account ?? []).filter((r) => r.include_in_cashflow && r.active);
+  const byAccount = x.accounts
+    .filter((a) => a.active && a.include_in_cashflow && a.kind !== 'card' && a.latest_balance)
+    .map((a) => ({ account_id: a.id, name: a.name, kind: a.kind, balance: a.latest_balance!.balance, as_of_date: a.latest_balance!.as_of_date }));
+  return {
+    today: x.today,
+    balances: { total: x.cf.opening_balance, by_account: byAccount },
+    reserve: x.cf.reserve,
+    available: x.cf.opening_balance - x.cf.reserve,
+    untagged_count: x.untagged.n,
+    untagged_more: x.untagged.more,
+    cards_without_settlement: x.accounts.filter(needsSettlement).map((a) => ({ account_id: a.id, name: a.name })),
+    open_candidates: x.candidates,
+    this_month: {
+      month: x.today.slice(0, 7),
+      income: inCf.reduce((a, r) => a + r.income, 0),
+      expense: inCf.reduce((a, r) => a + r.expense, 0),
+      planned_out_remaining: cur?.planned_out ?? 0,
+      unplanned_out_estimate: cur?.unplanned_out ?? 0,
+      projected_end_balance: cur?.balance_end ?? x.cf.opening_balance,
+    },
+    sync: { last_ok_at: x.lastOkAt, errors: 0 },
+  };
+}
+
+// 支出の帯: 済み / 予定の残り / 予定にない支出の目安 の割合（%、合計 100。全部 0 なら 0）。
+export function spendBand(t: ThisMonth): { done: number; planned: number; unplanned: number; total: number; pct: [number, number, number] } {
+  const done = Math.max(0, t.expense);
+  const planned = Math.max(0, t.planned_out_remaining);
+  const unplanned = Math.max(0, t.unplanned_out_estimate);
+  const total = done + planned + unplanned;
+  if (total === 0) return { done, planned, unplanned, total, pct: [0, 0, 0] };
+  const a = Math.round((done / total) * 1000) / 10;
+  const b = Math.round((planned / total) * 1000) / 10;
+  return { done, planned, unplanned, total, pct: [a, b, Math.round((100 - a - b) * 10) / 10] };
+}
+// 収入の進み（%、0〜100）。
+export const incomePct = (income: number, expected: number) => (expected <= 0 ? (income > 0 ? 100 : 0) : Math.min(100, Math.round((income / expected) * 1000) / 10));
+
+// 今月の残りの予定収入（資金繰りの今月の行）と、いちばん早い入金。
+export function incomeAhead(cf: Forecast | null, month: string): { total: number; first: ForecastItem | null } {
+  const m = cf?.months.find((x) => x.month === month);
+  const items = (m?.items ?? []).filter((it) => it.direction === 'in').sort((a, b) => a.due.localeCompare(b.due));
+  return { total: m?.planned_in ?? 0, first: items[0] ?? null };
+}
+
+// ホームの「確認すること」。並びは 引落元 → 提案 → 未設定の明細 → 収入の予定なし。
+export type Notice =
+  | { kind: 'card_settlement'; accountId: string; name: string }
+  | { kind: 'candidates'; count: number }
+  | { kind: 'untagged'; count: number; more: boolean }
+  | { kind: 'no_income' };
+export function notices(o: Overview, cf: Forecast | null): Notice[] {
+  const out: Notice[] = o.cards_without_settlement.map((c) => ({ kind: 'card_settlement' as const, accountId: c.account_id, name: c.name }));
+  if (o.open_candidates > 0) out.push({ kind: 'candidates', count: o.open_candidates });
+  if (o.untagged_count > 0) out.push({ kind: 'untagged', count: o.untagged_count, more: o.untagged_more === true });
+  if (cf && noIncome(cf)) out.push({ kind: 'no_income' });
+  return out;
+}
+
+// カテゴリ別の差が目立つか（平均より 2 万円以上、かつ平均の半分以上多い）。太字と、ホームの月次の文に使う。
+export function notableDiff(r: { expense: number; diff: number }): boolean {
+  const avg = r.expense - r.diff;
+  return r.diff >= 20000 && r.diff >= avg * 0.5;
+}
+
+// 月次の入口の 1 行: 「10 月の差額 −20,000（税金が平均より多い）」。目立つ差のうちいちばん大きいカテゴリを添える。
+export function monthlyLine(months: MonthlySummary[], month: string, cats: Categories | null): string | null {
+  const cur = months.find((m) => m.month === month);
+  if (!cur) return null;
+  const top = categoryRows(months, month)
+    .filter((r) => r.category !== null && notableDiff(r))
+    .sort((a, b) => b.diff - a.diff)[0];
+  const head = `${Number(month.slice(5, 7))} 月の差額 ${yen(cur.total.net)}`;
+  return top ? `${head}（${categoryLabel(cats, top.category)}が平均より多い）` : head;
+}
+
+// カードのうち、最新残高（まだ引かれていない利用分）のある有効なカード。ホームの注記に使う。
+export function cardsOutstanding(accounts: Account[]): { name: string; amount: number }[] {
+  return accounts
+    .filter((a) => a.kind === 'card' && a.active && a.latest_balance && a.latest_balance.balance !== 0)
+    .map((a) => ({ name: a.name, amount: Math.abs(a.latest_balance!.balance) }));
+}
+
+// ---- 見通し ----
+
+// 結論。不足する月があれば「YYYY-MM に残す額を下回ります」、無ければ「3 年間足ります」。減らせば足りる額（cut_per_month_to_survive）があれば添える。
+export function verdict(cf: Forecast): { short: boolean; title: string; detail: string; cut: string | null } {
+  const n = cf.months.length;
+  const span = n > 0 && n % 12 === 0 ? `${n / 12} 年間` : `${n} か月`;
+  const last = cf.months[n - 1];
+  const cut = cf.cut_per_month_to_survive;
+  const cutText = typeof cut === 'number' && cut > 0 ? `予定にない支出を月 ${yen(cut)} 円減らすと、${span}は足ります。` : null;
+  if (cf.first_shortfall_month) {
+    const detail =
+      last && last.balance_end < 0 ? `このままだと ${last.month} に残高が ${yen(last.balance_end)} になります。` : `このままだと ${cf.first_shortfall_month} から残す額に足りません。`;
+    return { short: true, title: `${cf.first_shortfall_month} に残す額を下回ります`, detail, cut: cutText };
+  }
+  const lo = cf.months.reduce<ForecastMonth | null>((a, m) => (a === null || m.margin < a.margin ? m : a), null);
+  const low = cf.min_month ?? (lo ? { month: lo.month, margin: lo.margin } : null);
+  return { short: false, title: `${span}足ります`, detail: low ? `いちばん余裕が少ないのは ${low.month}（残す額を引いて ${yen(low.margin)}）。` : '', cut: null };
+}
+
+// 年ごとに 12 か月ずつ。足りない月（margin < 0）の数と、最低の余裕（同じなら早い月）。
+export type YearGroup = { index: number; from: string; to: string; months: ForecastMonth[]; shortCount: number; low: { month: string; margin: number } };
+export function yearGroups(months: ForecastMonth[]): YearGroup[] {
+  const out: YearGroup[] = [];
+  for (let i = 0; i < months.length; i += 12) {
+    const ms = months.slice(i, i + 12);
+    const low = ms.reduce((a, m) => (m.margin < a.margin ? m : a), ms[0]!);
+    out.push({ index: i / 12, from: ms[0]!.month, to: ms[ms.length - 1]!.month, months: ms, shortCount: ms.filter((m) => m.margin < 0).length, low: { month: low.month, margin: low.margin } });
+  }
+  return out;
+}
+export function yearSummary(g: YearGroup): string {
+  if (g.shortCount === 0) return `ずっと足りる · 最低の余裕 ${yen(g.low.margin)}（${g.low.month}）`;
+  const all = g.shortCount === g.months.length;
+  return `${all ? `${g.months.length} か月とも` : `${g.shortCount} か月`}残す額に足りない · 最大 ${yen(g.low.margin)}（${g.low.month}）`;
+}
+
+// 予定の分類と周期（資金繰りの items は id・名前・金額だけなので、台帳から id で引く）。
+export type ItemInfo = { category: ScheduleCategory; recurrence: Recurrence };
+export const itemInfoMap = (items: ScheduledItem[]): Record<string, ItemInfo> => Object.fromEntries(items.map((it) => [it.id, { category: it.category, recurrence: it.recurrence }]));
+
+// 見通しの印: 月ごとの 税金・保険・車 の予定支出（毎月の分は除く）。
+export type MarkCat = 'tax' | 'insurance' | 'car';
+export type MonthMarks = { month: string; tax: number; insurance: number; car: number; names: { category: MarkCat; name: string; amount: number }[] };
+export function monthMarks(months: ForecastMonth[], info: Record<string, ItemInfo>): MonthMarks[] {
+  return months.map((m) => {
+    const out: MonthMarks = { month: m.month, tax: 0, insurance: 0, car: 0, names: [] };
+    for (const it of m.items) {
+      const i = info[it.id];
+      if (it.direction !== 'out' || !i || i.recurrence === 'monthly') continue;
+      if (i.category !== 'tax' && i.category !== 'insurance' && i.category !== 'car') continue;
+      out[i.category] += it.amount;
+      out.names.push({ category: i.category, name: it.name, amount: it.amount });
+    }
+    return out;
+  });
+}
+// 印の大きさ（0 = 無し、1〜3）。いちばん大きい月を 3。
+export function markSize(amount: number, max: number): 0 | 1 | 2 | 3 {
+  if (amount <= 0 || max <= 0) return 0;
+  const r = amount / max;
+  return r > 0.66 ? 3 : r > 0.33 ? 2 : 1;
+}
+// 予定収入が毎月同じなら、その額（行では省略する）。違えば null。
+export function flatIncome(months: ForecastMonth[]): number | null {
+  if (months.length === 0) return null;
+  const v = months[0]!.planned_in;
+  return v > 0 && months.every((m) => m.planned_in === v) ? v : null;
+}
+
+// ---- 予定 ----
+
+// この先 12 か月の山: 今月から 12 か月、月ごとに分類別の予定支出（毎月の分は除く）。upcoming は期日つきの項目。
+export type PeakMonth = { month: string; tax: number; insurance: number; car: number; other: number; total: number };
+export function peakMonths(upcoming: Upcoming[], today: string): PeakMonth[] {
+  const start = today.slice(0, 7);
+  const out: PeakMonth[] = Array.from({ length: 12 }, (_, i) => ({ month: addMonth(start, i), tax: 0, insurance: 0, car: 0, other: 0, total: 0 }));
+  for (const it of upcoming) {
+    if (it.direction !== 'out' || it.recurrence === 'monthly') continue;
+    const m = out.find((x) => x.month === it.due_date.slice(0, 7));
+    if (!m) continue;
+    const k = it.category === 'income' ? 'other' : it.category;
+    m[k] += it.amount;
+    m.total += it.amount;
+  }
+  return out;
+}
+// 山から除いた毎月の予定支出（1 か月あたり）。
+export const monthlyFixed = (items: ScheduledItem[]) => items.filter((it) => it.active && it.direction === 'out' && it.recurrence === 'monthly').reduce((a, it) => a + it.amount, 0);
+// 重い月（いちばん大きい月の半分以上のうち、大きい順に 3 つまで。並びは月の順）。
+export function heavyMonths(peaks: PeakMonth[]): string[] {
+  const max = Math.max(0, ...peaks.map((p) => p.total));
+  if (max === 0) return [];
+  const top = peaks.filter((p) => p.total >= max / 2).sort((a, b) => b.total - a.total).slice(0, 3);
+  return peaks.filter((p) => top.includes(p)).map((p) => p.month);
+}
+
+// 台帳: 分類で絞り、次の期日の順（期日の無いものは後ろ、停止中は最後）。
+export type LedgerFilter = '' | ScheduleCategory;
+export function ledgerRows(items: ScheduledItem[], nextDue: Record<string, string>, filter: LedgerFilter, showInactive: boolean): ScheduledItem[] {
+  const key = (it: ScheduledItem) => (it.active ? (nextDue[it.id] ?? '9999') : '~');
+  return items
+    .filter((it) => (showInactive || it.active) && (filter === '' || it.category === filter))
+    .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.name.localeCompare(b.name)));
+}
+
+// 提案の次の見込み日（最後の出現 + 周期。月末を超えたら月末）。
+export function candidateNext(c: Candidate): string | null {
+  const last = lastOccurrence(c);
+  if (!last) return null;
+  const m = addMonth(last.slice(0, 7), RECURRENCE_MONTHS[c.interval]);
+  const d = Math.min(Number(last.slice(8, 10)), Number(lastDay(m).slice(8, 10)));
+  return `${m}-${pad(d)}`;
+}
+// 提案の出現回数。
+export function occurrenceCount(c: Candidate): number {
+  try {
+    const v = JSON.parse(c.occurrences_json) as unknown;
+    return Array.isArray(v) ? v.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ---- 明細 ----
+
+// 日付ごとのまとまり（並びはそのまま）。net は集計外を除いた 収入 − 支出。
+export type DayGroup = { date: string; net: number; items: Txn[] };
+export function groupByDate(items: Txn[]): DayGroup[] {
+  const out: DayGroup[] = [];
+  for (const t of items) {
+    let g = out[out.length - 1];
+    if (!g || g.date !== t.txn_date) {
+      g = { date: t.txn_date, net: 0, items: [] };
+      out.push(g);
+    }
+    g.items.push(t);
+    if (!t.excluded) g.net += t.side === 'income' ? t.amount : -t.amount;
+  }
+  return out;
+}
+// 「11/6（金）今日」。
+export const dayLabel = (date: string, today: string) => `${md(date)}（${weekday(date)}）${date === today ? '今日' : ''}`;
+// 右端のタグを押したときの次のタグ（事業 ⇄ 私用。未設定は事業へ）。
+export const nextTag = (t: Tag): Tag => (t === 'business' ? 'private' : 'business');
+// 読み込んだ分の収入の合計（集計外は数えない）。
+export const txnIncome = (items: Txn[]) => items.reduce((a, t) => (t.side === 'income' && !t.excluded ? a + t.amount : a), 0);
+// 期間の表示「11/1〜11/6」。全部は「全期間」。
+export function periodText(f: TxnFilter, today: string): string {
+  const r = periodRange(f.period, today, f.month);
+  return r.from && r.to ? `${md(r.from)}〜${md(r.to)}` : '全期間';
+}
+// ルール化したとき、同じ口座・同じ摘要の未設定の行にも同じタグを付けて見せる（サーバーのルールは次の読み込みから効く）。
+export function applyRuleLocally(items: Txn[], src: Txn, tag: Tag, category: string | null): Txn[] {
+  return items.map((t) =>
+    t.id !== src.id && t.tag === 'unset' && !t.excluded && t.account_id === src.account_id && t.description === src.description ? { ...t, tag, category, tag_source: 'rule' } : t,
+  );
+}
+// 未設定の中での位置（1 始まり。未設定でなければ 0）と数（読み込んだ分）。
+export function unsetPosition(items: Txn[], id: string): { index: number; total: number } {
+  const unset = items.filter((t) => t.tag === 'unset' && !t.excluded);
+  return { index: unset.findIndex((t) => t.id === id) + 1, total: unset.length };
+}
+
+// ---- 月次 ----
+
+// 選んだ月で終わる 6 か月（平均と 6 か月の棒に使う）。
+export const monthlyRangeUrl = (month: string) => `/api/summary/monthly?from=${addMonth(month, -(MONTHLY_MONTHS - 1))}&to=${month}`;
+// 事業/私用/未設定の支出と割合（%）。
+export function tagShares(cur: MonthlySummary): { tag: Tag; expense: number; pct: number }[] {
+  const total = cur.by_tag.reduce((a, r) => a + r.expense, 0);
+  return TAG_ORDER.map((tag) => {
+    const expense = cur.by_tag.find((r) => r.tag === tag)?.expense ?? 0;
+    return { tag, expense, pct: total > 0 ? Math.round((expense / total) * 1000) / 10 : 0 };
+  });
+}
+
+// 期日の短い表示: 今年なら「11/27」、それ以外は「2027-01-31」。
+export const dateShort = (date: string, today: string) => (date.slice(0, 4) === today.slice(0, 4) ? md(date) : date);
