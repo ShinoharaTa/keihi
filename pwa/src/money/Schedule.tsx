@@ -9,6 +9,7 @@ import { getJson, patchJson, postJson } from '../api.ts';
 import { PeakStrip } from './Charts.tsx';
 import { Icon } from './Icons.tsx';
 import {
+  candidateName,
   candidateNext,
   categoriesFor,
   dateShort,
@@ -61,14 +62,14 @@ export function CandidateList({ items, accounts, today, busy, onAccept, onDismis
         return (
           <article key={c.id} class="m-card m-cand">
             <div class="m-row">
-              <h3 class="m-h3">{c.description_norm}</h3>
+              <h3 class="m-h3">{candidateName(c)}</h3>
               <span class="m-h3 m-num">
                 {yen(c.amount)}
                 <span class="m-per"> / {PER[c.interval] ?? RECURRENCE_LABELS[c.interval]}</span>
               </span>
             </div>
             <p class="m-sub">
-              {nameOf(c.account_id)}
+              {c.account_name || nameOf(c.account_id)}
               {last ? ` · 最後 ${dateShort(last, today)}${n > 0 ? `（${n} 回）` : ''}` : ''}
               {next ? ` · 次は ${dateShort(next, today)} ごろ` : ''}
             </p>
@@ -418,7 +419,7 @@ export function Schedule({
                 today={today}
                 busy={busy}
                 onAccept={(c) =>
-                  void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/accept`, { category: guessCategory(c.description_norm) }), () => `「${c.description_norm}」を予定にしました。`)
+                  void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/accept`, { category: guessCategory(c.description_norm) }), () => `「${candidateName(c)}」を予定にしました。`)
                 }
                 onDismiss={(c) => void run(postJson(`/api/recurrence_candidates/${encodeURIComponent(c.id)}/dismiss`, {}), () => '予定にしないことにしました。')}
               />

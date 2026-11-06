@@ -8,7 +8,8 @@ import { BalanceTrend, StackBar } from './Charts.tsx';
 import { Icon } from './Icons.tsx';
 import {
   addMonth,
-  cardsOutstanding,
+  balanceSeries,
+  cardUsage,
   dayOfMonth,
   failText,
   incomeAhead,
@@ -107,7 +108,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
   const band = o ? spendBand(o.this_month) : null;
   const inc = incomeAhead(cf, month);
   const expected = (o?.this_month.income ?? 0) + inc.total;
-  const cards = cardsOutstanding(accounts);
+  const cardsUsed = Object.values(cardUsage(accounts, d.months.find((m) => m.month === month))).reduce((x, y) => x + y, 0);
   const ns = o ? notices(o, cf) : [];
   const v = cf ? verdict(cf) : null;
   const next = d.upcoming[0] ?? null;
@@ -125,6 +126,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
     .join('・');
   const untagged = o?.untagged_count ?? 0;
   const untaggedText = `${untagged}${o?.untagged_more ? '+' : ''}`;
+  const trend = d.history ? balanceSeries(d.history.months) : [];
   return (
     <>
       {o ? (
@@ -144,12 +146,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
             <dt>残す額（この先の予定支出）</dt>
             <dd>− {yen(o.reserve)}</dd>
           </dl>
-          {cards.length > 0 && (
-            <p class="m-note">
-              {cards.map((c) => `${c.name}の未引落 ${yen(c.amount)} 円`).join('、')}
-              は、残高からまだ引かれていません。
-            </p>
-          )}
+          {cardsUsed > 0 && <p class="m-note">カードの今月の利用 {yen(cardsUsed)} 円はまだ残高から引かれていません。</p>}
         </section>
       ) : (
         <p class="m-msg">残高を読めませんでした。口座の同期を確かめてください。</p>
@@ -224,15 +221,15 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
         </section>
       )}
 
-      {d.history && d.history.months.length >= 2 && (
+      {trend.length >= 2 && (
         <section class="m-card m-gap8 m-trend" aria-labelledby="m-trend">
           <div class="m-row m-px4">
             <h2 id="m-trend" class="m-h2">
               残高の推移
             </h2>
-            <span class="m-sub">月末・直近 {d.history.months.length} か月</span>
+            <span class="m-sub">月末・直近 {trend.length} か月</span>
           </div>
-          <BalanceTrend months={d.history.months} reserve={o?.reserve ?? null} />
+          <BalanceTrend months={trend} reserve={o?.reserve ?? null} />
           <button type="button" class="m-link" onClick={() => go('forecast')}>
             この先 36 か月の見通しを見る
           </button>
@@ -302,7 +299,7 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
         upcoming: up.ok ? up.data.items : [],
         status: st.ok ? st.data.accounts : [],
         fallback,
-        untagged: u?.ok ? pageCount(u.data) : { n: 0, more: false },
+        untagged: u?.ok ? pageCount(u.data, 100) : { n: 0, more: false },
         candidates: c?.ok ? c.data.candidates.length : 0,
       });
     })();

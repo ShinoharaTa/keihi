@@ -400,7 +400,7 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
     void (async () => {
       const r = await getJson<TxnPage>(txnsUrl({ ...filter, tag: 'unset' }, today, null, 100));
       if (n !== countSeq.current) return;
-      setUnsetCount(r.ok ? countLabel(pageCount(r.data)) : '');
+      setUnsetCount(r.ok ? countLabel(pageCount(r.data, 100)) : '');
     })();
   }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, today]);
 

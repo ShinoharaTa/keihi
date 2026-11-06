@@ -47,9 +47,32 @@ function reportText(r: FlushReport): string {
   return parts.join('');
 }
 
-// タブの件数。ラベルの右上に数字のピル（0 なら出さない）。
+// タブの件数。アイコンの右上に数字のピル（0 なら出さない）。
 function Pill({ n }: { n: number }) {
   return n > 0 ? <span class="tab-pill">{n > 99 ? '99+' : n}</span> : null;
+}
+
+// 下タブのアイコン（線のインライン SVG。色は currentColor）。お金タブの Icons.tsx は別チャンクなのでここに持つ。
+const TAB_ICONS = {
+  capture: ['M4 8h3l2-3h6l2 3h3v11H4z', 'M12 9.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z'],
+  review: ['M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z', 'M9 12l2 2 4-4'],
+  queue: ['M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z', 'M12 8v4l3 2'],
+  sent: ['M4 12l16-8-6 16-2-7z'],
+  money: ['M5 6h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z', 'M3 10h18', 'M16 14.5h2'],
+} as const;
+
+function TabButton({ on, icon, label, n = 0, onClick }: { on: boolean; icon: keyof typeof TAB_ICONS; label: string; n?: number; onClick: () => void }) {
+  return (
+    <button type="button" class={on ? 'tab-on' : ''} aria-current={on ? 'page' : undefined} onClick={onClick}>
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={on ? 2 : 1.8} stroke-linecap="round" stroke-linejoin="round">
+        {TAB_ICONS[icon].map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+      <span>{label}</span>
+      <Pill n={n} />
+    </button>
+  );
 }
 
 function App() {
@@ -152,25 +175,12 @@ function App() {
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
         {tab === 'money' && (typeof money === 'function' ? h(money, { today }) : <p class="empty">{money === 'error' ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>)}
       </main>
-      <nav class="tabs">
-        <button type="button" class={tab === 'capture' ? 'tab-on' : ''} onClick={() => setTab('capture')}>
-          撮影
-        </button>
-        <button type="button" class={tab === 'review' ? 'tab-on' : ''} onClick={() => setTab('review')}>
-          確認
-          <Pill n={counts ? counts.review + counts.attention : 0} />
-        </button>
-        <button type="button" class={tab === 'queue' ? 'tab-on' : ''} onClick={() => setTab('queue')}>
-          送信待ち
-          <Pill n={waiting} />
-        </button>
-        <button type="button" class={tab === 'sent' ? 'tab-on' : ''} onClick={() => setTab('sent')}>
-          送信済み
-        </button>
-        <button type="button" class={tab === 'money' ? 'tab-on' : ''} onClick={() => setTab('money')}>
-          お金
-          <Pill n={upcoming} />
-        </button>
+      <nav class="tabs" aria-label="メイン">
+        <TabButton on={tab === 'capture'} icon="capture" label="撮影" onClick={() => setTab('capture')} />
+        <TabButton on={tab === 'review'} icon="review" label="確認" n={counts ? counts.review + counts.attention : 0} onClick={() => setTab('review')} />
+        <TabButton on={tab === 'queue'} icon="queue" label="送信待ち" n={waiting} onClick={() => setTab('queue')} />
+        <TabButton on={tab === 'sent'} icon="sent" label="送信済み" onClick={() => setTab('sent')} />
+        <TabButton on={tab === 'money'} icon="money" label="お金" n={upcoming} onClick={() => setTab('money')} />
       </nav>
     </div>
   );
