@@ -172,7 +172,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     assert.equal(jobsOf('reconcile_deals').length, 1);
     r = setting(DAILY_REPORT_KEY);
     assert.deepEqual(r.errors, []);
-    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'paper_status', 'remote_verify']);
+    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'detect_recurrences', 'paper_status', 'remote_verify']);
 
     // 翌日は全部動く。
     const t2 = new Date(T0.getTime() + 86_400_000);
@@ -239,6 +239,26 @@ describe('daily: 照合・紙原本・証憑の照合', () => {
     assert.equal(jobsOf('sync_bank').length, 2);
     assert.deepEqual(setting(DAILY_REPORT_KEY).sync_bank, { job_id: queued, created: false });
     assert.equal((db.prepare('SELECT count(*) n FROM money_accounts').get() as { n: number }).n, 1);
+  });
+
+  test('sync_bank を積んだ後に周期の検出を動かし、件数を report に残す', async () => {
+    enqueueDaily(db, T0);
+    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null, providerKind: 'fake' }), { done: 3, failed: 0 });
+    const r = setting(DAILY_REPORT_KEY);
+    assert.deepEqual(r.detect_recurrences, { created: 0, updated: 0 });
+    assert.deepEqual(r.errors, []);
+    const audit = JSON.parse((db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'daily.completed'`).get() as { payload_json: string }).payload_json);
+    assert.deepEqual(audit.detect_recurrences, { created: 0, updated: 0 });
+  });
+
+  test('周期の検出が失敗しても daily は失敗にせず、report に error を残す', async () => {
+    db.exec('DROP TABLE bank_txns'); // 検出が明細を読むところで落とす
+    const job = enqueueDaily(db, T0).id;
+    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null, providerKind: 'fake' }), { done: 3, failed: 0 });
+    assert.equal(getJob(db, job)!.state, 'done');
+    const r = setting(DAILY_REPORT_KEY);
+    assert.match(r.detect_recurrences.error, /bank_txns/);
+    assert.deepEqual(r.errors, []);
   });
 
   test('紙原本のステータスを更新する', async () => {

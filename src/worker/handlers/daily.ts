@@ -7,6 +7,8 @@
 //    needs_attention: meta_deadline_passed、期限の 7 日前からのものは settings.meta_deadline_warnings に載せる（PWA の一覧の警告）。
 // 4. 日次照合: reconcile_deals ジョブを積む（未完了のもの（queued / running）があれば積み増さない）。
 // 4'. 明細の同期: sync_bank ジョブを積む（同じく積み増さない。src/bank/sync.ts、T104）。
+// 4''. 周期の検出（src/cashflow/detect.ts、T302）: 予定支出の候補を作る・更新する。sync_bank は後でジョブとして走るので、
+//    ここではその時点（前回の同期まで）の明細で検出する（1 日遅れでよい）。失敗しても daily は失敗にせず、report に {error} を残す。
 // 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
 // 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
@@ -20,6 +22,7 @@ import { enqueueSyncBank } from '../../bank/sync.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import { verifyRemoteReceipts, type RemoteVerifyResult } from '../../backup/verifyRemote.ts';
 import type { RemoteVerifyMode } from '../../config.ts';
+import { detectRecurrences } from '../../cashflow/detect.ts';
 import { refreshPaperStatuses } from '../../deals/paper.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { enqueue } from '../../jobs/queue.ts';
@@ -57,6 +60,7 @@ export type DailyReport = {
   meta_deadline: { warn: MetaDeadlineItem[]; passed: MetaDeadlineItem[] } | null;
   reconcile: { job_id: number; created: boolean } | null;
   sync_bank: { job_id: number; created: boolean } | null;
+  detect_recurrences: { created: number; updated: number } | { error: string } | null;
   paper_status_changed: number | null;
   remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
@@ -117,6 +121,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       meta_deadline: null,
       reconcile: null,
       sync_bank: null,
+      detect_recurrences: null,
       paper_status_changed: null,
       remote_verify: null,
       needs_attention: 0,
@@ -173,6 +178,14 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       report.sync_bank = enqueueSyncBank(db, now);
     });
 
+    await step('detect_recurrences', () => {
+      try {
+        report.detect_recurrences = detectRecurrences(db, { today, now });
+      } catch (e) {
+        report.detect_recurrences = { error: (e instanceof Error ? e.message : String(e)).slice(0, 500) };
+      }
+    });
+
     await step('paper_status', () => {
       report.paper_status_changed = refreshPaperStatuses(db, now);
     });
@@ -207,6 +220,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             meta_deadline_passed: report.meta_deadline?.passed.length ?? null,
             reconcile: report.reconcile,
             sync_bank: report.sync_bank,
+            detect_recurrences: report.detect_recurrences,
             paper_status_changed: report.paper_status_changed,
             remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,

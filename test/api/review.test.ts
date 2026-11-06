@@ -9,6 +9,7 @@ import type { Hono, MiddlewareHandler } from 'hono';
 import sharp from 'sharp';
 import { appendAudit, verifyAudit } from '../../src/audit.ts';
 import { validateSchema } from '../../src/ai/validate.ts';
+import { createItem } from '../../src/cashflow/schedule.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { ensureDealRow, markNeedsAttention } from '../../src/deals/stateMachine.ts';
@@ -611,7 +612,7 @@ describe('GET /api/documents（T2-11）', () => {
     assert.equal(typeof all.items[0].paper_required, 'boolean');
 
     const counts = await (await app.request('/api/documents/counts')).json();
-    assert.deepEqual(counts, { review: 3, attention: 1, urgent: 2 });
+    assert.deepEqual(counts, { review: 3, attention: 1, urgent: 2, upcoming: 0 });
     assert.equal((await app.request('/api/documents?status=bogus')).status, 400);
   });
 
@@ -634,6 +635,15 @@ describe('GET /api/documents（T2-11）', () => {
     const list = (await (await app.request('/api/attention')).json()) as { total: number };
     assert.equal(counts.attention, 1);
     assert.equal(list.total, 1);
+  });
+
+  test('件数の upcoming は期日の通知の期間（項目ごとの N 日前〜期日の当日）に入った予定の件数', async () => {
+    const item = { name: 'x', amount: 1000, direction: 'out', category: 'other', accountId: null, recurrence: 'once', endDate: null, origin: 'manual' } as const;
+    createItem(db, { ...item, anchorDate: '2026-10-30', notifyDaysBefore: 14 }, { actor: 'user' }, NOW); // 今日（10-16）がちょうど 14 日前
+    createItem(db, { ...item, anchorDate: '2026-10-31', notifyDaysBefore: 14 }, { actor: 'user' }, NOW); // 15 日前: まだ
+    createItem(db, { ...item, anchorDate: '2026-10-15', notifyDaysBefore: 14 }, { actor: 'user' }, NOW); // 期日の翌日
+    const counts = (await (await app.request('/api/documents/counts')).json()) as { upcoming: number };
+    assert.equal(counts.upcoming, 1);
   });
 });
 
