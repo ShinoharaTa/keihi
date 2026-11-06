@@ -1,6 +1,7 @@
 // CSV の取り込み（docs/mvp-plan-v3.md T105、cashflow.md）。POST /api/accounts/:id/import（src/web/routes/bank.ts）から呼ぶ。
 // 1. 口座を確かめる（無ければ 404、source が csv でなければ 400 not_csv_account）。
 // 2. 文字コードを決めてヘッダでパーサーを選ぶ（無ければ 400 unknown_format）。同じ口座・同じ file_sha256 は 409 already_imported。
+//    ヘッダだけ（データの行が 0）は 400 empty_file。
 // 3. 原本のバイト列を objects に置く（src/storage/objects.ts。受領書と同じ。DB に書く前に置き、失敗の後に残っても上書きはしない）。
 // 4. 1 トランザクションで: dedupAndInsert を dryRun で試して件数を決める → csv_imports を INSERT（追記専用で件数が NOT NULL）
 //    → 本番の dedupAndInsert（source=csv、csvImportId、rawSha256 = 行の元の文字列の sha256）→ sync_status.last_csv_at。
@@ -9,6 +10,7 @@
 //    作った組があれば監査（transfers.detected）に残す。検出が失敗しても取り込みの結果は変えない（transfers.detect_failed）。
 // rows_merged は「既にあった明細に当たった行」の数（dedup の merged + touched。外部 ID が同じ行も、別の取得元の明細と組んだ行も含む）。
 // rows_error は CSV として読めなかった行と、dedup の検査に落ちた行の合計。
+import path from 'node:path';
 import { appendAudit } from '../../audit.ts';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
@@ -79,6 +81,16 @@ export function listCsvImports(db: Db, accountId: string): (CsvImportRow & { fil
   });
 }
 
+export const FILE_NAME_MAX = 255;
+
+// 監査に入れるファイル名。パスの部分（/ と \\）を外し、制御文字を除いて 255 文字で切る。空なら null。
+export function safeFileName(name: string | null): string | null {
+  if (name == null) return null;
+  const base = path.basename(name.replace(/\\/g, '/')).replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+  const cut = Array.from(base).slice(0, FILE_NAME_MAX).join('');
+  return cut === '' ? null : cut;
+}
+
 const reasonCount = (r: DedupResult) => ({ new: r.new.length, merged: r.merged.length + r.touched.length, errors: r.errors.length });
 
 export async function importCsv(
@@ -105,6 +117,7 @@ export async function importCsv(
   if (dup) throw new CsvImportError(409, 'already_imported', { csv_import_id: dup });
 
   const parsed = parser.parse(text);
+  if (parsed.rows.length + parsed.errors.length === 0) throw new CsvImportError(400, 'empty_file');
   const stored = await putObject(input.objectsDir, input.bytes);
   const at = input.now;
   const iso = at.toISOString();
@@ -151,7 +164,7 @@ export async function importCsv(
           entity: 'csv_import',
           entityId: id,
           payload: {
-            account_id: account.id, parser: parser.id, file_sha256: sha256, file_name: input.fileName, bytes: input.bytes.length,
+            account_id: account.id, parser: parser.id, file_sha256: sha256, file_name: safeFileName(input.fileName), bytes: input.bytes.length,
             rows_total: rowsTotal, rows_new: got.new, rows_merged: got.merged, rows_skipped_points: skippedPoints, rows_error: parsed.errors.length + got.errors,
             user: input.user,
           },

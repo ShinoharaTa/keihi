@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Hono } from 'hono';
 import { verifyAudit } from '../../src/audit.ts';
+import { FILE_NAME_MAX, safeFileName } from '../../src/bank/csv/import.ts';
 import { dedupAndInsert } from '../../src/bank/dedup.ts';
 import { getSyncStatus, insertAccount } from '../../src/bank/repo.ts';
 import { listActiveTransfers } from '../../src/bank/transfers.ts';
@@ -134,12 +135,12 @@ describe('POST /api/accounts/:id/import', () => {
     assert.deepEqual(d, ['チャージ テスト銀行 *****99', '支払い テスト商店']);
   });
 
-  test('取り込みの後に、銀行の同額の出金とチャージの組を作る', async () => {
+  test('取り込みの後に、銀行の同額の出金とチャージの組を作る。同額の受け取った金額は組まない', async () => {
     const at = T0.toISOString();
     const out = (externalId: string, txnDate: string, amount: number) => ({
       accountId: freeeBank, source: 'freee' as const, externalId, txnDate, amount, side: 'expense' as const, description: 'PAYPAY',
     });
-    const res = dedupAndInsert(db, [out('b1', '2026-10-25', 10000), out('b2', '2026-10-11', 5000), out('b3', '2026-10-20', 999)], { dateWindowDays: 0, now: at });
+    const res = dedupAndInsert(db, [out('b1', '2026-10-25', 10000), out('b2', '2026-10-11', 5000), out('b3', '2026-10-20', 999), out('b4', '2026-10-27', 3500)], { dateWindowDays: 0, now: at });
     const r = await upload(paypay, await fixture('paypay-2026-10.csv'));
     assert.equal(r.status, 201);
     assert.deepEqual(r.body.transfers, { from: '2026-09-25', to: '2026-11-06', created: 2 });
@@ -168,6 +169,22 @@ describe('POST /api/accounts/:id/import', () => {
     assert.deepEqual(big, { status: 413, body: { error: 'too_large', max_bytes: 5 * 1024 * 1024 } });
     assert.equal(count('csv_imports'), 0);
     assert.equal(count('bank_txns'), 0);
+  });
+
+  test('ヘッダだけの CSV は 400 empty_file（何も書かない）', async () => {
+    const head = new TextEncoder().encode('\uFEFF取引日,出金金額（円）,入金金額（円）,海外出金金額,通貨,変換レート（円）,利用国,取引内容,取引先,取引方法,支払い区分,利用者,取引番号\r\n');
+    assert.deepEqual(await upload(paypay, head), { status: 400, body: { error: 'empty_file' } });
+    assert.equal(count('csv_imports'), 0);
+  });
+
+  test('監査のファイル名はパスを外し、制御文字を除いて 255 文字で切る', async () => {
+    await upload(paypay, await fixture('paypay-sjis.csv'), 'C:\\Users\\x\\取引\u0007履歴.csv');
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'csv.imported'`).get() as { payload_json: string };
+    assert.equal(JSON.parse(a.payload_json).file_name, '取引履歴.csv');
+    assert.equal(safeFileName('../../etc/passwd'), 'passwd');
+    assert.equal(safeFileName(`${'あ'.repeat(300)}.csv`), 'あ'.repeat(FILE_NAME_MAX));
+    assert.equal(safeFileName('\n\t'), null);
+    assert.equal(safeFileName(null), null);
   });
 
   test('kind が bank の CSV 口座にも入れられる', async () => {

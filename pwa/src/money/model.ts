@@ -215,6 +215,7 @@ export const ERROR_TEXT: Record<string, string> = {
   file_required: 'ファイルを選んでください。',
   too_large: 'ファイルが大きすぎます（5MB まで）。',
   already_imported: '同じファイルは取り込み済みです。',
+  empty_file: 'CSV に明細の行がありません。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -246,9 +247,12 @@ const CSV_ROW_ERROR_TEXT: Record<string, string> = {
   both_amounts: '出金と入金の両方に金額があります',
   missing_external_id: '取引番号がありません',
   duplicate_in_file: '同じ取引番号の行が前にあります',
+  mixed_method: 'ポイントとの併用払いで、残高から出た額が読めません',
   external_id_conflict: '取り込み済みの同じ取引番号と日付か金額が違います',
 };
 export const CSV_ERRORS_SHOWN = 20;
+// サーバーの上限（src/web/routes/bank.ts の CSV_MAX_BYTES）。選んだ時点で超えていれば送らない。
+export const CSV_MAX_BYTES = 5 * 1024 * 1024;
 
 export function csvRowError(e: { line: number; reason: string }): string {
   return `${e.line} 行目: ${CSV_ROW_ERROR_TEXT[e.reason] ?? e.reason}`;

@@ -133,6 +133,28 @@ describe('PayPay のパーサー', () => {
   });
 });
 
+describe('PayPay のパーサー: ポイントと残高の併用払い', () => {
+  test('残高から出た分だけを amount にする。残高の額が取れなければ mixed_method', () => {
+    const line = (o: string, method: string, id: string) => ['2026/10/01 10:00:00', o, '-', '-', '-', '-', '-', '支払い', '店', method, '-', '-', id].join(',');
+    const text = [
+      HEADER,
+      line('"3,440"', '"PayPayポイント (1,000円), PayPay残高 (2,440円)"', 'M1'),
+      line('500', '"PayPay残高 (500円)"', 'M2'),
+      line('"1,000"', '"PayPayポイント (1,000円)"', 'M3'),
+      line('"1,000"', '"PayPayポイント (1,000円), PayPay残高 (0円)"', 'M4'),
+    ].join('\r\n');
+    const { rows, errors } = paypayParser.parse(text);
+    assert.deepEqual(rows.map((r) => [r.externalId, r.amount, r.side, r.skip ?? null]), [
+      ['M1', 2440, 'expense', null],
+      ['M2', 500, 'expense', null],
+    ]);
+    assert.deepEqual(errors, [
+      { line: 4, reason: 'mixed_method' },
+      { line: 5, reason: 'mixed_method' },
+    ]);
+  });
+});
+
 describe('dedupAndInsert の dryRun', () => {
   let root: string;
   before(async () => {

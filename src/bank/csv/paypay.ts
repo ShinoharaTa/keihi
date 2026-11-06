@@ -3,6 +3,8 @@
 // - 取引日は `2026/11/04 21:47:26`。金額は `"2,200"` のようにカンマ入り、空は `-`。
 // - 出金金額があれば expense、入金金額があれば income。両方 `-`（または両方ある）行は errors。
 // - 取引方法が PayPayポイント の行（投資・ポイント、残高の獲得）は現金ではないので skip: 'points'（明細に入れず、件数だけ数える）。
+// - ポイントと残高の併用払い（取引方法が `PayPayポイント (1,000円), PayPay残高 (2,440円)` の形）は、残高から出た分（PayPay残高 (n円)）を
+//   amount にする。形が併用払い（`(n円)` を含む）なのに残高の額が取れなければ errors（mixed_method）。
 // - 外部 ID は取引番号（文字列のまま。`#` 付きや先頭 0 の無いものもある）。ポイントの行と支払いの行が同じ番号を持つことがあるが、
 //   ポイントの行は skip なので衝突しない。skip でない行どうしで同じ番号が出たら 2 行目を errors（duplicate_in_file）。
 import type { CsvRowKind, ParsedRow, ParseError, ParseResult, Parser } from './index.ts';
@@ -15,6 +17,8 @@ export const PAYPAY_HEADER = [
 const COL = { date: 0, out: 1, in: 2, content: 7, counterparty: 8, method: 9, id: 12 } as const;
 const POINTS_METHOD = 'PayPayポイント';
 const EMPTY = '-';
+const MIXED_RE = /\(\d[\d,]*円\)/;
+const BALANCE_PART_RE = /PayPay残高 \((\d[\d,]*)円\)/;
 
 const KIND_OF: Record<string, CsvRowKind> = {
   支払い: 'payment',
@@ -87,6 +91,17 @@ export const paypayParser: Parser = {
         bad('missing_external_id');
         continue;
       }
+      const method = text(f[COL.method]);
+      let amount = (out ?? inc)!;
+      if (MIXED_RE.test(method)) {
+        const m = BALANCE_PART_RE.exec(method);
+        const v = m ? Number(m[1]!.replace(/,/g, '')) : NaN;
+        if (!Number.isSafeInteger(v) || v <= 0) {
+          bad('mixed_method');
+          continue;
+        }
+        amount = v;
+      }
       const content = text(f[COL.content]);
       const counterparty = text(f[COL.counterparty]);
       const row: ParsedRow = {
@@ -94,13 +109,13 @@ export const paypayParser: Parser = {
         raw: r.raw,
         externalId,
         txnDate,
-        amount: (out ?? inc)!,
+        amount,
         side: out !== null ? 'expense' : 'income',
         description: [content, counterparty].filter(Boolean).join(' '),
         ...(counterparty ? { counterparty } : {}),
         ...(KIND_OF[content] ? { kind: KIND_OF[content] } : {}),
       };
-      if (text(f[COL.method]) === POINTS_METHOD) {
+      if (method === POINTS_METHOD) {
         rows.push({ ...row, skip: 'points' });
         continue;
       }

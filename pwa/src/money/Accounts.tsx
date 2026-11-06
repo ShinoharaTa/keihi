@@ -15,6 +15,8 @@ import {
   cardUsage,
   CSV_ACCOUNT_KINDS,
   CSV_ERRORS_SHOWN,
+  CSV_MAX_BYTES,
+  ERROR_TEXT,
   csvRowError,
   failText,
   importSummary,
@@ -442,6 +444,10 @@ export function Accounts({
   };
 
   const importCsv = async (a: Account, f: File) => {
+    if (f.size > CSV_MAX_BYTES) {
+      setCsv((m) => ({ ...m, [a.id]: { busy: false, fail: ERROR_TEXT.too_large! } }));
+      return;
+    }
     setCsv((m) => ({ ...m, [a.id]: { busy: true } }));
     const fd = new FormData();
     fd.append('file', f, f.name);

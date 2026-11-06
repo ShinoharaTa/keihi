@@ -4,7 +4,7 @@
 //   PATCH /api/accounts/:id   body {default_tag?, mcp_visibility?, include_in_cashflow?, card_settlement_account_id?, card_settlement_pattern?, active?}
 //         → 200 Account / 400 / 404。変わった列を監査ログ（money_account.updated）に残す。
 //   POST  /api/accounts/:id/import  multipart: file（CSV、5MB まで）→ 201 CsvImportResult（src/bank/csv/import.ts）
-//         / 400 {error: file_required | not_csv_account | unknown_format} / 404 {error: not_found} / 409 {error: already_imported, csv_import_id}
+//         / 400 {error: file_required | not_csv_account | unknown_format | empty_file} / 404 {error: not_found} / 409 {error: already_imported, csv_import_id}
 //         / 413 {error: too_large, max_bytes}。取り込みの後に振替を検出する（[bank] transfer_window_days）。
 //   GET   /api/accounts/:id/imports → 200 {imports: [{id, imported_at, file_name, parser_id, rows_total, rows_new, rows_merged, rows_error}]} / 404
 //   POST  /api/bank/sync      → 200 {job_id, created}（今すぐ同期。未完了の sync_bank があるか、前回積んでから 10 分以内なら積まない）
