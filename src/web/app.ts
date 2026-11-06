@@ -6,6 +6,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import type { Config } from '../config.ts';
 import type { Db } from '../db/index.ts';
 import { attentionRoutes } from './routes/attention.ts';
+import { cashflowRoutes } from './routes/cashflow.ts';
 import { documentsRoutes } from './routes/documents.ts';
 import { exportRoutes } from './routes/export.ts';
 import { ingestRoutes } from './routes/ingest.ts';
@@ -32,6 +33,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', documentsRoutes(deps));
   app.route('/api', reviewRoutes(deps));
   app.route('/api', attentionRoutes(deps));
+  app.route('/api', cashflowRoutes(deps));
   app.route('/api', exportRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
   return app;
