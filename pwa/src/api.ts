@@ -24,10 +24,10 @@ export async function getJson<T>(url: string): Promise<{ ok: true; data: T } | {
   }
 }
 
-export async function postJson(url: string, body: unknown): Promise<{ status: number; body: unknown }> {
+export async function postJson(url: string, body: unknown, method: 'POST' | 'PATCH' = 'POST'): Promise<{ status: number; body: unknown }> {
   try {
     const res = await fetch(url, {
-      method: 'POST',
+      method,
       body: JSON.stringify(body),
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -38,3 +38,5 @@ export async function postJson(url: string, body: unknown): Promise<{ status: nu
     return { status: 0, body: null };
   }
 }
+
+export const patchJson = (url: string, body: unknown) => postJson(url, body, 'PATCH');

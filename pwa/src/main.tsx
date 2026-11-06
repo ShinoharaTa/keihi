@@ -1,5 +1,5 @@
 // PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13、mvp-plan.md T2-10・T2-11）。画面は 撮影 / 確認 / 送信待ち / 送信済み の 4 つ（下のタブで切り替え）。
-// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
+// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。5 つ目の「お金」（T111・T304）には期日の近い予定の件数（counts.upcoming、T305）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
 // 送信待ちは開いたとき・オンラインに戻ったとき・画面に戻ったとき・追加したときに再送する（iOS は Background Sync が無いため）。
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
@@ -9,13 +9,15 @@ import { todayLocal } from './capture/form.ts';
 import { SentList } from './list/SentList.tsx';
 import { idbStore } from './queue/idb.ts';
 import { QueueList } from './queue/QueueList.tsx';
+import { Money } from './money/Money.tsx';
 import { ReviewList } from './review/ReviewList.tsx';
 import { createFlusher, type FlushReport, type QueueItem } from './queue/queue.ts';
 import { backupWarning, reauthWarning, STATUS_URL, type StatusResponse } from './status.ts';
 import './style.css';
 
-type Tab = 'capture' | 'review' | 'queue' | 'sent';
-type Counts = { review: number; attention: number; urgent: number };
+type Tab = 'capture' | 'review' | 'queue' | 'sent' | 'money';
+// upcoming は T305 で足す。無いサーバーでは 0 として扱う。
+type Counts = { review: number; attention: number; urgent: number; upcoming?: number };
 
 // 共有シートから戻ったときの知らせ（?share=...）。読んだら URL から消す。
 function shareNotice(): { text: string; toQueue: boolean } | null {
@@ -108,6 +110,7 @@ function App() {
   };
 
   const waiting = items.length;
+  const upcoming = counts?.upcoming ?? 0;
   return (
     <div class="app">
       <header class="top">keihi</header>
@@ -131,6 +134,7 @@ function App() {
         {tab === 'review' && <ReviewList onChanged={() => void reloadCounts()} />}
         {tab === 'queue' && <QueueList items={items} today={today} onSave={save} onRemove={remove} onRetry={() => void flush()} />}
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
+        {tab === 'money' && <Money today={today} />}
       </main>
       <nav class="tabs">
         <button type="button" class={tab === 'capture' ? 'tab-on' : ''} onClick={() => setTab('capture')}>
@@ -144,6 +148,9 @@ function App() {
         </button>
         <button type="button" class={tab === 'sent' ? 'tab-on' : ''} onClick={() => setTab('sent')}>
           送信済み
+        </button>
+        <button type="button" class={tab === 'money' ? 'tab-on' : ''} onClick={() => setTab('money')}>
+          お金{upcoming ? `（${upcoming}）` : ''}
         </button>
       </nav>
     </div>
