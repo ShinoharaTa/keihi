@@ -40,6 +40,7 @@ before(async () => {
       ingest: { maxBytes: 1024 * 1024 },
       calendar: { deadlineMode: 'early', yearEndHolidays: false },
       deadline: { countFrom: 'receipt_day' },
+      retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
     },
     auth: createAuth({ allowedUsers: [USER], allowedHosts: [LOCAL, TS_HOST] }),
     triggerWorker: () => {},
@@ -97,6 +98,7 @@ describe('Tailscale-User-Login', () => {
       jobs: { queued: 0, running: 0, failed: 0 },
       backup: { last_success_at: null, last_drill: null },
       freee_reauth_required: false,
+      retention: { earliest_retain_until: null, documents: 0 },
     });
   });
   test('取り込み API・一覧・PWA も認証の後ろにある', async () => {

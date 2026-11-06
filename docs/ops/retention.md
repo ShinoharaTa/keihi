@@ -8,6 +8,10 @@
 - keihi 側（原本・DB・バックアップ）は控え。ただし種類を区別せず、**一律に長い方（7 年）+ 余裕 1 年 = 8 年**を保持する。
 - 期間を過ぎても**自動では消さない**。一覧に出し、人が判断して消す（削除の仕組みは今は作っていない。必要になったら別タスク）。
 
+keihi は削除しない。文書ごとの保持期限 `retain_until`（`src/retention.ts`。§3 の規則を `[retention]` の値で計算）は、
+対応表 `mapping.csv` の末尾の列と `/api/status` の `retention.earliest_retain_until`（最も早い期限）で見える。
+保存対象の表（documents・reviews・deals・audit_log 等）への DELETE 文が `src/` に無いことは `test/unit/no-delete.test.ts` で固定している。
+
 ## 2. 法定の期間（個人・青色。legal.md §1.5）
 
 | 種類 | 期間 |
@@ -27,7 +31,7 @@
 - keihi では一律に「**受領日（documents.received_on）の年分の翌年 3/16** から 8 年」とする。
   例: 2027-05-10 に受領 → 起算日 2028-03-16 → keihi 側の保持期限 2036-03-15（法定の 7 年は 2035-03-15 まで）。
 
-設定のキー（`src/config.ts` の `[retention]`。今は使っているコードが無い）:
+設定のキー（`src/config.ts` の `[retention]`。`src/retention.ts` が使う）:
 
 ```toml
 [retention]
