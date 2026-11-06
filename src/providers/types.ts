@@ -143,30 +143,51 @@ export type Masters = { accountItems: AccountItem[]; taxCodes: TaxCode[]; wallet
 
 // ---- 明細とルール（M6） ----
 
+// 明細の状態の既知の値（freee の wallet_txns.status。docs/transactions.md §明細）。
+// OpenAPI は 1〜6 の整数としか定めていないので、BankTxn.status はこれ以外の値（5 など）も入る。
+export const BANK_TXN_STATUS = {
+  unmatched: 1, // 消込待ち（未処理）
+  matched: 2, // 消込済み
+  ignored: 3, // 無視
+  matching: 4, // 消込中
+  excluded: 6, // 対象外
+} as const;
+
 export type BankTxn = {
   id: number;
   walletableType: WalletableType;
   walletableId: number;
   date: string; // YYYY-MM-DD
-  amount: number;
+  amount: number; // 正の整数。向きは entrySide
   entrySide: 'income' | 'expense';
   description: string;
+  // 取引後の残高。銀行は整数、カードは null。
+  balance: number | null;
+  // 既知の値は BANK_TXN_STATUS。応答に無ければ null。
+  status: number | null;
+  dueAmount: number;
+  ruleMatched: boolean;
 };
 
+// 1 回で 1 ページだけ返す。limit は 1〜100（既定 100）、offset で続きを取る。
 export type ListBankTxnsQuery = {
   walletableType?: WalletableType;
   walletableId?: number;
   startDate?: string;
   endDate?: string;
+  limit?: number;
+  offset?: number;
 };
 
-// ignore = 無視、private = プライベート、deal = 取引を推測（freee の user_matchers の act=4 / 11 / 0）。
-export type RuleAction = 'ignore' | 'private' | 'deal';
+// ignore = 無視、private = プライベートを推測、private_register = プライベートを登録、deal = 取引を推測
+// （freee の user_matchers の act=4 / 11 / 12 / 0）。
+export type RuleAction = 'ignore' | 'private' | 'private_register' | 'deal';
 
 export type CreateRuleInput = {
   matchText: string;
   action: RuleAction;
   walletableType?: WalletableType;
+  walletableId?: number;
   accountItemId?: number;
   taxCode?: number;
 };

@@ -42,6 +42,23 @@ export const DEAL = {
   receipts: [{ id: 7 }],
 };
 
+// 明細の応答（カードと銀行の 1 件ずつ）。カードの残高は null（2026-11-06 に実 API で確認）。
+const WALLET_TXN = {
+  id: 3,
+  company_id: COMPANY,
+  date: '2026-10-01',
+  amount: 1100,
+  due_amount: 1100,
+  balance: null,
+  entry_side: 'expense',
+  walletable_type: 'credit_card',
+  walletable_id: 1,
+  description: 'DUMMY',
+  status: 1,
+  rule_matched: false,
+};
+export const WALLET_TXNS = [WALLET_TXN, { ...WALLET_TXN, id: 4, walletable_type: 'bank_account', walletable_id: 2, entry_side: 'income', balance: 51000, rule_matched: true }];
+
 export function createFreeeMock(opts: { override?: Override; tokenStatus?: () => number } = {}) {
   const reqs: Req[] = [];
   let receiptSeq = 0;
@@ -89,11 +106,9 @@ export function createFreeeMock(opts: { override?: Override; tokenStatus?: () =>
     if (m === 'GET' && p === '/api/1/walletables') return json(200, { walletables: [{ id: 1, type: 'credit_card', name: 'ダミーカード' }] });
     if (m === 'GET' && p === '/api/1/partners') return json(200, { partners: [{ id: 5, name: 'ダミー商店' }] });
     if (m === 'GET' && p === '/api/1/wallet_txns') {
-      return json(200, {
-        wallet_txns: [{ id: 3, date: '2026-10-01', amount: 1100, entry_side: 'expense', walletable_type: 'credit_card', walletable_id: 1, description: 'DUMMY', status: 1 }],
-      });
+      return json(200, { wallet_txns: WALLET_TXNS });
     }
-    if (m === 'GET' && p === '/api/1/user_matchers') return json(200, { data: [{ id: 1, act: 4, description: 'DUMMY' }, { id: 2, act: 1, description: 'AUTO' }] });
+    if (m === 'GET' && p === '/api/1/user_matchers') return json(200, { data: [{ id: 1, act: 4, description: 'DUMMY' }, { id: 2, act: 1, description: 'AUTO' }, { id: 3, act: 12, description: 'PRIVATE' }] });
     if (m === 'POST' && p === '/api/1/user_matchers') return json(201, { id: 9 });
     return json(404, { message: 'not found' });
   }) as typeof fetch;

@@ -3,6 +3,7 @@
 //   butSucceed なら操作を反映してから投げる（「タイムアウトを返すが実は成功している」）。
 // - 呼び出しは成否を問わず calls に記録する（capabilities() は API 呼び出しではないので記録しない）。
 // - ID は種類ごとに 1 から採番する（決定的）。
+// - listBankTxns は freee と同じく 1 ページだけ返す（limit 既定 100、上限 100。続きは offset）。
 import { createHash } from 'node:crypto';
 import {
   ProviderError,
@@ -21,6 +22,8 @@ import {
   type Rule,
   type UploadReceiptInput,
 } from '../types.ts';
+
+const TXN_PAGE = 100;
 
 export const FAKE_CAPABILITIES: Capabilities = {
   receiptMetaOnUpload: true,
@@ -268,8 +271,12 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
     },
 
     listBankTxns(q: ListBankTxnsQuery = {}) {
-      return run('listBankTxns', [{ ...q }], () =>
-        [...state.bankTxns.values()]
+      return run('listBankTxns', [{ ...q }], () => {
+        const limit = q.limit ?? TXN_PAGE;
+        const offset = q.offset ?? 0;
+        if (!Number.isInteger(limit) || limit < 1 || limit > TXN_PAGE) throw badRequest(`limit は 1〜${TXN_PAGE}: ${limit}`);
+        if (!Number.isInteger(offset) || offset < 0) throw badRequest(`offset が不正: ${offset}`);
+        return [...state.bankTxns.values()]
           .filter(
             (t) =>
               (q.walletableType === undefined || t.walletableType === q.walletableType) &&
@@ -277,8 +284,9 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
               (q.startDate === undefined || t.date >= q.startDate) &&
               (q.endDate === undefined || t.date <= q.endDate),
           )
-          .map((t) => ({ ...t })),
-      );
+          .slice(offset, offset + limit)
+          .map((t) => ({ ...t }));
+      });
     },
 
     listRules() {
@@ -287,6 +295,8 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
 
     createRule(input: CreateRuleInput) {
       return run('createRule', [{ ...input }], () => {
+        // freee と同じく、口座の指定は未対応（walletable の書式が未確認）。
+        if (input.walletableId !== undefined) throw badRequest('ルールの口座の指定は未対応');
         const r: Rule = { ...input, id: ++seq.rule };
         state.rules.set(r.id, r);
         return { ...r };

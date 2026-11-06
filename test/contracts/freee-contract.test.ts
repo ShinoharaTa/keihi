@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CONTRACT, checkRequest, findOperation, validate } from './openapi.ts';
-import { COMPANY, makeEnv, storedToken } from './mock.ts';
+import { COMPANY, WALLET_TXNS, makeEnv, storedToken } from './mock.ts';
 
 let root: string;
 let n = 0;
@@ -71,9 +71,11 @@ describe('Provider の送るリクエスト', () => {
     await p.listDeals({ refNumber: 'kh-REF' });
     await p.deleteDeal(501);
     await p.syncMasters();
-    await p.listBankTxns({ walletableType: 'credit_card', walletableId: 1, startDate: '2026-10-01', endDate: '2026-10-31' });
+    const txns = await p.listBankTxns({ walletableType: 'credit_card', walletableId: 1, startDate: '2026-10-01', endDate: '2026-10-31' });
+    await p.listBankTxns({ walletableType: 'bank_account', walletableId: 2, limit: 100, offset: 100 });
     await p.listRules();
     await p.createRule({ matchText: 'DUMMY', action: 'ignore' });
+    await p.createRule({ matchText: 'DUMMY', action: 'private_register' });
     await p.deleteRule(9);
 
     const errors = env.mock.reqs.flatMap(checkRequest);
@@ -87,6 +89,18 @@ describe('Provider の送るリクエスト', () => {
     assert.deepEqual(new Uint8Array(await (up.get('receipt') as Blob).arrayBuffer()), new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
     assert.equal(up.get('description'), 'kh-01TEST');
     assert.equal(up.has('receipt_metadatum_partner_name'), false);
+    // 明細: モックの応答が定義に合い、残高（カードは null）・状態・未消込額・ルールの当たりを読む。
+    assert.deepEqual(WALLET_TXNS.flatMap((t, i) => validate(CONTRACT.components.schemas.wallet_txn, t, `wallet_txns[${i}]`)), []);
+    assert.deepEqual(
+      txns.map((t) => [t.id, t.walletableType, t.balance, t.status, t.dueAmount, t.ruleMatched]),
+      [
+        [3, 'credit_card', null, 1, 1100, false],
+        [4, 'bank_account', 51000, 1, 1100, true],
+      ],
+    );
+    // ルール: 無視は act=4、プライベートを登録は act=12。
+    const rules = env.mock.reqs.filter((r) => r.method === 'POST' && r.url.pathname === '/api/1/user_matchers').map((r) => JSON.parse(String(r.body)).act);
+    assert.deepEqual(rules, [4, 12]);
     // 現金・事業主借は payments 付き（決済済み）、連携カード（payments なし）は未決済で送る。
     const posts = env.mock.reqs.filter((r) => r.method === 'POST' && r.url.pathname === '/api/1/deals').map((r) => JSON.parse(String(r.body)));
     assert.deepEqual(

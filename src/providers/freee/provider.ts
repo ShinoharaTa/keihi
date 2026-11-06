@@ -50,8 +50,8 @@ export const RECEIPT_LOOKBACK_DAYS = 30;
 const RECEIPTS_PAGE = 3000; // GET /receipts の limit の上限
 const PAGE = 100; // deals・wallet_txns・user_matchers の limit の上限
 
-// user_matchers の act（freee-codex.md F12）。
-const ACT: Record<RuleAction, number> = { ignore: 4, private: 11, deal: 0 };
+// user_matchers の act（freee-codex.md F12。プライベートを登録 = 12 は mvp-plan-v3.md T109）。
+const ACT: Record<RuleAction, number> = { ignore: 4, private: 11, private_register: 12, deal: 0 };
 const ACTION_OF = new Map<number, RuleAction>(Object.entries(ACT).map(([k, v]) => [v, k as RuleAction]));
 
 export type DateRange = { startDate: string; endDate: string };
@@ -396,15 +396,16 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
       };
     },
 
+    // 1 ページだけ取る（limit 既定 100、続きは offset）。
     async listBankTxns(q: ListBankTxnsQuery = {}): Promise<BankTxn[]> {
-      const list = await pages(
-        'listBankTxns',
-        '/api/1/wallet_txns',
-        { walletable_type: q.walletableType, walletable_id: q.walletableId, start_date: q.startDate, end_date: q.endDate },
-        'wallet_txns',
-        PAGE,
-      );
-      return list.map(obj).map((t) => ({
+      const limit = q.limit ?? PAGE;
+      const offset = q.offset ?? 0;
+      if (!Number.isInteger(limit) || limit < 1 || limit > PAGE) throw new ProviderError('client', `limit は 1〜${PAGE}: ${limit}`);
+      if (!Number.isInteger(offset) || offset < 0) throw new ProviderError('client', `offset が不正: ${offset}`);
+      const res = await call('listBankTxns', 'GET', '/api/1/wallet_txns', {
+        query: cq({ walletable_type: q.walletableType, walletable_id: q.walletableId, start_date: q.startDate, end_date: q.endDate, limit, offset }),
+      });
+      return arr(obj(res.json).wallet_txns).map(obj).map((t) => ({
         id: num(t.id) ?? 0,
         walletableType: str(t.walletable_type) as WalletableType,
         walletableId: num(t.walletable_id) ?? 0,
@@ -412,10 +413,14 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
         amount: num(t.amount) ?? 0,
         entrySide: t.entry_side === 'income' ? 'income' : 'expense',
         description: str(t.description) ?? '',
+        balance: num(t.balance),
+        status: num(t.status),
+        dueAmount: num(t.due_amount) ?? 0,
+        ruleMatched: t.rule_matched === true,
       }));
     },
 
-    // keihi の 3 種類（act 4 / 11 / 0）だけを返す。口座・科目・税区分の条件は M6 で扱う。
+    // keihi の 4 種類（act 4 / 11 / 12 / 0）だけを返す。口座・科目・税区分の条件は M6 で扱う。
     async listRules(): Promise<Rule[]> {
       const list = await pages('listRules', '/api/1/user_matchers', {}, 'data', PAGE);
       const out: Rule[] = [];
@@ -428,7 +433,8 @@ export function createFreeeProvider(opts: FreeeProviderOptions): FreeeProvider {
     },
 
     async createRule(input: CreateRuleInput): Promise<Rule> {
-      if (input.walletableType !== undefined || input.accountItemId !== undefined || input.taxCode !== undefined) {
+      // 口座の指定（body の walletable）は文字列の書式が未確認なので送らない。
+      if (input.walletableType !== undefined || input.walletableId !== undefined || input.accountItemId !== undefined || input.taxCode !== undefined) {
         throw new ProviderError('client', 'ルールの口座・科目・税区分の指定は未対応（M6）');
       }
       const body: Obj = {

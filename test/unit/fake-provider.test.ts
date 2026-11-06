@@ -239,11 +239,34 @@ describe('取引', () => {
 describe('明細・ルール', () => {
   test('listBankTxns は addBankTxn で入れた明細を絞り込んで返す', async () => {
     const p = createFakeProvider();
-    p.addBankTxn({ walletableType: 'credit_card', walletableId: 1, date: '2026-09-11', amount: 240, entrySide: 'expense', description: 'TEST SHOP' });
-    p.addBankTxn({ walletableType: 'credit_card', walletableId: 1, date: '2026-10-11', amount: 500, entrySide: 'expense', description: 'TEST CAFE' });
+    const card = { walletableType: 'credit_card', walletableId: 1, entrySide: 'expense', balance: null, status: 1, ruleMatched: false } as const;
+    p.addBankTxn({ ...card, date: '2026-09-11', amount: 240, dueAmount: 240, description: 'TEST SHOP' });
+    p.addBankTxn({ ...card, date: '2026-10-11', amount: 500, dueAmount: 500, description: 'TEST CAFE' });
+    p.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-09-12', amount: 1000, entrySide: 'income', description: 'TEST BANK', balance: 51000, status: 1, dueAmount: 1000, ruleMatched: true });
     assert.equal(p.calls.length, 0);
-    const ts = await p.listBankTxns({ endDate: '2026-09-30' });
-    assert.deepEqual(ts.map((t) => [t.id, t.amount]), [[1, 240]]);
+    const ts = await p.listBankTxns({ endDate: '2026-09-30', walletableType: 'credit_card' });
+    assert.deepEqual(ts.map((t) => [t.id, t.amount, t.balance]), [[1, 240, null]]);
+    const bank = await p.listBankTxns({ walletableType: 'bank_account', walletableId: 2 });
+    assert.deepEqual(bank.map((t) => [t.id, t.balance, t.status, t.dueAmount, t.ruleMatched]), [[3, 51000, 1, 1000, true]]);
+  });
+
+  test('listBankTxns は 100 件ずつ返し、offset で続きが取れる', async () => {
+    const p = createFakeProvider();
+    for (let i = 0; i < 250; i++) {
+      p.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-10-01', amount: i + 1, entrySide: 'expense', description: `T${i}`, balance: 0, status: 1, dueAmount: i + 1, ruleMatched: false });
+    }
+    const pages = [];
+    for (let offset = 0; ; offset += 100) {
+      const page = await p.listBankTxns({ walletableId: 2, offset });
+      pages.push(page.length);
+      if (page.length < 100) break;
+    }
+    assert.deepEqual(pages, [100, 100, 50]);
+    assert.deepEqual((await p.listBankTxns({ limit: 2, offset: 248 })).map((t) => t.id), [249, 250]);
+    assert.deepEqual(await p.listBankTxns({ offset: 250 }), []);
+    await rejectsWith(p.listBankTxns({ limit: 101 }), 'client');
+    await rejectsWith(p.listBankTxns({ limit: 0 }), 'client');
+    await rejectsWith(p.listBankTxns({ offset: -1 }), 'client');
   });
 
   test('createRule / listRules / deleteRule', async () => {
@@ -254,5 +277,10 @@ describe('明細・ルール', () => {
     await p.deleteRule(r.id);
     assert.deepEqual(await p.listRules(), []);
     await rejectsWith(p.deleteRule(r.id), 'client');
+    const r2 = await p.createRule({ matchText: 'TEST SHOP', action: 'private_register' });
+    assert.deepEqual(await p.listRules(), [{ matchText: 'TEST SHOP', action: 'private_register', id: r2.id }]);
+    // freee と同じく、口座の指定は client。
+    await rejectsWith(p.createRule({ matchText: 'TEST SHOP', action: 'ignore', walletableId: 2 }), 'client');
+    assert.equal((await p.listRules()).length, 1);
   });
 });
