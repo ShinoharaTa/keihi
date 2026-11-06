@@ -79,13 +79,13 @@ after(async () => {
 beforeEach(() => make());
 
 let seq = 0;
-function addDoc(o: { id?: string; deadline?: string; status?: string; mime?: string; sha256?: string; noAi?: boolean } = {}): string {
+function addDoc(o: { id?: string; deadline?: string; status?: string; mime?: string; sha256?: string; noAi?: boolean; kind?: 'scan' | 'e_transaction' } = {}): string {
   const id = o.id ?? `01DOC${String(seq++).padStart(21, '0')}`;
   db.prepare(
     `INSERT INTO documents (id, sha256, bytes, mime, source, kind, received_at, received_on, received_on_source, deadline_on, deadline_mode,
        storage_key, no_ai, status, created_at)
-     VALUES (?, ?, 10, ?, 'pwa', 'scan', ?, '2026-10-15', 'client', ?, 'early', 'k', ?, ?, ?)`,
-  ).run(id, o.sha256 ?? `sha-${id}`, o.mime ?? 'image/jpeg', NOW.toISOString(), o.deadline ?? '2026-10-26', o.noAi ? 1 : 0, o.status ?? 'needs_review', NOW.toISOString());
+     VALUES (?, ?, 10, ?, 'pwa', ?, ?, '2026-10-15', 'client', ?, 'early', 'k', ?, ?, ?)`,
+  ).run(id, o.sha256 ?? `sha-${id}`, o.mime ?? 'image/jpeg', o.kind ?? 'scan', NOW.toISOString(), o.deadline ?? '2026-10-26', o.noAi ? 1 : 0, o.status ?? 'needs_review', NOW.toISOString());
   return id;
 }
 
@@ -505,6 +505,79 @@ describe('POST /api/documents/:id/approve 他（T2-8・T2-9）', () => {
     assert.equal(manual.account_id, ACC.travel);
     assert.equal(manual.hit_count, 5);
     assert.equal(manual.mismatch_count, 1);
+  });
+});
+
+describe('同等確認 integrity_checked（T004）', () => {
+  async function ready(kind: 'scan' | 'e_transaction' = 'scan') {
+    upsertVendorRule(db, { name: 'カフェ・ドゥ・テスト', accountId: ACC.meeting, taxCategory: 'taxable_10', creditAccount: 'owner', origin: 'learned', hitCount: 1 });
+    const id = addDoc({ kind });
+    addExtraction(id, {}, [GEMINI]);
+    const card = (await getCard(id)).json;
+    return { id, card };
+  }
+  const checkedAt = (id: string) => (db.prepare('SELECT integrity_checked_at FROM documents WHERE id = ?').get(id) as { integrity_checked_at: string | null }).integrity_checked_at;
+
+  test('スキャンのカードには integrity_checked（既定 false）がある。電子取引には無い', async () => {
+    const scan = await ready();
+    assert.equal(scan.card.dataModel.integrity_checked, false);
+    const stored = JSON.parse((db.prepare('SELECT card_json FROM ui_cards WHERE id = ?').get(scan.card.card_id) as { card_json: string }).card_json);
+    assert.equal(stored.dataModel.integrity_checked, false);
+    const et = await ready('e_transaction');
+    assert.equal(Object.hasOwn(et.card.dataModel, 'integrity_checked'), false);
+  });
+
+  test('チェック付きの approve で integrity_checked_at が入り、document.integrity_checked を 1 件残す', async () => {
+    const { id, card } = await ready();
+    const r = await act(id, 'approve', { card_id: card.card_id, expected_version: 0, integrity_checked: true });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(checkedAt(id), NOW.toISOString());
+    const a = audits('document.integrity_checked');
+    assert.equal(a.length, 1);
+    assert.equal(a[0].actor, 'user');
+    assert.equal(a[0].entity_id, id);
+    assert.deepEqual(JSON.parse(a[0].payload_json), { document_id: id });
+    assert.equal(verifyAudit(db).ok, true);
+  });
+
+  test('チェックなし（false・省略）なら NULL のまま', async () => {
+    const a = await ready();
+    assert.equal((await act(a.id, 'approve', { card_id: a.card.card_id, expected_version: 0, integrity_checked: false })).status, 200);
+    assert.equal(checkedAt(a.id), null);
+    const b = await ready();
+    assert.equal((await act(b.id, 'approve', { card_id: b.card.card_id, expected_version: 0 })).status, 200);
+    assert.equal(checkedAt(b.id), null);
+    assert.equal(audits('document.integrity_checked').length, 0);
+  });
+
+  test('2 回目の approve（別版）でも最初の時刻を保つ', async () => {
+    const { id, card } = await ready();
+    assert.equal((await act(id, 'approve', { card_id: card.card_id, expected_version: 0, integrity_checked: true })).status, 200);
+    clock = new Date(NOW.getTime() + 60 * 60 * 1000);
+    const card2 = (await getCard(id)).json;
+    const r = await act(id, 'approve', { card_id: card2.card_id, expected_version: 1, integrity_checked: true, values: { memo: '訂正' } });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(r.json.version, 2);
+    assert.equal(checkedAt(id), NOW.toISOString());
+    assert.equal(audits('document.integrity_checked').length, 1);
+  });
+
+  test('電子取引では無視する（書かない・エラーにしない）', async () => {
+    const { id, card } = await ready('e_transaction');
+    const r = await act(id, 'approve', { card_id: card.card_id, expected_version: 0, integrity_checked: true });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(checkedAt(id), null);
+    assert.equal(audits('document.integrity_checked').length, 0);
+  });
+
+  test('approve 以外では書かない。真偽値でなければ 400', async () => {
+    const a = await ready();
+    assert.equal((await act(a.id, 'reject', { card_id: a.card.card_id, expected_version: 0, integrity_checked: true })).status, 200);
+    assert.equal(checkedAt(a.id), null);
+    const b = await ready();
+    const r = await act(b.id, 'approve', { card_id: b.card.card_id, expected_version: 0, integrity_checked: 'yes' });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.field, 'integrity_checked');
   });
 });
 

@@ -7,6 +7,8 @@
 //   税率の区分（tax_id）を変えて内訳が 1 行なら、内訳の区分もそれに揃える（複数行なら内訳を直してもらう）。
 // - approve のときだけ jobs に update_receipt_meta と send_deal を積む（ハンドラは別担当）。
 // - approve と personal は取引先の辞書を学習する（src/review/learn.ts）。
+// - approve で integrity_checked: true なら、同じトランザクションで documents.integrity_checked_at を入れる（T004、legal R9）。
+//   scan だけ。一度入れたら変えない（NULL のときだけ書く）。書いたら audit に document.integrity_checked。
 import { appendAudit } from '../audit.ts';
 import { checkInvoiceRegNo, sanitizeText } from '../ai/validate.ts';
 import { tx, type Db } from '../db/index.ts';
@@ -230,16 +232,17 @@ export type DecideResult = {
   learned: LearnResult | null;
 };
 
-type Body = { card_id?: unknown; expected_version?: unknown; values?: unknown };
+type Body = { card_id?: unknown; expected_version?: unknown; values?: unknown; integrity_checked?: unknown };
 
 export function decide(db: Db, input: DecideInput): DecideResult {
   const body = (typeof input.body === 'object' && input.body !== null && !Array.isArray(input.body) ? input.body : null) as Body | null;
   if (!body) throw new ReviewError(400, 'invalid_body');
-  for (const k of Object.keys(body)) if (!['card_id', 'expected_version', 'values'].includes(k)) throw new ReviewError(400, 'invalid_body', { field: k });
+  for (const k of Object.keys(body)) if (!['card_id', 'expected_version', 'values', 'integrity_checked'].includes(k)) throw new ReviewError(400, 'invalid_body', { field: k });
   if (typeof body.card_id !== 'string' || !body.card_id) throw new ReviewError(400, 'card_id_required');
   if (!Number.isSafeInteger(body.expected_version) || (body.expected_version as number) < 0) throw new ReviewError(400, 'expected_version_required');
+  if (body.integrity_checked !== undefined && typeof body.integrity_checked !== 'boolean') throw new ReviewError(400, 'invalid_body', { field: 'integrity_checked' });
 
-  const doc = db.prepare('SELECT id, status FROM documents WHERE id = ?').get(input.documentId) as { id: string; status: string } | undefined;
+  const doc = db.prepare('SELECT id, status, kind FROM documents WHERE id = ?').get(input.documentId) as { id: string; status: string; kind: string } | undefined;
   if (!doc) throw new ReviewError(404, 'not_found');
   const stored: StoredCard | null = getStoredCard(db, body.card_id);
   if (!stored || stored.document_id !== doc.id) throw new ReviewError(400, 'unknown_card');
@@ -312,6 +315,14 @@ export function decide(db: Db, input: DecideInput): DecideResult {
       },
       input.now,
     );
+
+    // 同等確認（scan だけ。e_transaction は無視する）。一度入った時刻は上書きしない。
+    if (input.decision === 'approve' && body.integrity_checked === true && doc.kind === 'scan') {
+      const r = db.prepare('UPDATE documents SET integrity_checked_at = ? WHERE id = ? AND integrity_checked_at IS NULL').run(iso, doc.id);
+      if (r.changes === 1) {
+        appendAudit(db, { actor: 'user', action: 'document.integrity_checked', entity: 'document', entityId: doc.id, payload: { document_id: doc.id } }, input.now);
+      }
+    }
 
     const jobs: string[] = [];
     if (input.decision === 'approve') {

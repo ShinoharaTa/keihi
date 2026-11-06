@@ -1,6 +1,7 @@
 // 確認カード（docs/mvp-plan.md T2-10、a2ui-review-ui.md §2.1・§3.7）。surface の固定部品だけを描画する。
 // - 文字列はすべて JSX のテキストとして描画する（HTML・URL・画像の参照として扱わない）。画像は自分のサーバーのサムネイルだけ。
 // - 縦 1 画面: 上にサムネイルと金額、中に日付・取引先・科目チップ・支払手段、下（親指の範囲）に確定の大ボタンと私用・重複。
+// - スキャン（dataModel.integrity_checked がある）だけ「欠け・折れ・裏面を確認した」のチェックを出す（T004）。
 // - 辞書や AI の第 1 候補が正しければ 1 タップ（確定）、第 2・第 3 候補は 2 タップ、修正は各行をタップして入力欄。
 import { useState } from 'preact/hooks';
 import { findComponent, renderableComponents, type DecisionAction } from './catalog.ts';
@@ -19,7 +20,7 @@ import {
   type Values,
 } from './model.ts';
 
-type Props = { card: CardResponse; busy: boolean; onDecide: (action: DecisionAction, draft: Values) => void };
+type Props = { card: CardResponse; busy: boolean; onDecide: (action: DecisionAction, draft: Values, integrityChecked?: boolean) => void };
 type Editing = 'amount' | 'date' | 'vendor' | null;
 
 export function ReviewCard({ card, busy, onDecide }: Props) {
@@ -30,6 +31,8 @@ export function ReviewCard({ card, busy, onDecide }: Props) {
   const [zoom, setZoom] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [query, setQuery] = useState('');
+  const [checked, setChecked] = useState(dm.integrity_checked ?? false);
+  const isScan = dm.integrity_checked !== undefined;
   const set = (patch: Partial<Values>) => setDraft((d) => ({ ...d, ...patch }));
 
   const thumb = findComponent(comps, 'ReceiptThumb');
@@ -182,11 +185,18 @@ export function ReviewCard({ card, busy, onDecide }: Props) {
         </div>
       )}
 
+      {isScan && (
+        <label class="toggle">
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked((e.currentTarget as HTMLInputElement).checked)} />
+          <span>欠け・折れ・裏面を確認した</span>
+        </label>
+      )}
+
       {bar && (
         <div class="bottom decision">
           {missing.length > 0 && bar.actions.includes('approve') && <p class="sub">未入力: {missing.map((f) => FIELD_LABELS[f]).join('・')}</p>}
           {bar.actions.includes('approve') && (
-            <button type="button" class="btn btn-primary btn-big" disabled={busy || !canApprove(draft)} onClick={() => onDecide('approve', draft)}>
+            <button type="button" class="btn btn-primary btn-big" disabled={busy || !canApprove(draft)} onClick={() => onDecide('approve', draft, isScan ? checked : undefined)}>
               {ACTION_LABELS.approve}
             </button>
           )}

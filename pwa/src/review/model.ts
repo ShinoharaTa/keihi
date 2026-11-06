@@ -1,6 +1,7 @@
 // 確認画面の状態（docs/mvp-plan.md T2-10、a2ui-review-ui.md §3.7、U8）。純関数。
 // - 下書き（Draft）はカードの dataModel.values から始める。確定のときはカードの値から変えた項目だけを送る
 //   （変えていなければ values は空 = 差分なしの 1 タップ確定）。
+// - スキャン（dataModel.integrity_checked がある）は、同等確認のチェックを approve のときだけ integrity_checked で送る（T004）。
 // - 確定ボタンは R10 の必須（日付・金額・取引先・科目・税・支払手段）がそろったときだけ押せる。
 import type { TaxCategory, TaxRow } from './catalog.ts';
 
@@ -29,6 +30,7 @@ export type DataModel = {
   sources: Partial<Record<FieldName, string | null>>;
   accounts: { id: string; name: string; private: boolean }[];
   warnings: string[];
+  integrity_checked?: boolean; // scan のときだけある
 };
 
 export type CardResponse = { card_id: string; surface: unknown; dataModel: DataModel };
@@ -75,9 +77,14 @@ export function changedValues(card: Values, draft: Values): Partial<Values> {
   return out;
 }
 
-export function requestBody(cardId: string, dm: DataModel, draft: Values): { card_id: string; expected_version: number; values?: Partial<Values> } {
+export type RequestBody = { card_id: string; expected_version: number; values?: Partial<Values>; integrity_checked?: boolean };
+
+// integrityChecked は approve のときだけ渡す（scan のカードでなければ送らない）。
+export function requestBody(cardId: string, dm: DataModel, draft: Values, integrityChecked?: boolean): RequestBody {
   const values = changedValues(dm.values, draft);
-  return Object.keys(values).length ? { card_id: cardId, expected_version: dm.version, values } : { card_id: cardId, expected_version: dm.version };
+  const body: RequestBody = Object.keys(values).length ? { card_id: cardId, expected_version: dm.version, values } : { card_id: cardId, expected_version: dm.version };
+  if (integrityChecked !== undefined && dm.integrity_checked !== undefined) body.integrity_checked = integrityChecked;
+  return body;
 }
 
 // 科目チップ（第 1〜3 候補）を選ぶ: 科目と税率の区分をその候補にする。

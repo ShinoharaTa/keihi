@@ -62,6 +62,13 @@ describe('確定の本文（U8）', () => {
     assert.deepEqual(changedValues(v, d), { account_id: '2', tax_id: 'taxable_8_reduced' });
     assert.deepEqual(requestBody('C', dm(v), d).values, { account_id: '2', tax_id: 'taxable_8_reduced' });
   });
+  test('スキャンのカードだけ integrity_checked を送る（T004）', () => {
+    const v = values();
+    const scan = { ...dm(v), integrity_checked: false };
+    assert.deepEqual(requestBody('C', scan, v, true), { card_id: 'C', expected_version: 2, integrity_checked: true });
+    assert.deepEqual(requestBody('C', scan, v, false), { card_id: 'C', expected_version: 2, integrity_checked: false });
+    assert.deepEqual(requestBody('C', dm(v), v, true), { card_id: 'C', expected_version: 2 });
+  });
   test('確定ボタンは R10 の必須がそろったときだけ押せる', () => {
     assert.equal(canApprove(values()), true);
     assert.equal(canApprove(values({ payment: null })), false);
