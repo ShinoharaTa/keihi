@@ -8,6 +8,7 @@
   --accent-fg: #fff;
   --danger: #b3261e;
   --warn-bg: #fff4d6;
+  --ok: #1e7a3a;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -20,6 +21,7 @@
     --accent-fg: #000;
     --danger: #ff8a80;
     --warn-bg: #3a3000;
+    --ok: #7bd88f;
   }
 }
 * {
@@ -140,7 +142,8 @@ button:disabled {
   color: var(--accent-fg);
   border-color: var(--accent);
 }
-.date {
+.date,
+.field {
   min-height: 48px;
   font: inherit;
   padding: 8px;
@@ -173,7 +176,7 @@ button:disabled {
   right: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
   padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
   background: var(--bg);
@@ -365,4 +368,284 @@ button:disabled {
 }
 .item-warn {
   border-color: var(--danger);
+}
+/* 下のタブは 5 つ（T111）。小さい画面でも 1 行に収まるよう字を詰める。 */
+.tabs button {
+  position: relative;
+  font-size: 14px;
+  padding: 6px 2px;
+  min-width: 0;
+}
+.tab-pill {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: var(--bg);
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* 「お金」タブ（T111・T304）。表は列幅を固定の割合にして、縦向きのスマホで横にはみ出さない。 */
+.seg-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+.seg-5 {
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+.seg-4 button,
+.seg-5 button {
+  padding: 8px 2px;
+  min-width: 0;
+  font-size: 14px;
+}
+.field {
+  width: 100%;
+  min-width: 0;
+}
+.filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+.filters .field {
+  font-size: 16px;
+  padding: 8px 4px;
+}
+.search {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+.h {
+  margin: 8px 0 0;
+  font-size: 17px;
+}
+.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.num-l {
+  font-variant-numeric: tabular-nums;
+}
+.in {
+  color: var(--ok);
+}
+.out {
+  color: var(--danger);
+}
+.txn .item-name {
+  min-width: 0;
+}
+.txn-date {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.txn-excluded {
+  opacity: 0.55;
+}
+.chips-sm {
+  gap: 6px;
+  align-items: center;
+}
+.badge-business {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.badge-private {
+  color: var(--muted);
+}
+.sheet-title {
+  margin: 0;
+  font-weight: 700;
+  word-break: break-all;
+}
+.months {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.month {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+}
+.month-on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.month-name {
+  font-weight: 700;
+}
+.month-net {
+  font-weight: 700;
+  border-top: 1px solid var(--line);
+}
+.tbl {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.tbl caption {
+  text-align: left;
+  font-weight: 700;
+  padding: 4px 0;
+}
+.tbl th,
+.tbl td {
+  padding: 6px 3px;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.tbl td.num {
+  overflow-wrap: normal;
+}
+.tbl th[scope='row'] {
+  width: 28%;
+  text-align: left;
+  font-weight: normal;
+}
+.tbl thead th {
+  color: var(--muted);
+  font-weight: normal;
+  text-align: right;
+}
+.tbl-divider th {
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  padding-top: 10px;
+}
+.cf {
+  display: flex;
+  flex-direction: column;
+  font-size: 15px;
+}
+.cf-row {
+  display: grid;
+  grid-template-columns: 5em 1fr 1fr;
+  gap: 2px 8px;
+  align-items: baseline;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.cf-head {
+  color: var(--muted);
+  font-size: 13px;
+}
+.cf-btn {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  min-height: 48px;
+}
+.cf-short {
+  background: var(--warn-bg);
+}
+.cf-sub {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: normal;
+}
+.cf-items {
+  list-style: none;
+  margin: 0;
+  padding: 6px 4px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+.cf-items li {
+  display: flex;
+  gap: 8px;
+}
+/* 下から出るシートの暗幕。押すと閉じる。 */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  background: rgb(0 0 0 / 0.4);
+}
+.link {
+  font: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 6px 0;
+  min-height: 32px;
+  text-align: left;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+.verdict {
+  margin: 0;
+  font: inherit;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+button.verdict {
+  color: var(--danger);
+  min-height: 48px;
+}
+.verdict-sub {
+  font-size: 15px;
+  font-weight: normal;
+}
+.setup {
+  border-color: var(--accent);
+}
+.setup .item-name {
+  font-weight: 700;
+}
+.setup-step {
+  justify-content: space-between;
+  text-align: left;
+  gap: 8px;
+}
+.setup-step .item-name {
+  font-weight: normal;
+}
+.undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.undo span {
+  flex: 1;
+}
+.undo .btn {
+  width: auto;
 }
