@@ -62,3 +62,10 @@ paid_tier_confirmed = false
 # years = 7                     # 法定の期間（一律）
 # extra_years = 1               # 余裕
 # start = "next_year_0316"      # 起算日。受領日の年分の翌年 3/16（確定申告期限の翌日）
+
+[bank]
+# 明細の取り込み（docs/mvp-plan-v3.md P1）
+# backfill_from = "2025-01-01"  # 過去の明細を取り始める日（V8。周期の検出に 2 年分）
+# dedup_date_window_days = 0    # API と CSV の重複を照合する日付の幅（0 = 同じ日だけ）
+# transfer_window_days = 3      # 口座間振替とみなす入出金の日付差の上限
+# match_date_window_days = 3    # 領収書の日付から明細の日付までの幅（照合）

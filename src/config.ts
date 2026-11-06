@@ -39,6 +39,11 @@ export const DEFAULT_MAX_LIST_PAGES = 20;
 export const DEFAULT_RETENTION_YEARS = 7;
 export const DEFAULT_RETENTION_EXTRA_YEARS = 1;
 export const DEFAULT_RETENTION_START: RetentionStart = 'next_year_0316';
+// [bank]（docs/mvp-plan-v3.md T104・T106・T107・T206）。backfill_from は V8 の初期案（周期の検出に 2 年分）。
+export const DEFAULT_BACKFILL_FROM = '2025-01-01';
+export const DEFAULT_DEDUP_DATE_WINDOW_DAYS = 0;
+export const DEFAULT_TRANSFER_WINDOW_DAYS = 3;
+export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -95,6 +100,10 @@ export type Config = {
   worker: { lingerMs: number; reauthWaitDays: number };
   // 日次照合（src/worker/handlers/reconcile.ts → src/deals/reconcile.ts）。
   reconcile: { verifiedLookbackDays: number; maxListPages: number };
+  // 明細（R-A）。backfillFrom: 過去の明細を取り始める日（YYYY-MM-DD）。
+  // dedupDateWindowDays: API と CSV の重複を照合する日付の幅。transferWindowDays: 振替の入出金の日付差の上限。
+  // matchDateWindowDays: 領収書の日付から明細の日付までの幅。
+  bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number };
   secrets: Secrets;
 };
 
@@ -138,6 +147,7 @@ const KNOWN: Record<string, string[]> = {
   retention: ['years', 'extra_years', 'start'],
   worker: ['linger_ms', 'reauth_wait_days'],
   reconcile: ['verified_lookback_days', 'max_list_pages'],
+  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days'],
 };
 
 function readConfigToml(file: string): Table {
@@ -216,6 +226,17 @@ function optStringArray(t: Table, sec: string, key: string): string[] | null {
 function optPort(t: Table, sec: string, key: string): number | null {
   const v = optPositiveInt(t, sec, key);
   if (v !== null && v > 65535) throw new ConfigError(`config.toml の ${sec}.${key} は 1〜65535 で指定する`);
+  return v;
+}
+
+// YYYY-MM-DD で、暦にある日付。
+function optDate(t: Table, sec: string, key: string): string | null {
+  const v = section(t, sec)[key];
+  if (v === undefined) return null;
+  const msg = `config.toml の ${sec}.${key} は "YYYY-MM-DD" の文字列で指定する`;
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new ConfigError(msg);
+  const d = new Date(`${v}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) throw new ConfigError(msg);
   return v;
 }
 
@@ -308,6 +329,12 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     reconcile: {
       verifiedLookbackDays: optPositiveInt(t, 'reconcile', 'verified_lookback_days') ?? DEFAULT_VERIFIED_LOOKBACK_DAYS,
       maxListPages: optPositiveInt(t, 'reconcile', 'max_list_pages') ?? DEFAULT_MAX_LIST_PAGES,
+    },
+    bank: {
+      backfillFrom: optDate(t, 'bank', 'backfill_from') ?? DEFAULT_BACKFILL_FROM,
+      dedupDateWindowDays: optNonNegativeInt(t, 'bank', 'dedup_date_window_days') ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
+      transferWindowDays: optNonNegativeInt(t, 'bank', 'transfer_window_days') ?? DEFAULT_TRANSFER_WINDOW_DAYS,
+      matchDateWindowDays: optNonNegativeInt(t, 'bank', 'match_date_window_days') ?? DEFAULT_MATCH_DATE_WINDOW_DAYS,
     },
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
