@@ -81,6 +81,8 @@ describe('口座の API', () => {
     assert.equal(JSON.parse(audit.payload_json).user, USER);
     assert.equal((await req('/api/accounts', { method: 'POST', body: { name: '', kind: 'paypay' } })).status, 400);
     assert.equal((await req('/api/accounts', { method: 'POST', body: { name: 'x', kind: 'stock' } })).status, 400);
+    assert.equal((await req('/api/accounts', { method: 'POST', body: { name: 'x'.repeat(201), kind: 'paypay' } })).status, 400);
+    assert.equal((await req('/api/accounts', { method: 'POST', body: { name: 'x'.repeat(200), kind: 'paypay' } })).status, 201);
     assert.equal((await req('/api/accounts', { method: 'POST', body: [] })).status, 400);
   });
 
@@ -112,8 +114,15 @@ describe('口座の API', () => {
     }
     assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_account_id: card } })).status, 400);
     assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_account_id: 'NOPE' } })).status, 400);
+    // 引き落とし口座は bank だけ。
+    const paypay = ((await (await req('/api/accounts', { method: 'POST', body: { name: 'PayPay', kind: 'paypay' } })).json()) as { id: string }).id;
+    assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_account_id: paypay } })).status, 400);
+    // パターンは 1〜200 文字。
+    assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_pattern: '' } })).status, 400);
+    assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_pattern: 'x'.repeat(201) } })).status, 400);
+    assert.equal((await req(`/api/accounts/${card}`, { method: 'PATCH', body: { card_settlement_pattern: 'x'.repeat(200) } })).status, 200);
     assert.equal((await req('/api/accounts/NOPE', { method: 'PATCH', body: { active: false } })).status, 404);
-    assert.equal((db.prepare(`SELECT count(*) n FROM audit_log WHERE action = 'money_account.updated'`).get() as { n: number }).n, 0);
+    assert.equal((db.prepare(`SELECT count(*) n FROM audit_log WHERE action = 'money_account.updated'`).get() as { n: number }).n, 1); // 200 文字のパターンだけ
   });
 
   test('allowed_users 以外は拒否', async () => {

@@ -243,9 +243,16 @@ export function addBankTxnSource(
   if (r.changes === 0) throw new Error(`bank_txns に ${s.bankTxnId} が無い`);
 }
 
-// 口座の明細の最新の日付（明細が無ければ null）。
-export function latestTxnDate(db: Db, accountId: string): string | null {
-  return (db.prepare('SELECT max(txn_date) d FROM bank_txns WHERE account_id = ?').get(accountId) as { d: string | null }).d;
+// 口座の、取得元 source（既定 freee）を持つ明細の最新の日付（無ければ null）。
+export function latestTxnDate(db: Db, accountId: string, source: TxnSource = 'freee'): string | null {
+  return (
+    db
+      .prepare(
+        `SELECT max(t.txn_date) d FROM bank_txns t JOIN bank_txn_sources s ON s.bank_txn_id = t.id
+         WHERE t.account_id = ? AND s.source = ?`,
+      )
+      .get(accountId, source) as { d: string | null }
+  ).d;
 }
 
 export function listBankTxnSources(db: Db, bankTxnId: string): BankTxnSourceRow[] {

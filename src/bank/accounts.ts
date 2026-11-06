@@ -25,22 +25,31 @@ import {
 const KIND_OF: Record<WalletableType, AccountKind> = { bank_account: 'bank', credit_card: 'card', wallet: 'wallet' };
 const MCP_VISIBILITIES = ['full', 'summary', 'none'] as const;
 
-export function walletableKind(type: WalletableType): AccountKind {
-  const k = KIND_OF[type];
-  if (!k) throw new Error(`知らない walletable の種類: ${String(type)}`);
-  return k;
+export const NAME_MAX = 200;
+export const PATTERN_MAX = 200;
+
+// 知らない種類は null（その walletable は口座にしない）。
+export function walletableKind(type: string): AccountKind | null {
+  return Object.hasOwn(KIND_OF, type) ? KIND_OF[type as WalletableType] : null;
 }
 
 // walletable（remote_id は src/masters/sync.ts の walletableRemoteId = `type:id`）ごとに口座を upsert する。
+// 知らない種類の walletable は飛ばす（マスタ同期全体は止めない）。
 export function upsertWalletableAccounts(
   db: Db,
   provider: AccountProvider,
   walletables: { remoteId: string; type: WalletableType; name: string }[],
   now: string,
 ): MoneyAccountRow[] {
-  return tx(db, () =>
-    walletables.map((w) => upsertFreeeAccount(db, { provider, freeeWalletableId: w.remoteId, name: w.name, kind: walletableKind(w.type), now })),
-  );
+  return tx(db, () => {
+    const out: MoneyAccountRow[] = [];
+    for (const w of walletables) {
+      const kind = walletableKind(w.type);
+      if (kind === null) continue;
+      out.push(upsertFreeeAccount(db, { provider, freeeWalletableId: w.remoteId, name: w.name, kind, now }));
+    }
+    return out;
+  });
 }
 
 export class AccountError extends Error {
@@ -61,7 +70,7 @@ export function createCsvAccount(
   by: { user: string | null },
   now: Date,
 ): MoneyAccountRow {
-  if (typeof input.name !== 'string' || input.name.trim() === '') throw new AccountError(400, 'invalid_name');
+  if (typeof input.name !== 'string' || input.name.trim() === '' || input.name.trim().length > NAME_MAX) throw new AccountError(400, 'invalid_name');
   if (!(ACCOUNT_KINDS as readonly unknown[]).includes(input.kind)) throw new AccountError(400, 'invalid_kind');
   const name = input.name.trim();
   const kind = input.kind as AccountKind;
@@ -107,9 +116,12 @@ export function parseAccountPatch(body: Record<string, unknown>): AccountSetting
         out[key] = v;
         break;
       case 'cardSettlementAccountId':
-      case 'cardSettlementPattern':
         if (v !== null && typeof v !== 'string') throw bad();
-        out[key] = v as string | null;
+        out.cardSettlementAccountId = v as string | null;
+        break;
+      case 'cardSettlementPattern':
+        if (v !== null && (typeof v !== 'string' || v.length < 1 || v.length > PATTERN_MAX)) throw bad();
+        out.cardSettlementPattern = v as string | null;
         break;
     }
   }
@@ -132,7 +144,8 @@ export function updateAccount(db: Db, id: string, patch: AccountSettings, by: { 
     const cur = getAccount(db, id);
     if (!cur) throw new AccountError(404, 'not_found');
     const sid = patch.cardSettlementAccountId;
-    if (sid !== undefined && sid !== null && (sid === id || !getAccount(db, sid))) throw new AccountError(400, 'invalid_card_settlement_account_id');
+    // 引き落とし口座は銀行の口座だけ（自分自身は kind が bank でも不可）。
+    if (sid !== undefined && sid !== null && (sid === id || getAccount(db, sid)?.kind !== 'bank')) throw new AccountError(400, 'invalid_card_settlement_account_id');
     const next = updateAccountSettings(db, id, patch, now.toISOString())!;
     const changes: Record<string, { from: unknown; to: unknown }> = {};
     for (const k of Object.keys(patch) as (keyof AccountSettings)[]) {

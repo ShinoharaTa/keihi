@@ -2,7 +2,7 @@
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyAudit } from '../../src/audit.ts';
-import { getAccountByWalletable, getSyncStatus, listAccounts, updateAccountSettings } from '../../src/bank/repo.ts';
+import { addBankTxnSource, getAccountByWalletable, getSyncStatus, insertBankTxn, latestTxnDate, listAccounts, updateAccountSettings } from '../../src/bank/repo.ts';
 import { enqueueSyncBank, MANUAL_SYNC_INTERVAL_MS, planRanges, syncBank } from '../../src/bank/sync.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -12,7 +12,7 @@ import { syncMasters } from '../../src/masters/sync.ts';
 import { createFakeProvider, DEFAULT_MASTERS, type FakeProvider } from '../../src/providers/fake/index.ts';
 import { budgetDay, createBudget, withBudget, type BudgetLimits, DEFAULT_LIMITS } from '../../src/providers/freee/budget.ts';
 import { setReauthRequired } from '../../src/providers/freee/state.ts';
-import type { Masters } from '../../src/providers/types.ts';
+import type { BankTxn, ListBankTxnsQuery, Masters } from '../../src/providers/types.ts';
 import { createSyncBankHandler } from '../../src/worker/handlers/syncBank.ts';
 
 const T0 = new Date('2026-11-06T03:00:00.000Z'); // JST 2026-11-06
@@ -63,6 +63,16 @@ describe('口座（money_accounts）', () => {
     assert.equal(listAccounts(db).length, 2);
     const bank = getAccountByWalletable(db, 'fake', 'bank_account:2')!;
     assert.deepEqual([bank.name, bank.default_tag], ['テスト銀行（新）', 'business']);
+  });
+
+  test('知らない種類の walletable は飛ばし、マスタ同期は止めない', async () => {
+    const d = openDb(':memory:');
+    migrate(d);
+    const m = structuredClone(MASTERS);
+    m.walletables.push({ id: 9, type: 'stock' as 'wallet', name: '知らない口座' });
+    await syncMasters(d, createFakeProvider({ masters: m }), { providerName: 'freee', accountProvider: 'fake', now: () => T0 });
+    assert.deepEqual(listAccounts(d).map((a) => a.freee_walletable_id), ['credit_card:1', 'bank_account:2']);
+    d.close();
   });
 
   test('accountProvider を渡さなければ口座を作らない', async () => {
@@ -196,6 +206,96 @@ describe('syncBank', () => {
     assert.equal(count('SELECT count(*) n FROM bank_txns'), 250);
     const st2 = getSyncStatus(db, bankId())!;
     assert.deepEqual([st2.last_error, st2.last_ok_at, st2.backfill_done_until], [null, t1.toISOString(), '2026-08-07']);
+  });
+
+  test('取り込めない行（amount 0・date 空・id 無し）はその行だけ飛ばして数え、ほかの行は入る', async () => {
+    const base = { walletableType: 'bank_account', walletableId: 2, entrySide: 'expense', description: 'x', balance: null, status: 1, dueAmount: 0, ruleMatched: false } as const;
+    const rows: BankTxn[] = [
+      { ...base, id: 1, date: '2026-10-01', amount: 100 },
+      { ...base, id: 2, date: '2026-10-01', amount: 0 },
+      { ...base, id: 3, date: '', amount: 300 },
+      { ...base, id: 0, date: '2026-10-01', amount: 400 },
+      { ...base, id: 5, date: '2026-10-02', amount: 1.5 },
+      { ...base, id: 6, date: '2026-10-03', amount: 600 },
+    ];
+    const provider = { listWalletables: async () => [], listBankTxns: async (q: ListBankTxnsQuery = {}) => (q.walletableId === 2 && q.offset === 0 ? rows : []) };
+    const r = await sync(T0, provider);
+    const bank = r.accounts.find((a) => a.account_id === bankId())!;
+    assert.deepEqual([bank.inserted, bank.skipped], [2, 4]);
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 2);
+    const st = getSyncStatus(db, bankId())!;
+    assert.equal(st.last_error, 'skipped 4 rows');
+    assert.equal(st.last_ok_at, T0.toISOString());
+    assert.equal(st.backfill_done_until, '2026-08-06');
+    assert.deepEqual(r.errors, []);
+  });
+
+  test('latestTxnDate は freee の取得元の明細だけを見る（CSV の明細は無視）', async () => {
+    addBankTxns(1, '2026-10-01');
+    await sync();
+    const csv = insertBankTxn(db, { accountId: bankId(), txnDate: '2026-11-05', amount: 10, side: 'expense', description: 'c', descriptionNorm: 'c', now: T0.toISOString() });
+    addBankTxnSource(db, { bankTxnId: csv.id, source: 'csv', externalId: 'c1' });
+    assert.equal(latestTxnDate(db, bankId()), '2026-10-01');
+    assert.equal(latestTxnDate(db, bankId(), 'csv'), '2026-11-05');
+    fake.calls.length = 0;
+    await sync(new Date(T0.getTime() + 60_000));
+    const first = fake.calls.find((c) => c.method === 'listBankTxns' && (c.args[0] as { walletableId: number }).walletableId === 2)!;
+    assert.equal((first.args[0] as { startDate: string }).startDate, '2026-08-27'); // 2026-10-01 − 35 日
+  });
+
+  test('使用制限（403 usage_limited）は口座の失敗にせず止め、次回続きから取る', async () => {
+    addBankTxns(3);
+    fake.failNext('usage_limited'); // 先頭のカードの 1 回目
+    const r = await sync();
+    assert.match(r.stopped ?? '', /^usage_limited/);
+    assert.deepEqual(r.errors, []);
+    assert.deepEqual(r.accounts.length, 1);
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 0);
+    assert.match(getSyncStatus(db, getAccountByWalletable(db, 'fake', 'credit_card:1')!.id)!.last_error ?? '', /^usage_limited/);
+    const r2 = await sync(new Date(T0.getTime() + 11 * 60_000));
+    assert.equal(r2.stopped, null);
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 3);
+    assert.equal(getSyncStatus(db, getAccountByWalletable(db, 'fake', 'credit_card:1')!.id)!.last_error, null);
+  });
+
+  test('ページの上限で打ち切り、backfill_done_until を進めず last_error に書く', async () => {
+    addBankTxns(250);
+    const r = await syncBank(db, { provider: fake, providerKind: 'fake', backfillFrom: BACKFILL_FROM, now: T0, maxPages: 2 });
+    const bank = r.accounts.find((a) => a.account_id === bankId())!;
+    assert.deepEqual(bank.truncated, [{ start: '2026-08-06', end: '2026-11-06' }]);
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 200);
+    const st = getSyncStatus(db, bankId())!;
+    assert.equal(st.backfill_done_until, null);
+    assert.match(st.last_error ?? '', /^truncated 2026-08-06\.\.2026-11-06/);
+  });
+
+  test('offset が効かず前のページと先頭が同じなら打ち切る', async () => {
+    addBankTxns(100);
+    const page = (await fake.listBankTxns({ walletableId: 2 })).map((t) => ({ ...t }));
+    let calls = 0;
+    const provider = { listWalletables: async () => [], listBankTxns: async (q: ListBankTxnsQuery = {}) => (q.walletableId === 2 ? (calls++, page) : []) };
+    const r = await sync(T0, provider);
+    assert.equal(calls, 2);
+    assert.deepEqual(r.accounts.find((a) => a.account_id === bankId())!.truncated.length, 1);
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 100);
+  });
+
+  test('摘要の文字列は audit_log・sync_status のどこにも出ない', async () => {
+    const SECRET = 'ヒミツ摘要QZX';
+    fake.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-10-01', amount: 100, entrySide: 'expense', description: SECRET, balance: null, status: 1, dueAmount: 100, ruleMatched: false });
+    const bad = { walletableType: 'bank_account', walletableId: 2, entrySide: 'expense', description: SECRET, balance: null, status: 1, dueAmount: 0, ruleMatched: false } as const;
+    const withBad = {
+      listWalletables: () => fake.listWalletables(),
+      listBankTxns: async (q: ListBankTxnsQuery = {}) => [...(await fake.listBankTxns(q)), ...(q.walletableId === 2 && q.offset === 0 ? [{ ...bad, id: 99, date: '', amount: 0 }] : [])],
+    };
+    await sync(T0, withBad);
+    fake.state.bankTxns.get(1)!.status = 2;
+    await sync(new Date(T0.getTime() + 60_000), withBad);
+    assert.equal(count(`SELECT count(*) n FROM audit_log WHERE action = 'bank_txn.status_changed'`), 1);
+    assert.match(getSyncStatus(db, bankId())!.last_error ?? '', /^skipped \d+ rows$/); // 2 回目は 2 区間とも先頭に壊れた行
+    const hits = (sql: string) => (db.prepare(sql).all() as Record<string, unknown>[]).filter((r) => JSON.stringify(r).includes('QZX') || JSON.stringify(r).includes('ヒミツ'));
+    assert.deepEqual(hits('SELECT * FROM audit_log'), []);
+    assert.deepEqual(hits('SELECT * FROM sync_status'), []);
   });
 
   test('残高は明細の後に account_balances に追記する（カード・残高無しは追記しない）', async () => {

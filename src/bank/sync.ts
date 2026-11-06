@@ -8,7 +8,12 @@
 //   freee_status は既知の値（1 / 2 / 3 / 4 / 6）だけを入れ、それ以外（5 など）は NULL にする（0005_bank.sql の CHECK）。
 // - 残高: 明細の後に listWalletables の last_balance を account_balances（source = freee_walletable、as_of_date = 今日）に追記する。
 //   カード・残高が無い口座は追記しない。予算で止まった実行では取らない。
-// - 予算（用途 sync）が足りなくなったら（BudgetExceededError。残り 500 未満など）そこで止め、その口座の sync_status.last_error に理由を書く。
+// - 行ごとに確かめ、id が無い・date が YYYY-MM-DD でない・amount が正の整数でない行はその行だけ飛ばして数える（摘要は記録しない）。
+//   飛ばした件数は結果（skipped）と sync_status.last_error（`skipped N rows`）に出す。
+// - 1 口座 1 区間あたり最大 maxPages ページ（既定 MAX_PAGES_PER_RANGE = 50 = 5,000 件）。前のページと先頭の id が同じなら
+//   offset が効いていないとみて打ち切る。打ち切った区間があれば backfill_done_until を進めず、last_error に書く。
+// - 予算（用途 sync）が足りなくなったら（BudgetExceededError。残り 500 未満など）、または使用制限（403 の usage_limited。10 分停止）を
+//   受けたらそこで止め、その口座の sync_status.last_error に理由を書く（ジョブは完了）。
 //   取れた分は保存済みで、backfill_done_until は区間を取り終えたときだけ進めるので、次回は続きから取る。
 // - 再認可が要る（auth_invalid_grant）は口座の last_error に書いて投げ直す（ハンドラが延期する）。ほかの失敗は口座の last_error に書いて次の口座に進む。
 import { appendAudit } from '../audit.ts';
@@ -36,6 +41,7 @@ import {
 export const LOOKBACK_DAYS = 35;
 export const BACKFILL_MONTHS = 3;
 export const PAGE = 100;
+export const MAX_PAGES_PER_RANGE = 50;
 // POST /api/bank/sync（今すぐ同期）で、前回積んでからこの間は積まない。
 export const MANUAL_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -49,6 +55,8 @@ export type SyncBankOptions = {
   providerKind: AccountProvider;
   backfillFrom: string;
   now: Date;
+  // 1 口座 1 区間あたりの最大ページ数（既定 MAX_PAGES_PER_RANGE）。
+  maxPages?: number;
 };
 
 export type DateRange = { start: string; end: string };
@@ -60,6 +68,10 @@ export type AccountSyncResult = {
   inserted: number;
   updated: number;
   status_changed: number;
+  // 検証で飛ばした行の数。
+  skipped: number;
+  // ページの上限・offset の不発で打ち切った区間。
+  truncated: DateRange[];
   backfill_done_until: string | null;
   error: string | null;
 };
@@ -67,7 +79,7 @@ export type AccountSyncResult = {
 export type SyncBankResult = {
   accounts: AccountSyncResult[];
   balances: number;
-  // 予算が足りなくて止めたときの理由（BudgetExceededError のメッセージ）。
+  // 予算・使用制限で止めたときの理由。
   stopped: string | null;
   errors: { account_id: string | null; error: string }[];
 };
@@ -101,6 +113,14 @@ export function parseWalletableId(remoteId: string): { type: WalletableType; id:
   const id = Number(remoteId.slice(i + 1));
   if (i <= 0 || !WALLETABLE_TYPES.has(type) || !Number.isInteger(id)) throw new Error(`freee_walletable_id が不正: ${remoteId}`);
   return { type: type as WalletableType, id };
+}
+
+// 予算切れ・使用制限（403）は止めて次回に回す（失敗として再試行しない）。
+const isStop = (e: unknown) => e instanceof BudgetExceededError || (e instanceof ProviderError && e.kind === 'usage_limited');
+
+// 取り込める行か（摘要は見ない）。
+function validTxn(t: BankTxn): boolean {
+  return Number.isInteger(t.id) && t.id > 0 && typeof t.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.date) && Number.isInteger(t.amount) && t.amount > 0;
 }
 
 function message(e: unknown): string {
@@ -166,20 +186,44 @@ async function syncAccount(db: Db, a: MoneyAccountRow, o: SyncBankOptions, r: Ac
   const st = getSyncStatus(db, a.id);
   const plan = planRanges({ backfillDoneUntil: st?.backfill_done_until ?? null, latestTxnDate: latestTxnDate(db, a.id) }, todayInTokyo(o.now), o.backfillFrom);
   r.ranges = plan.ranges;
+  const maxPages = o.maxPages ?? MAX_PAGES_PER_RANGE;
   for (const range of plan.ranges) {
-    for (let offset = 0; ; offset += PAGE) {
-      const page = await o.provider.listBankTxns({ walletableType: w.type, walletableId: w.id, startDate: range.start, endDate: range.end, limit: PAGE, offset });
+    let prevFirst: number | null = null;
+    for (let n = 0; ; n++) {
+      if (n >= maxPages) {
+        r.truncated.push(range);
+        break;
+      }
+      const page = await o.provider.listBankTxns({ walletableType: w.type, walletableId: w.id, startDate: range.start, endDate: range.end, limit: PAGE, offset: n * PAGE });
+      if (page.length > 0 && prevFirst !== null && page[0].id === prevFirst) {
+        r.truncated.push(range);
+        break;
+      }
+      prevFirst = page[0]?.id ?? null;
       r.fetched += page.length;
       tx(db, () => {
-        for (const t of page) upsertTxn(db, a, t, o.now, r);
+        for (const t of page) {
+          if (validTxn(t)) upsertTxn(db, a, t, o.now, r);
+          else r.skipped++;
+        }
       });
       if (page.length < PAGE) break;
     }
   }
-  r.backfill_done_until = plan.backfillDoneUntil;
+  // 打ち切った区間があれば過去分を取り終えていないので進めない。
+  r.backfill_done_until = r.truncated.length ? (st?.backfill_done_until ?? null) : plan.backfillDoneUntil;
+}
+
+// 成功した口座の last_error（飛ばした行・打ち切った区間。無ければ null）。
+function notes(r: AccountSyncResult, maxPages: number): string | null {
+  const out: string[] = [];
+  if (r.skipped) out.push(`skipped ${r.skipped} rows`);
+  for (const x of r.truncated) out.push(`truncated ${x.start}..${x.end}（${maxPages} ページの上限か offset が効かない）`);
+  return out.length ? out.join('; ') : null;
 }
 
 // 残高を追記する。追記した件数。
+// TODO(T303): 連携断で古い残高が今日付で入る。鮮度は sync_status.last_ok_at で判定する
 async function syncBalances(db: Db, o: SyncBankOptions): Promise<number> {
   const ws = await o.provider.listWalletables();
   const today = todayInTokyo(o.now);
@@ -201,16 +245,27 @@ export async function syncBank(db: Db, o: SyncBankOptions): Promise<SyncBankResu
   const res: SyncBankResult = { accounts: [], balances: 0, stopped: null, errors: [] };
   const iso = o.now.toISOString();
   for (const a of targetAccounts(db, o.providerKind)) {
-    const r: AccountSyncResult = { account_id: a.id, ranges: [], fetched: 0, inserted: 0, updated: 0, status_changed: 0, backfill_done_until: null, error: null };
+    const r: AccountSyncResult = {
+      account_id: a.id,
+      ranges: [],
+      fetched: 0,
+      inserted: 0,
+      updated: 0,
+      status_changed: 0,
+      skipped: 0,
+      truncated: [],
+      backfill_done_until: null,
+      error: null,
+    };
     res.accounts.push(r);
     updateSyncStatus(db, a.id, { lastSyncAt: iso });
     try {
       await syncAccount(db, a, o, r);
-      updateSyncStatus(db, a.id, { lastOkAt: iso, lastError: null, backfillDoneUntil: r.backfill_done_until });
+      updateSyncStatus(db, a.id, { lastOkAt: iso, lastError: notes(r, o.maxPages ?? MAX_PAGES_PER_RANGE), backfillDoneUntil: r.backfill_done_until });
     } catch (e) {
-      r.error = message(e).slice(0, 500);
+      r.error = [message(e).slice(0, 500), r.skipped ? `skipped ${r.skipped} rows` : null].filter((x) => x !== null).join('; ');
       updateSyncStatus(db, a.id, { lastError: r.error });
-      if (e instanceof BudgetExceededError) {
+      if (isStop(e)) {
         res.stopped = r.error;
         break;
       }
@@ -222,7 +277,7 @@ export async function syncBank(db: Db, o: SyncBankOptions): Promise<SyncBankResu
   try {
     res.balances = await syncBalances(db, o);
   } catch (e) {
-    if (e instanceof BudgetExceededError) res.stopped = message(e);
+    if (isStop(e)) res.stopped = message(e);
     else if (e instanceof ProviderError && e.kind === 'auth_invalid_grant') throw e;
     else res.errors.push({ account_id: null, error: message(e).slice(0, 500) });
   }
