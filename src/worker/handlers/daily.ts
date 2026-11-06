@@ -1,11 +1,12 @@
 // daily ジョブ（docs/mvp-plan.md §4.4 keihi-daily、T1-10・T2-1・T2-12）。keihi-daily.timer が src/jobs/trigger.ts で 1 日 1 回積む。
 // 1. freee のリフレッシュトークンの更新（残り 30 日を切ったら。refreshIfExpiringSoon）。fake では何もしない。
 //    invalid_grant なら settings.freee_reauth_required = 1（GET /api/status の freee_reauth_required → PWA の再認可の帯）。
-// 2. マスタ同期（src/masters/sync.ts）。
+// 2. マスタ同期（src/masters/sync.ts）。walletable ごとの口座（money_accounts）もここで upsert する（T103）。
 // 1'. 再認可の後（settings.freee_reauth_required が 1 でない）なら、再認可待ちで延期中の upload_receipt を今すぐ動くようにする。
 // 3. 検索項目の期限チェック: 最新の確定が approve で、アップロード済みかつ meta_state = none の証憑のうち、meta_deadline_on を過ぎたものは
 //    needs_attention: meta_deadline_passed、期限の 7 日前からのものは settings.meta_deadline_warnings に載せる（PWA の一覧の警告）。
 // 4. 日次照合: reconcile_deals ジョブを積む（未完了のもの（queued / running）があれば積み増さない）。
+// 4'. 明細の同期: sync_bank ジョブを積む（同じく積み増さない。src/bank/sync.ts、T104）。
 // 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
 // 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
@@ -14,6 +15,8 @@
 //   settings.daily_last_step_<段> に JST の日付を残し、同じ日の再試行（や 2 回目の daily）では飛ばす（report.skipped_steps）。
 import { getSetting, markNeedsAttention, setSetting } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
+import type { AccountProvider } from '../../bank/repo.ts';
+import { enqueueSyncBank } from '../../bank/sync.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import { verifyRemoteReceipts, type RemoteVerifyResult } from '../../backup/verifyRemote.ts';
 import type { RemoteVerifyMode } from '../../config.ts';
@@ -36,6 +39,8 @@ export const DAILY_STEP_KEY_PREFIX = 'daily_last_step_';
 
 export type DailyDeps = {
   provider: () => Provider;
+  // [provider] kind（マスタ同期で作る口座の money_accounts.provider）。省略時は freee。
+  providerKind?: AccountProvider;
   // freee のトークンの更新。null なら飛ばす（fake）。
   refreshToken: (() => Promise<RefreshCheck>) | null;
   // 証憑の照合。省略・null なら飛ばす。provider は downloadReceipt を用途 sync で予算に通したもの。
@@ -51,6 +56,7 @@ export type DailyReport = {
   masters: SyncResult | null;
   meta_deadline: { warn: MetaDeadlineItem[]; passed: MetaDeadlineItem[] } | null;
   reconcile: { job_id: number; created: boolean } | null;
+  sync_bank: { job_id: number; created: boolean } | null;
   paper_status_changed: number | null;
   remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
@@ -110,6 +116,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       masters: null,
       meta_deadline: null,
       reconcile: null,
+      sync_bank: null,
       paper_status_changed: null,
       remote_verify: null,
       needs_attention: 0,
@@ -151,7 +158,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
     });
 
     await step('masters', async () => {
-      report.masters = await syncMasters(db, deps.provider(), { providerName: PROVIDER, now: ctx.now });
+      report.masters = await syncMasters(db, deps.provider(), { providerName: PROVIDER, accountProvider: deps.providerKind ?? 'freee', now: ctx.now });
     });
 
     await step('meta_deadline', () => {
@@ -160,6 +167,10 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
 
     await step('reconcile', () => {
       report.reconcile = enqueueReconcile(db, now);
+    });
+
+    await step('sync_bank', () => {
+      report.sync_bank = enqueueSyncBank(db, now);
     });
 
     await step('paper_status', () => {
@@ -195,6 +206,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             meta_deadline_warn: report.meta_deadline?.warn.length ?? null,
             meta_deadline_passed: report.meta_deadline?.passed.length ?? null,
             reconcile: report.reconcile,
+            sync_bank: report.sync_bank,
             paper_status_changed: report.paper_status_changed,
             remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,

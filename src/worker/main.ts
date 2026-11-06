@@ -19,6 +19,7 @@ import { createDailyHandler } from './handlers/daily.ts';
 import { createExtractHandler } from './handlers/extract.ts';
 import { createReconcileHandler } from './handlers/reconcile.ts';
 import { createSendDealHandler } from './handlers/send.ts';
+import { createSyncBankHandler } from './handlers/syncBank.ts';
 import { createUpdateReceiptMetaHandler } from './handlers/updateReceiptMeta.ts';
 import { createUploadReceiptHandler } from './handlers/uploadReceipt.ts';
 
@@ -99,10 +100,15 @@ export const HANDLERS: Handlers = {
     const rt = runtime();
     return { provider: rt.provider(), verifiedLookbackDays: rt.cfg.reconcile.verifiedLookbackDays, maxListPages: rt.cfg.reconcile.maxListPages };
   }),
+  sync_bank: createSyncBankHandler(() => {
+    const rt = runtime();
+    return { provider: rt.provider(), providerKind: rt.cfg.provider.kind, backfillFrom: rt.cfg.bank.backfillFrom };
+  }),
   daily: createDailyHandler(() => {
     const rt = runtime();
     return {
       provider: rt.provider,
+      providerKind: rt.cfg.provider.kind,
       refreshToken: buildTokenRefresher(rt.cfg, rt.db),
       // 月 1 回の証憑の照合は予算の用途 sync で数える（既定の user ではない）。
       remoteVerify: {

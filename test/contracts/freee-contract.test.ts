@@ -71,6 +71,7 @@ describe('Provider の送るリクエスト', () => {
     await p.listDeals({ refNumber: 'kh-REF' });
     await p.deleteDeal(501);
     await p.syncMasters();
+    const wallets = await p.listWalletables();
     const txns = await p.listBankTxns({ walletableType: 'credit_card', walletableId: 1, startDate: '2026-10-01', endDate: '2026-10-31' });
     await p.listBankTxns({ walletableType: 'bank_account', walletableId: 2, limit: 100, offset: 100 });
     await p.listRules();
@@ -89,6 +90,9 @@ describe('Provider の送るリクエスト', () => {
     assert.deepEqual(new Uint8Array(await (up.get('receipt') as Blob).arrayBuffer()), new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
     assert.equal(up.get('description'), 'kh-01TEST');
     assert.equal(up.has('receipt_metadatum_partner_name'), false);
+    // 口座の残高: with_balance=true を付け、last_balance を読む（無ければ null）。
+    assert.equal(env.mock.reqs.filter((r) => r.url.pathname === '/api/1/walletables').at(-1)!.url.searchParams.get('with_balance'), 'true');
+    assert.deepEqual(wallets.map((w) => [w.type, w.id, w.lastBalance]), [['credit_card', 1, null], ['bank_account', 2, 51000]]);
     // 明細: モックの応答が定義に合い、残高（カードは null）・状態・未消込額・ルールの当たりを読む。
     assert.deepEqual(WALLET_TXNS.flatMap((t, i) => validate(CONTRACT.components.schemas.wallet_txn, t, `wallet_txns[${i}]`)), []);
     assert.deepEqual(

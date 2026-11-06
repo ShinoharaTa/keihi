@@ -140,6 +140,8 @@ export type TaxCode = { code: number; name: string };
 export type WalletableType = 'bank_account' | 'credit_card' | 'wallet';
 export type Walletable = { id: number; type: WalletableType; name: string };
 export type Masters = { accountItems: AccountItem[]; taxCodes: TaxCode[]; walletables: Walletable[] };
+// 口座の残高（freee の walletables?with_balance=true の last_balance）。無ければ null。
+export type WalletableBalance = Walletable & { lastBalance: number | null };
 
 // ---- 明細とルール（M6） ----
 
@@ -211,6 +213,7 @@ export type Provider = {
   deleteDeal(id: number): Promise<void>;
 
   syncMasters(): Promise<Masters>;
+  listWalletables(): Promise<WalletableBalance[]>;
 
   listBankTxns(query?: ListBankTxnsQuery): Promise<BankTxn[]>;
   listRules(): Promise<Rule[]>;

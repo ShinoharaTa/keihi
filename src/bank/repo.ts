@@ -125,7 +125,7 @@ export function getAccountByWalletable(db: Db, provider: AccountProvider, freeeW
 }
 
 export function listAccounts(db: Db): MoneyAccountRow[] {
-  return db.prepare('SELECT * FROM money_accounts ORDER BY created_at, id').all() as MoneyAccountRow[];
+  return db.prepare('SELECT * FROM money_accounts ORDER BY created_at, rowid').all() as MoneyAccountRow[];
 }
 
 export type AccountSettings = {
@@ -205,13 +205,18 @@ export function findBankTxnByExternalId(db: Db, accountId: string, source: TxnSo
 }
 
 // 再取得したときに変わってよい列（freee_status・due_amount・last_seen_at）だけを書く。渡さなかった列はそのまま（null は NULL を書く）。
+// balance は今が NULL のときだけ書く（入っていれば変えない）。
 export function touchBankTxn(
   db: Db,
   id: string,
-  t: { lastSeenAt: string; freeeStatus?: FreeeTxnStatus | null; dueAmount?: number | null },
+  t: { lastSeenAt: string; freeeStatus?: FreeeTxnStatus | null; dueAmount?: number | null; balance?: number | null },
 ): BankTxnRow | null {
   const sets = ['last_seen_at = ?'];
   const args: (string | number | null)[] = [t.lastSeenAt];
+  if (t.balance !== undefined && t.balance !== null) {
+    sets.push('balance = coalesce(balance, ?)');
+    args.push(t.balance);
+  }
   if (t.freeeStatus !== undefined) {
     sets.push('freee_status = ?');
     args.push(t.freeeStatus);
@@ -236,6 +241,18 @@ export function addBankTxnSource(
     )
     .run(s.source, s.externalId, s.csvImportId ?? null, s.rawSha256 ?? null, s.bankTxnId);
   if (r.changes === 0) throw new Error(`bank_txns に ${s.bankTxnId} が無い`);
+}
+
+// 口座の、取得元 source（既定 freee）を持つ明細の最新の日付（無ければ null）。
+export function latestTxnDate(db: Db, accountId: string, source: TxnSource = 'freee'): string | null {
+  return (
+    db
+      .prepare(
+        `SELECT max(t.txn_date) d FROM bank_txns t JOIN bank_txn_sources s ON s.bank_txn_id = t.id
+         WHERE t.account_id = ? AND s.source = ?`,
+      )
+      .get(accountId, source) as { d: string | null }
+  ).d;
 }
 
 export function listBankTxnSources(db: Db, bankTxnId: string): BankTxnSourceRow[] {

@@ -373,7 +373,8 @@ describe('GET /api/cashflow', () => {
   const USER = 'me@example.com';
   const headers = { Host: HOST, 'Tailscale-User-Login': USER };
   type Cf = { unplannedLookbackMonths: number; reserveMonths: number; includeUnplannedIncome: boolean };
-  const mkApp = (db: Db, config?: { cashflow: Cf }) => {
+  const DEFAULT_CF: Cf = { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false };
+  const mkApp = (db: Db, config: { cashflow: Cf } = { cashflow: DEFAULT_CF }) => {
     const app = new Hono();
     app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }));
     // 2026-11-20 09:00 JST
@@ -381,7 +382,7 @@ describe('GET /api/cashflow', () => {
     return app;
   };
 
-  test('既定は 36 か月。months は 1〜60、それ以外は 400', async () => {
+  test('既定（設定も既定値）は 36 か月。months は 1〜60、それ以外は 400', async () => {
     const { db } = setup();
     const app = mkApp(db);
     const res = await app.request('/api/cashflow', { headers });

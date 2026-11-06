@@ -35,7 +35,7 @@ beforeEach(() => {
   migrate(db);
   app = new Hono();
   app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }));
-  app.route('/api', cashflowRoutes({ db, now: () => T0 }));
+  app.route('/api', cashflowRoutes({ db, now: () => T0, config: { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } }));
 });
 
 const headers = { Host: HOST, 'Tailscale-User-Login': USER, 'content-type': 'application/json' };
@@ -116,7 +116,7 @@ describe('POST /api/scheduled_items', () => {
     const full = createApp({
       db,
       objectsDir: path.join(root, 'objects'),
-      config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' }, retention: { years: 7, extraYears: 1, start: 'next_year_0316' } },
+      config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' }, retention: { years: 7, extraYears: 1, start: 'next_year_0316' }, cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } },
       auth: createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }),
       triggerWorker: () => {},
       now: () => T0,
@@ -215,7 +215,7 @@ describe('GET /api/scheduled_items/upcoming', () => {
     await create({ name: '前日', recurrence: 'once', anchor_date: '2026-11-05', category: 'other' });
     const at = async (iso: string) => {
       const a = new Hono();
-      a.route('/api', cashflowRoutes({ db, now: () => new Date(iso) }));
+      a.route('/api', cashflowRoutes({ db, now: () => new Date(iso), config: { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } }));
       return (await (await a.request('/api/scheduled_items/upcoming?days=1', { headers })).json()) as { from: string; to: string; items: { name: string }[] };
     };
     const before = await at('2026-11-05T14:59:59Z');

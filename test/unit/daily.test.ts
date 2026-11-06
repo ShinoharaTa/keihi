@@ -57,7 +57,7 @@ const setting = (key: string) => JSON.parse((db.prepare('SELECT value_json FROM 
 const status = (id: string) => (db.prepare('SELECT status FROM documents WHERE id = ?').get(id) as { status: string }).status;
 // daily が積む reconcile_deals は何もしないハンドラで流す（照合そのものは reconcile.test.ts）。
 const run = (deps: DailyDeps, now: Date = T0) =>
-  runUntilEmpty(db, { daily: createDailyHandler(() => deps), reconcile_deals: async () => {} }, { now: () => now });
+  runUntilEmpty(db, { daily: createDailyHandler(() => deps), reconcile_deals: async () => {}, sync_bank: async () => {} }, { now: () => now });
 const jobsOf = (kind: string) => db.prepare('SELECT id, state FROM jobs WHERE kind = ? ORDER BY id').all(kind) as { id: number; state: string }[];
 
 describe('daily', () => {
@@ -77,7 +77,7 @@ describe('daily', () => {
         return { refreshed: true, refreshTokenExpiresAt: T0.getTime() / 1000 + 90 * 86400 };
       },
     };
-    assert.deepEqual(await run(deps), { done: 2, failed: 0 }); // daily + reconcile_deals
+    assert.deepEqual(await run(deps), { done: 3, failed: 0 }); // daily + reconcile_deals + sync_bank
     assert.equal(getJob(db, job)!.state, 'done');
     assert.equal(refreshed, 1);
     assert.equal(fake.calls.filter((c) => c.method === 'syncMasters').length, 1);
@@ -102,7 +102,7 @@ describe('daily', () => {
 
   test('fake ではトークンの更新を飛ばす', async () => {
     enqueueDaily(db, T0);
-    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null }), { done: 2, failed: 0 });
+    assert.deepEqual(await run({ provider: () => createFakeProvider(), refreshToken: null }), { done: 3, failed: 0 });
     assert.equal(setting(DAILY_REPORT_KEY).token, 'skipped');
   });
 
@@ -116,7 +116,7 @@ describe('daily', () => {
         throw new FreeeAuthError('freee token HTTP 401', { status: 401, error: 'invalid_grant' });
       },
     });
-    assert.deepEqual(s, { done: 1, failed: 1 }); // reconcile_deals は完了、daily は再試行
+    assert.deepEqual(s, { done: 2, failed: 1 }); // reconcile_deals・sync_bank は完了、daily は再試行
     assert.equal(getJob(db, job)!.state, 'queued');
     assert.equal(isReauthRequired(db), true);
     assert.equal(fake.calls.filter((c) => c.method === 'syncMasters').length, 1);
@@ -154,7 +154,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
       },
     };
     const job = enqueueDaily(db, T0).id;
-    assert.deepEqual(await run(deps), { done: 1, failed: 1 });
+    assert.deepEqual(await run(deps), { done: 2, failed: 1 });
     let r = setting(DAILY_REPORT_KEY);
     assert.deepEqual(r.errors.map((e: { step: string }) => e.step), ['masters']);
     assert.deepEqual(r.skipped_steps, []);
@@ -172,7 +172,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     assert.equal(jobsOf('reconcile_deals').length, 1);
     r = setting(DAILY_REPORT_KEY);
     assert.deepEqual(r.errors, []);
-    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'paper_status', 'remote_verify']);
+    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'paper_status', 'remote_verify']);
 
     // 翌日は全部動く。
     const t2 = new Date(T0.getTime() + 86_400_000);
@@ -193,7 +193,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     const up = () => (db.prepare(`SELECT run_after FROM jobs WHERE kind = 'upload_receipt'`).get() as { run_after: string }).run_after;
     setReauthRequired(db, true, T0);
     enqueueDaily(db, T0);
-    await runUntilEmpty(db, { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {} }, { now: () => T0 });
+    await runUntilEmpty(db, { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {}, sync_bank: async () => {} }, { now: () => T0 });
     assert.equal(up(), later);
     assert.equal(setting(DAILY_REPORT_KEY).reauth_woken, 0);
 
@@ -203,7 +203,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     let woken = false;
     await runUntilEmpty(
       db,
-      { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {}, upload_receipt: async () => void (woken = true) },
+      { daily: createDailyHandler(() => ({ provider: () => createFakeProvider(), refreshToken: null })), reconcile_deals: async () => {}, sync_bank: async () => {}, upload_receipt: async () => void (woken = true) },
       { now: () => t2 },
     );
     assert.equal(setting(DAILY_REPORT_KEY).reauth_woken, 1);
@@ -223,6 +223,22 @@ describe('daily: 照合・紙原本・証憑の照合', () => {
     await run({ provider: () => createFakeProvider(), refreshToken: null }, next);
     assert.equal(jobsOf('reconcile_deals').length, 2);
     assert.deepEqual(setting(DAILY_REPORT_KEY).reconcile, { job_id: queued, created: false });
+  });
+
+  test('sync_bank を積み（未実行のものがあれば積み増さない）、マスタ同期で口座を作る', async () => {
+    enqueueDaily(db, T0);
+    await run({ provider: () => createFakeProvider(), refreshToken: null, providerKind: 'fake' });
+    assert.equal(jobsOf('sync_bank').length, 1);
+    assert.equal(setting(DAILY_REPORT_KEY).sync_bank.created, true);
+    const accounts = db.prepare('SELECT provider, kind, source, freee_walletable_id, name FROM money_accounts').all().map((r) => ({ ...r }));
+    assert.deepEqual(accounts, [{ provider: 'fake', kind: 'card', source: 'freee', freee_walletable_id: 'credit_card:1', name: 'テストカード' }]);
+    const next = new Date(T0.getTime() + 86_400_000);
+    const queued = enqueue(db, 'sync_bank', null, { now: T0, runAfter: new Date(T0.getTime() + 2 * 86_400_000) });
+    enqueueDaily(db, next);
+    await run({ provider: () => createFakeProvider(), refreshToken: null, providerKind: 'fake' }, next);
+    assert.equal(jobsOf('sync_bank').length, 2);
+    assert.deepEqual(setting(DAILY_REPORT_KEY).sync_bank, { job_id: queued, created: false });
+    assert.equal((db.prepare('SELECT count(*) n FROM money_accounts').get() as { n: number }).n, 1);
   });
 
   test('紙原本のステータスを更新する', async () => {
