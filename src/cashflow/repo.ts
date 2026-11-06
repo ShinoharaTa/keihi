@@ -147,19 +147,39 @@ export function getRecurrenceCandidate(db: Db, id: string): RecurrenceCandidateR
   return (db.prepare('SELECT * FROM recurrence_candidates WHERE id = ?').get(id) as RecurrenceCandidateRow | undefined) ?? null;
 }
 
-export function listRecurrenceCandidates(db: Db, opts: { state?: CandidateState; accountId?: string } = {}): RecurrenceCandidateRow[] {
+function candidateWhere(opts: { state?: CandidateState; accountId?: string }, alias: string): { w: string; args: string[] } {
   const where: string[] = [];
   const args: string[] = [];
   if (opts.state !== undefined) {
-    where.push('state = ?');
+    where.push(`${alias}state = ?`);
     args.push(opts.state);
   }
   if (opts.accountId !== undefined) {
-    where.push('account_id = ?');
+    where.push(`${alias}account_id = ?`);
     args.push(opts.accountId);
   }
-  const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return { w: where.length ? `WHERE ${where.join(' AND ')}` : '', args };
+}
+
+export function listRecurrenceCandidates(db: Db, opts: { state?: CandidateState; accountId?: string } = {}): RecurrenceCandidateRow[] {
+  const { w, args } = candidateWhere(opts, '');
   return db.prepare(`SELECT * FROM recurrence_candidates ${w} ORDER BY created_at, id`).all(...args) as RecurrenceCandidateRow[];
+}
+
+// 画面に出す一覧。description は occurrences_json の最後（最新）の明細の正規化前の摘要、account_name は口座名（明細・口座が無ければ null）。
+export type RecurrenceCandidateView = RecurrenceCandidateRow & { description: string | null; account_name: string | null };
+
+export function listRecurrenceCandidateViews(db: Db, opts: { state?: CandidateState; accountId?: string } = {}): RecurrenceCandidateView[] {
+  const { w, args } = candidateWhere(opts, 'c.');
+  return db
+    .prepare(
+      `SELECT c.*, t.description AS description, a.name AS account_name
+         FROM recurrence_candidates c
+         LEFT JOIN bank_txns t ON t.id = json_extract(c.occurrences_json, '$[#-1].bank_txn_id')
+         LEFT JOIN money_accounts a ON a.id = c.account_id
+         ${w} ORDER BY c.created_at, c.id`,
+    )
+    .all(...args) as RecurrenceCandidateView[];
 }
 
 // 同じ口座・同じ正規化摘要・同じ周期の候補を古い順に（状態を問わない）。重複を作らない判定と、open の置き換えに使う。
