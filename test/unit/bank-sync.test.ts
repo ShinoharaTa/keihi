@@ -380,12 +380,35 @@ describe('sync_bank ジョブ', () => {
     assert.deepEqual(JSON.parse(a[0]!.payload_json), { from: '2026-09-25', to: '2026-11-06', created: 1, kinds: { card_settlement: 1 } });
     assert.equal(verifyAudit(db).ok, true);
 
-    // 2 回目は組を作り直さない（作った数 0 を残す）。
+    // 2 回目は組を作り直さない。作った組が 0 なら監査に書かない。
     const t1 = new Date(T0.getTime() + 3_600_000);
     enqueueSyncBank(db, t1);
     await runUntilEmpty(db, handlers(), { now: () => t1 });
     assert.equal(count('SELECT count(*) n FROM transfer_links'), 1);
-    assert.equal(JSON.parse((db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'transfers.detected' ORDER BY seq DESC LIMIT 1`).get() as { payload_json: string }).payload_json).created, 0);
+    assert.equal(count(`SELECT count(*) n FROM audit_log WHERE action = 'transfers.detected'`), 1);
+  });
+
+  test('検出が失敗しても同期は完了し、失敗を監査に残す（摘要は入れない）', async () => {
+    const card = getAccountByWalletable(db, 'fake', 'credit_card:1')!.id;
+    updateAccountSettings(db, card, { cardSettlementAccountId: bankId(), cardSettlementPattern: 'ﾃｽﾄｶｰﾄﾞ' }, T0.toISOString());
+    fake.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-10-27', amount: 32100, entrySide: 'expense', description: 'ﾃｽﾄｶｰﾄﾞ ﾋｷｵﾄｼ', balance: null, status: 1, dueAmount: 32100, ruleMatched: false });
+    db.exec(`CREATE TEMP TRIGGER fail_links BEFORE INSERT ON main.transfer_links BEGIN SELECT RAISE(ABORT, 'boom'); END`);
+    const { job_id } = enqueueSyncBank(db, T0);
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => T0 }), { done: 1, failed: 0 });
+    } finally {
+      console.error = orig;
+    }
+    assert.equal(getJob(db, job_id)!.state, 'done');
+    assert.equal(count('SELECT count(*) n FROM bank_txns'), 1);
+    assert.equal(count('SELECT count(*) n FROM transfer_links'), 0);
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'transfers.detect_failed'`).all() as { payload_json: string }[];
+    assert.equal(a.length, 1);
+    assert.deepEqual(JSON.parse(a[0]!.payload_json), { error: 'boom' });
+    assert.doesNotMatch(a[0]!.payload_json, /ﾃｽﾄ|テスト/);
+    assert.equal(count(`SELECT count(*) n FROM audit_log WHERE action = 'transfers.detected'`), 0);
   });
 
   test('取った明細が 0 件なら検出しない', async () => {

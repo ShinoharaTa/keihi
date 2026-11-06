@@ -6,7 +6,7 @@
 //   POST  /api/bank/sync      → 200 {job_id, created}（今すぐ同期。未完了の sync_bank があるか、前回積んでから 10 分以内なら積まない）
 //   GET   /api/bank/status    → 200 {accounts: [{account_id, name, kind, source, active, last_sync_at, last_ok_at, last_error, last_csv_at, backfill_done_until}]}
 //   GET   /api/bank_txns      ?from&to（YYYY-MM-DD）&account_id&tag&category&side&amount_min&amount_max&q&cursor&limit（1〜100、既定 100）
-//         → 200 {items: [TxnView], next_cursor: string | null} / 400（T110。src/bank/summary.ts）
+//         → 200 {items: [TxnView], next_cursor: string | null} / 400（T110。src/bank/summary.ts。category=none は未分類）
 //   GET   /api/summary/monthly ?month=YYYY-MM → 200 MonthlySummary
 //                              ?from=YYYY-MM&to=YYYY-MM（最大 36 か月）→ 200 {months: [MonthlySummary]} / 400
 import { Hono } from 'hono';

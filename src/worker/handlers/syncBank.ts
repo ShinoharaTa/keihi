@@ -7,7 +7,8 @@
 // - Provider は呼び出し側が渡す（予算を通したもの。worker/main.ts の HANDLERS）。用途は sync（budget.ts の DEFAULT_PURPOSES）。
 // - 同期が返ったら（予算で止まった・一部の口座が失敗した場合も含む）振替を検出する（src/bank/transfers.ts、T110）。
 //   範囲は「今回取った明細の最小の日付 − 2 × transferWindowDays 〜 今日」。取った明細が 0 件なら呼ばない。
-//   作った組の数は監査ログ（transfers.detected）に残す。
+//   作った組があれば数を監査ログ（transfers.detected）に残す（0 件なら書かない）。検出が失敗しても同期の結果は変えず、
+//   ログと監査ログ（transfers.detect_failed。エラーの文だけで、摘要は入れない）に残す。
 import { appendAudit } from '../../audit.ts';
 import { syncBank, type SyncBankProvider, type SyncBankResult } from '../../bank/sync.ts';
 import { minTxnDateSeenAt, type AccountProvider } from '../../bank/repo.ts';
@@ -29,18 +30,39 @@ export type SyncBankDeps = {
   transferWindowDays: number;
 };
 
-// 今回の同期で取った明細を含む範囲で振替を検出する。呼ばなかったら null。
-export function detectTransfersAfterSync(db: Db, r: SyncBankResult, windowDays: number, now: Date): { from: string; to: string; created: number } | null {
+export type DetectAfterSyncResult = { from: string; to: string; created: number } | { error: string };
+
+// 今回の同期で取った明細を含む範囲で振替を検出する。呼ばなかったら null。投げない（失敗は { error } で返す）。
+export function detectTransfersAfterSync(
+  db: Db,
+  r: SyncBankResult,
+  windowDays: number,
+  now: Date,
+  log: (s: string) => void = (s) => console.error(s),
+): DetectAfterSyncResult | null {
   if (r.accounts.reduce((n, a) => n + a.fetched, 0) === 0) return null;
-  const min = minTxnDateSeenAt(db, now.toISOString());
-  if (min === null) return null;
-  const from = addDays(min, -2 * windowDays);
-  const to = todayInTokyo(now);
-  const created = detectTransfers(db, { windowDays, now, from, to });
-  const kinds: Record<string, number> = {};
-  for (const l of created) kinds[l.kind] = (kinds[l.kind] ?? 0) + 1;
-  appendAudit(db, { actor: 'worker', action: 'transfers.detected', entity: 'transfer_link', payload: { from, to, created: created.length, kinds } }, now);
-  return { from, to, created: created.length };
+  try {
+    const min = minTxnDateSeenAt(db, now.toISOString());
+    if (min === null) return null;
+    const from = addDays(min, -2 * windowDays);
+    const to = todayInTokyo(now);
+    const created = detectTransfers(db, { windowDays, now, from, to });
+    if (created.length > 0) {
+      const kinds: Record<string, number> = {};
+      for (const l of created) kinds[l.kind] = (kinds[l.kind] ?? 0) + 1;
+      appendAudit(db, { actor: 'worker', action: 'transfers.detected', entity: 'transfer_link', payload: { from, to, created: created.length, kinds } }, now);
+    }
+    return { from, to, created: created.length };
+  } catch (e) {
+    const error = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    log(`sync_bank: 振替の検出に失敗: ${error}`);
+    try {
+      appendAudit(db, { actor: 'worker', action: 'transfers.detect_failed', entity: 'transfer_link', payload: { error } }, now);
+    } catch {
+      // 監査も書けないときはログだけ残す（同期の結果は変えない）
+    }
+    return { error };
+  }
 }
 
 export function createSyncBankHandler(getDeps: () => SyncBankDeps): Handler {

@@ -104,14 +104,23 @@ type Page = { items: Item[]; next_cursor: string | null };
 type Amounts = { income: number; expense: number };
 type Summary = {
   month: string;
-  by_account: ({ account_id: string; name: string; net: number } & Amounts)[];
+  by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
   by_category: ({ category: string | null } & Amounts)[];
   by_tag: ({ tag: string } & Amounts)[];
   total: Amounts & { net: number };
-  excluded: { kind: string; count: number; amount: number }[];
+  excluded: ({ kind: string; count: number } & Amounts)[];
 };
 
 const sum = (xs: Amounts[]) => xs.reduce((s, x) => ({ income: s.income + x.income, expense: s.expense + x.expense }), { income: 0, expense: 0 });
+const rawTotals = (ts: BankTxnRow[], month: string) => ({
+  income: ts.filter((t) => t.txn_date.startsWith(month) && t.side === 'income').reduce((n, t) => n + t.amount, 0),
+  expense: ts.filter((t) => t.txn_date.startsWith(month) && t.side === 'expense').reduce((n, t) => n + t.amount, 0),
+});
+// 除く前の合計 = total + excluded。
+function assertBalanced(s: Summary, ts: BankTxnRow[]) {
+  const ex = sum(s.excluded);
+  assert.deepEqual(rawTotals(ts, s.month), { income: s.total.income + ex.income, expense: s.total.expense + ex.expense }, s.month);
+}
 
 describe('GET /api/summary/monthly', () => {
   test('振替・引き落としを除いた合計。口座別・カテゴリ別・タグ別の合計が total に一致し、除いた額が合う', async () => {
@@ -129,23 +138,42 @@ describe('GET /api/summary/monthly', () => {
     assert.deepEqual(sum(s.by_category), want);
     assert.deepEqual(sum(s.by_tag), want);
     for (const a of s.by_account) assert.equal(a.net, a.income - a.expense);
-    assert.deepEqual(s.by_account.map((a) => [a.account_id, a.name]), [[fx.a, '銀行A'], [fx.b, '銀行B']]);
+    assert.deepEqual(s.by_account.map((a) => [a.account_id, a.name, a.include_in_cashflow, a.active]), [[fx.a, '銀行A', true, true], [fx.b, '銀行B', true, true]]);
     assert.deepEqual(s.by_tag.map((t) => t.tag), ['business', 'private', 'unset']);
-    // 除いた額: 振替 1 組（出金側の額）と引き落とし 1 件。チャージは 0。
+    // 除いた行: 振替 1 組の両側（2 行）と引き落とし 1 行。チャージは 0。
     assert.deepEqual(s.excluded, [
-      { kind: 'transfer', count: 1, amount: 50000 },
-      { kind: 'card_settlement', count: 1, amount: 32100 },
-      { kind: 'charge', count: 0, amount: 0 },
+      { kind: 'transfer', count: 2, income: 50000, expense: 50000 },
+      { kind: 'card_settlement', count: 1, income: 0, expense: 32100 },
+      { kind: 'charge', count: 0, income: 0, expense: 0 },
     ]);
-    // 除く前の支出 = 集計の支出 + 振替の出金 + 引き落とし。
+    // 除く前の合計 = total + excluded。
     assert.equal(exp(oct, 'expense'), s.total.expense + 50000 + 32100);
     assert.equal(exp(oct, 'income'), s.total.income + 50000);
+    assertBalanced(s, fx.txns);
     // カテゴリ: 人が付けた food / transport が出て、未分類（null）は最後。
     const cat = new Map(s.by_category.map((c) => [c.category, c]));
     assert.deepEqual(cat.get('food'), { category: 'food', ...sum(fx.food.map((id) => { const t = fx.txns.find((x) => x.id === id)!; return { income: t.side === 'income' ? t.amount : 0, expense: t.side === 'expense' ? t.amount : 0 }; })) });
     assert.ok(cat.has('transport'));
     assert.equal(s.by_category.at(-1)!.category, null);
     assert.deepEqual(s.by_category.map((c) => c.category), ['food', 'transport', null]);
+  });
+
+  test('月をまたぐ組: 各月で除く前の合計 = total + excluded', async () => {
+    const out = insertBankTxn(db, { accountId: fx.a, txnDate: '2026-10-31', amount: 77777, side: 'expense', description: 'ﾌﾘｶｴ', descriptionNorm: normalizeVendor('ﾌﾘｶｴ'), now: NOW });
+    const inn = insertBankTxn(db, { accountId: fx.b, txnDate: '2026-11-01', amount: 77777, side: 'income', description: 'ﾌﾘｶｴ', descriptionNorm: normalizeVendor('ﾌﾘｶｴ'), now: NOW });
+    assert.equal(detectTransfers(db, { windowDays: 3, now: T0 }).length, 1);
+    const ts = [...fx.txns, out, inn];
+    const { months } = await getJson<{ months: Summary[] }>('/api/summary/monthly?from=2026-09&to=2026-11');
+    for (const m of months) assertBalanced(m, ts);
+    assert.deepEqual(months[1]!.excluded[0], { kind: 'transfer', count: 3, income: 50000, expense: 50000 + 77777 });
+    assert.deepEqual(months[2]!.excluded[0], { kind: 'transfer', count: 1, income: 77777, expense: 0 });
+    assert.deepEqual(months[2]!.total, { income: 0, expense: 0, net: 0 });
+  });
+
+  test('by_account に include_in_cashflow と active が出る', async () => {
+    updateAccountSettings(db, fx.b, { includeInCashflow: false, active: false }, NOW);
+    const s = await getJson<Summary>('/api/summary/monthly?month=2026-10');
+    assert.deepEqual(s.by_account.map((a) => [a.account_id, a.include_in_cashflow, a.active]), [[fx.a, true, true], [fx.b, false, false]]);
   });
 
   test('from〜to で複数月を返す。単月と同じ中身', async () => {
@@ -232,7 +260,39 @@ describe('GET /api/bank_txns', () => {
     assert.deepEqual(paged, biz.map((x) => x.id));
     const food = (await getJson<Page>('/api/bank_txns?category=food')).items;
     assert.deepEqual(new Set(food.map((x) => x.id)), new Set(fx.food));
-    assert.equal((await getJson<Page>('/api/bank_txns?tag=unset')).items.length, 0);
+    // category=none は未分類。
+    const none = (await getJson<Page>('/api/bank_txns?category=none')).items;
+    assert.equal(none.length, 50 - fx.food.length - 1);
+    assert.ok(none.every((x) => x.category === null));
+    // 該当 0 件。
+    assert.deepEqual(await getJson<Page>('/api/bank_txns?tag=unset'), { items: [], next_cursor: null });
+  });
+
+  test('タグで絞るとき、500 件の塊をまたいでも重複・抜けがなく、最後は next_cursor が null', async () => {
+    // 新しい日付に私用（銀行B）の明細を 600 件足す。業務の明細はすべてその後ろ（古い側）にある。
+    const extra: BankTxnRow[] = [];
+    for (let i = 0; i < 600; i++) {
+      const d = `2026-12-${String(1 + (i % 28)).padStart(2, '0')}`;
+      extra.push(insertBankTxn(db, { accountId: fx.b, txnDate: d, amount: 900000 + i, side: 'expense', description: `ﾍﾞﾂ ${i}`, descriptionNorm: normalizeVendor(`ﾍﾞﾂ ${i}`), now: NOW }));
+    }
+    const wantBiz = fx.txns.filter((t) => (t.account_id === fx.a && !fx.food.includes(t.id)) || t.id === fx.transport).map((t) => t.id);
+    const biz = await getJson<Page>('/api/bank_txns?tag=business&limit=100');
+    assert.deepEqual(new Set(biz.items.map((x) => x.id)), new Set(wantBiz));
+    assert.equal(biz.next_cursor, null);
+    // 私用は 600 + fixture の分。100 件ずつたどる。
+    const wantPriv = [...extra, ...fx.txns].filter((t) => (t.account_id === fx.b && t.id !== fx.transport) || fx.food.includes(t.id)).map((t) => t.id);
+    const got: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const p: Page = await getJson<Page>(`/api/bank_txns?tag=private&limit=100${cursor ? `&cursor=${cursor}` : ''}`);
+      got.push(...p.items.map((x) => x.id));
+      cursor = p.next_cursor;
+      pages++;
+    } while (cursor);
+    assert.equal(got.length, wantPriv.length);
+    assert.deepEqual(new Set(got), new Set(wantPriv));
+    assert.equal(pages, Math.ceil(wantPriv.length / 100));
   });
 
   test('期間・口座・side・金額の範囲で絞る', async () => {
@@ -253,6 +313,11 @@ describe('GET /api/bank_txns', () => {
     await bad('limit=101', 'invalid_limit');
     await bad('limit=0', 'invalid_limit');
     await bad('cursor=zzz', 'invalid_cursor');
+    await bad('from=2026-13-45', 'invalid_from');
+    await bad('to=2026-02-30', 'invalid_to');
+    await bad('from=2026-10-02&to=2026-10-01', 'invalid_range');
+    await bad('amount_min=10&amount_max=9', 'invalid_range');
+    for (const q of ['株式会社', '(株)', '   ', '　']) await bad(`q=${encodeURIComponent(q)}`, 'invalid_q');
   });
 });
 
