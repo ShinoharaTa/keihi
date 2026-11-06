@@ -9,8 +9,8 @@
 //        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
 // 周期の検出の候補（T302。src/cashflow/detect.ts）:
 //   GET  /api/recurrence_candidates?state=open        → 200 {candidates: [RecurrenceCandidate]}（state を省くとすべて）/ 400 {error}
-//   POST /api/recurrence_candidates/detect            → 200 {created, updated}（手動で検出する。今日は Asia/Tokyo の暦日）
-//   POST /api/recurrence_candidates/:id/accept        body {category?（既定 other）, name?（既定 正規化摘要）}
+//   POST /api/recurrence_candidates/detect            → 200 {created, updated}（手動で検出する。updated は金額が変わって置き換えた open の候補の数。今日は Asia/Tokyo の暦日）
+//   POST /api/recurrence_candidates/:id/accept        body {category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 候補の金額）}
 //        → 200 {candidate, item}（台帳の項目を作って accepted にする）/ 400 {error}（open でない・値が不正）/ 404
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
@@ -108,9 +108,9 @@ export function cashflowRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
   r.post('/recurrence_candidates/:id/accept', async (c) => {
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
-    if (Object.keys(body).some((k) => k !== 'category' && k !== 'name')) return c.json({ error: 'invalid_field' }, 400);
+    if (Object.keys(body).some((k) => k !== 'category' && k !== 'name' && k !== 'amount')) return c.json({ error: 'invalid_field' }, 400);
     try {
-      // 値は createItem が確かめる（name は前後の空白を落とす、category は種類と direction=out との組み合わせ）。
+      // 値は createItem が確かめる（name は前後の空白を落とす、amount は正の整数、category は種類と direction=out との組み合わせ）。
       return c.json(acceptCandidate(deps.db, c.req.param('id'), by(c), body as AcceptOverrides, now()));
     } catch (e) {
       return fail(c, e);

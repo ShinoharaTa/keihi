@@ -162,37 +162,38 @@ export function listRecurrenceCandidates(db: Db, opts: { state?: CandidateState;
   return db.prepare(`SELECT * FROM recurrence_candidates ${w} ORDER BY created_at, id`).all(...args) as RecurrenceCandidateRow[];
 }
 
-// 同じ口座・同じ正規化摘要・同じ周期の候補のうち、いちばん新しいもの（無ければ null）。重複を作らないために使う。
-export function latestRecurrenceCandidate(db: Db, accountId: string, descriptionNorm: string, interval: Interval): RecurrenceCandidateRow | null {
-  return (
-    (db
-      .prepare('SELECT * FROM recurrence_candidates WHERE account_id = ? AND description_norm = ? AND interval = ? ORDER BY created_at DESC, id DESC LIMIT 1')
-      .get(accountId, descriptionNorm, interval) as RecurrenceCandidateRow | undefined) ?? null
-  );
-}
-
-// 同じ口座・同じ正規化摘要・同じ周期で open / accepted の候補があるか（より新しい dismissed があっても true）。
-export function hasLiveRecurrenceCandidate(db: Db, accountId: string, descriptionNorm: string, interval: Interval): boolean {
-  return !!db
-    .prepare("SELECT 1 FROM recurrence_candidates WHERE account_id = ? AND description_norm = ? AND interval = ? AND state IN ('open', 'accepted') LIMIT 1")
-    .get(accountId, descriptionNorm, interval);
+// 同じ口座・同じ正規化摘要・同じ周期の候補を古い順に（状態を問わない）。重複を作らない判定と、open の置き換えに使う。
+export function listRecurrenceCandidatesFor(db: Db, accountId: string, descriptionNorm: string, interval: Interval): RecurrenceCandidateRow[] {
+  return db
+    .prepare('SELECT * FROM recurrence_candidates WHERE account_id = ? AND description_norm = ? AND interval = ? ORDER BY created_at, id')
+    .all(accountId, descriptionNorm, interval) as RecurrenceCandidateRow[];
 }
 
 export type DetectTxnRow = { id: string; account_id: string; txn_date: string; amount: number; description_norm: string };
 
-// 検出に使う支出の明細（from 〜 to、両端を含む）。口座・摘要・日付の順。
+// 検出に使う支出の明細（from 〜 to、両端を含む）。口座が active かつ include_in_cashflow のものだけ。口座・摘要・日付の順。
 export function listExpenseTxnsForDetect(db: Db, from: string, to: string): DetectTxnRow[] {
   return db
     .prepare(
-      `SELECT id, account_id, txn_date, amount, description_norm FROM bank_txns
-       WHERE side = 'expense' AND txn_date >= ? AND txn_date <= ? ORDER BY account_id, description_norm, txn_date, id`,
+      `SELECT t.id, t.account_id, t.txn_date, t.amount, t.description_norm FROM bank_txns t
+       JOIN money_accounts a ON a.id = t.account_id AND a.active = 1 AND a.include_in_cashflow = 1
+       WHERE t.side = 'expense' AND t.txn_date >= ? AND t.txn_date <= ? ORDER BY t.account_id, t.description_norm, t.txn_date, t.id`,
     )
     .all(from, to) as DetectTxnRow[];
 }
 
-// active な予定項目に、同じ口座・同じ名前のものがあるか。
-export function hasActiveScheduledItemNamed(db: Db, accountId: string, name: string): boolean {
-  return !!db.prepare('SELECT 1 FROM scheduled_items WHERE active = 1 AND account_id = ? AND name = ? LIMIT 1').get(accountId, name);
+// active な予定項目に、同じ口座で「同じ名前」か「同じ周期で金額の差が tolerancePct% 以内（大きい方が小さい方の 100 + tolerancePct % 以下）」のものがあるか。
+export function hasActiveScheduledItemLike(
+  db: Db,
+  a: { accountId: string; name: string; recurrence: Recurrence; amount: number; tolerancePct: number },
+): boolean {
+  const k = 100 + a.tolerancePct;
+  return !!db
+    .prepare(
+      `SELECT 1 FROM scheduled_items WHERE active = 1 AND account_id = ?
+         AND (name = ? OR (recurrence = ? AND amount * 100 <= ? * ? AND ? * 100 <= amount * ?)) LIMIT 1`,
+    )
+    .get(a.accountId, a.name, a.recurrence, a.amount, k, a.amount, k);
 }
 
 // 状態を変える（accepted なら台帳の項目を結ぶ）。候補が無ければ null。
