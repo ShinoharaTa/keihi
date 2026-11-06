@@ -1,5 +1,7 @@
 # keihi 実装計画 v3（P0〜P3 のタスク分解 / 2026-11-06・未承認）
 
+> 2026-11-06 時点: 行頭の「済」は feature/cashflow で実装済み、「進行中」は着手済み。実装の詳細は cashflow.md。T305 は API（`/api/documents/counts` の upcoming）まで済で、バッジの表示は T111 に含む。マイグレーションは 0006_cashflow（0006_mcp を後回しにしたので繰り上げ）。
+
 正本は requirements-v2.md（C1〜C13・R-A〜R-D・V1〜V8）。本書はそれを implementer に渡せる粒度に分ける。旧計画 mvp-plan.md（v0.2）の M0〜M5 は実装済み（current-system.md）で、M6・M7 は本書の P1・P2 で置き換える。
 書式は mvp-plan.md と同じ: **内容 / 触る / 受け入れ / 依存 / 残る判断**。「残る判断」が「なし」以外のタスクは、§6 の該当項目が決まるまで渡さない。
 表記: **[事実]** コード・docs で確認 / **[推測]** 見積もり・解釈 / **[要PoC]** 叩くまで不明 / **[要確認]** ユーザーから資料が要る。
@@ -59,27 +61,27 @@
 
 ## 4. P1: 明細の取り込み（R-A）と可視化（R-B の一部）
 
-**T101 Provider の明細型を広げる**: `BankTxn` に `balance?: number`・`status: 1|2|3|4|6`・`dueAmount`・`ruleMatched` を足す。`ListBankTxnsQuery` に limit/offset を、`CreateRuleInput` に `walletableId` と `action: 'private_register'`（act=12）を足す。fake provider と契約テストも直す。触る: `src/providers/types.ts`、`freee/provider.ts`、`fake/index.ts`、`test/contracts/*`。受け入れ: 契約テストが OpenAPI に合う。fake のページングが 100 件ずつ。依存: T003（balance があるか）。残る判断: なし。
+済 **T101 Provider の明細型を広げる**: `BankTxn` に `balance?: number`・`status: 1|2|3|4|6`・`dueAmount`・`ruleMatched` を足す。`ListBankTxnsQuery` に limit/offset を、`CreateRuleInput` に `walletableId` と `action: 'private_register'`（act=12）を足す。fake provider と契約テストも直す。触る: `src/providers/types.ts`、`freee/provider.ts`、`fake/index.ts`、`test/contracts/*`。受け入れ: 契約テストが OpenAPI に合う。fake のページングが 100 件ずつ。依存: T003（balance があるか）。残る判断: なし。
 
-**T102 マイグレーション 0005_bank**（§7 の表）とリポジトリ層 `src/bank/repo.ts`。受け入れ: 空の DB と 0004 の DB の両方から上がる。追記専用の表に UPDATE / DELETE するとトリガーでエラーになる（0001 の audit_log と同じやり方）。依存: なし。残る判断: なし。
+済 **T102 マイグレーション 0005_bank**（§7 の表）とリポジトリ層 `src/bank/repo.ts`。受け入れ: 空の DB と 0004 の DB の両方から上がる。追記専用の表に UPDATE / DELETE するとトリガーでエラーになる（0001 の audit_log と同じやり方）。依存: なし。残る判断: なし。
 
-**T103 口座（money_accounts）の管理**: マスタ同期のたびに freee の walletable ごとに 1 行を作る（既にあれば名前だけ更新）。CSV だけの口座（PayPay 残高など）は API で作る。`default_tag` の初期値は `unset`、`mcp_visibility` は `summary`。API は `GET/POST /api/accounts`、`PATCH /api/accounts/:id`（設定の変更は監査に残す）。触る: `src/bank/accounts.ts`、`src/masters/sync.ts`、`src/web/routes/bank.ts`、`src/web/app.ts`。受け入れ: 同期を 2 回しても行が増えない。PATCH が監査に出る。残る判断: なし。
+済 **T103 口座（money_accounts）の管理**: マスタ同期のたびに freee の walletable ごとに 1 行を作る（既にあれば名前だけ更新）。CSV だけの口座（PayPay 残高など）は API で作る。`default_tag` の初期値は `unset`、`mcp_visibility` は `summary`。API は `GET/POST /api/accounts`、`PATCH /api/accounts/:id`（設定の変更は監査に残す）。触る: `src/bank/accounts.ts`、`src/masters/sync.ts`、`src/web/routes/bank.ts`、`src/web/app.ts`。受け入れ: 同期を 2 回しても行が増えない。PATCH が監査に出る。残る判断: なし。
 
-**T104 明細の同期ジョブ `sync_bank`**: JobKind に足す。daily の中で 1 件積む。PWA の「今すぐ同期」でも積むが、前回から 10 分以内なら積まない。口座ごとに `max(前回の最新日 − 35 日, backfill_from)` から今日までを取る。初めての口座は 3 か月ずつさかのぼり、1 回の実行で 1 区間だけ進める（`sync_status.backfill_done_until`）。外部 ID（walletable_id + wallet_txn id）で upsert し、変わってよいのは freee_status・due_amount・last_seen_at だけ。残高は `account_balances` に追記する。予算の用途は `sync`。触る: `src/bank/sync.ts`、`src/worker/handlers/syncBank.ts`、`src/worker/handlers/daily.ts`、`src/jobs/queue.ts`。受け入れ: 同じ明細を 2 回取っても 1 行。status の変化が監査に残る。予算の残りが 500 を切ったら途中で止め、次回に続きから取る。invalid_grant では延期する。依存: T101・T102。残る判断: V8（`[bank] backfill_from` の値）。
+済 **T104 明細の同期ジョブ `sync_bank`**: JobKind に足す。daily の中で 1 件積む。PWA の「今すぐ同期」でも積むが、前回から 10 分以内なら積まない。口座ごとに `max(前回の最新日 − 35 日, backfill_from)` から今日までを取る。初めての口座は 3 か月ずつさかのぼり、1 回の実行で 1 区間だけ進める（`sync_status.backfill_done_until`）。外部 ID（walletable_id + wallet_txn id）で upsert し、変わってよいのは freee_status・due_amount・last_seen_at だけ。残高は `account_balances` に追記する。予算の用途は `sync`。触る: `src/bank/sync.ts`、`src/worker/handlers/syncBank.ts`、`src/worker/handlers/daily.ts`、`src/jobs/queue.ts`。受け入れ: 同じ明細を 2 回取っても 1 行。status の変化が監査に残る。予算の残りが 500 を切ったら途中で止め、次回に続きから取る。invalid_grant では延期する。依存: T101・T102。残る判断: V8（`[bank] backfill_from` の値）。
 
 **T105 CSV インポーターの枠と PayPay パーサー**: `src/bank/csv/index.ts` に `Parser = { id, detect(head), parse(text) → ParsedRow[] }` を定める。文字コードは BOM で判定し、無ければ UTF-8 として読んで失敗したら Shift_JIS（TextDecoder）で読む。原本の CSV は objects に sha256 で置く。同じファイルを 2 回入れたら 409。`POST /api/accounts/:id/import`（multipart、上限 5MB）は 1 トランザクションで `csv_imports`・`bank_txns`・`bank_txn_sources` を書く。パーサーは `src/bank/csv/paypay.ts`。列は【要確認】で、想定は「取引日・出金金額・入金金額・取引内容・取引先・取引方法・取引番号」。取引番号を外部 ID にする。受け入れ: ユーザーが用意した伏せ字のサンプルから作る fixture で、件数・金額・符号が一致する。同じ行を重ねて入れても増えない。壊れた行はその行番号と理由を返し、ほかの行は入る（`rows_error`）。依存: T102、PayPay CSV のサンプル（ユーザー）。残る判断: V3（P1 は PWA からのアップロードだけ。MCP は T204）。
 
-**T106 重複排除（API と CSV が同じ口座）**: 次の順に照合し、どれにも当たらなければ新しい明細にする。(1) 同じ source・同じ外部 ID → 同じ明細。(2) source が違い、同じ口座・同じ日付・同じ金額・同じ入出金の候補がちょうど 1 件 → `bank_txn_sources` に足すだけ。(3) 候補が複数 → 同じ日の中の出現順で 1 対 1 に組み、組めなかった分を「重複の疑い」にする。日付の幅は `[bank] dedup_date_window_days`（既定 0）。触る: `src/bank/dedup.ts`。受け入れ: 表駆動で、同額・同日に 2 件あるケース、片側だけに存在するケース、幅を 1 日にしたケースを確かめる。依存: T104・T105。残る判断: なし（F18 の結果でカードの既定の幅を見直す）。
+済 **T106 重複排除（API と CSV が同じ口座）**: 次の順に照合し、どれにも当たらなければ新しい明細にする。(1) 同じ source・同じ外部 ID → 同じ明細。(2) source が違い、同じ口座・同じ日付・同じ金額・同じ入出金の候補がちょうど 1 件 → `bank_txn_sources` に足すだけ。(3) 候補が複数 → 同じ日の中の出現順で 1 対 1 に組み、組めなかった分を「重複の疑い」にする。日付の幅は `[bank] dedup_date_window_days`（既定 0）。触る: `src/bank/dedup.ts`。受け入れ: 表駆動で、同額・同日に 2 件あるケース、片側だけに存在するケース、幅を 1 日にしたケースを確かめる。依存: T104・T105。残る判断: なし（F18 の結果でカードの既定の幅を見直す）。
 
-**T107 口座間振替の検出**: 自分の口座 A の出金と口座 B の入金が、同じ金額で日付差 0〜3 日、かつ 1 対 1 → `transfer_links`（kind=transfer、source=auto）。カードの引き落としは、口座設定 `card_settlement_account_id` + 摘要のパターンに当たる出金を kind=card_settlement にする（カードの利用分を数え、引き落としは集計から除く）。PayPay のチャージは kind=charge。人が外したら state=rejected の行を足し、次回からは同じ組を作らない。触る: `src/bank/transfers.ts`。受け入れ: 表駆動で、ちょうど 1 対 1、候補が 2 件（作らない）、外した組を作り直さない、を確かめる。依存: T106。残る判断: なし。
+済 **T107 口座間振替の検出**: 自分の口座 A の出金と口座 B の入金が、同じ金額で日付差 0〜3 日、かつ 1 対 1 → `transfer_links`（kind=transfer、source=auto）。カードの引き落としは、口座設定 `card_settlement_account_id` + 摘要のパターンに当たる出金を kind=card_settlement にする（カードの利用分を数え、引き落としは集計から除く）。PayPay のチャージは kind=charge。人が外したら state=rejected の行を足し、次回からは同じ組を作らない。触る: `src/bank/transfers.ts`。受け入れ: 表駆動で、ちょうど 1 対 1、候補が 2 件（作らない）、外した組を作り直さない、を確かめる。依存: T106。残る判断: なし。
 
-**T108 事業/私用タグとカテゴリ**: 効くタグは「明細の上書き（txn_tags の最新版）> keihi のルール（tag_rules）> 口座の既定」の順で決める（V5）。カテゴリは固定 12 種（食費・日用品・交通・通信・住居・水道光熱・保険・税金・車・娯楽・医療・その他）+ 未分類。人が上書きしたら版を追記する。同じ口座・同じ正規化摘要で 3 回同じ上書きが続いたら tag_rules を作る（origin=learned）。正規化は取引先辞書の正規化を使う。触る: `src/bank/tags.ts`、`src/vendors/normalize*`、`src/web/routes/bank.ts`（`POST /api/bank_txns/:id/tag`）。受け入れ: 順の表駆動テスト、3 回目でルールが 1 件だけできる。依存: T102。残る判断: V5・V10（カテゴリの一覧）。
+済 **T108 事業/私用タグとカテゴリ**: 効くタグは「明細の上書き（txn_tags の最新版）> keihi のルール（tag_rules）> 口座の既定」の順で決める（V5）。カテゴリは固定 12 種（食費・日用品・交通・通信・住居・水道光熱・保険・税金・車・娯楽・医療・その他）+ 未分類。人が上書きしたら版を追記する。同じ口座・同じ正規化摘要で 3 回同じ上書きが続いたら tag_rules を作る（origin=learned）。正規化は取引先辞書の正規化を使う。触る: `src/bank/tags.ts`、`src/vendors/normalize*`、`src/web/routes/bank.ts`（`POST /api/bank_txns/:id/tag`）。受け入れ: 順の表駆動テスト、3 回目でルールが 1 件だけできる。依存: T102。残る判断: V5・V10（カテゴリの一覧）。
 
 **T109 私用明細を freee 側で処理済みにする**: F17 の結果によって分かれる。(a) 口座単位のルールが当たる場合: default_tag=private の口座に act=4（無視を登録）のルールを 1 本作り、`freee_rule_links` に記録する。(b) 当たらない場合: 「freee の画面で処理が要る明細」の一覧（`GET /api/bank_txns?freee_action=needed`）だけを出す。事業口座の中の私用の明細は、明細 1 件を無視する API が無い [事実: freee-codex §1-3] ので、同じ一覧に出す。T108 のルールを「freee にも反映」にしたときは act=12（プライベートを登録）を作る。触る: `src/bank/freeeRules.ts`。受け入れ: fake でルールが 1 口座 1 本だけ作られる。default_tag を private から外したら `deleteRule` を呼ぶ。作るのも消すのも監査に残る。依存: T003・T101・T108。残る判断: **V12**（事業口座の私用を act=12 にするか act=4 にするか）。
 
-**T110 明細一覧と月次集計の API**: `GET /api/bank_txns`（期間・口座・タグ・カテゴリ・金額の範囲・摘要の部分一致・cursor。上限 100）、`GET /api/summary/monthly?month=YYYY-MM`（口座別・カテゴリ別・事業/私用別の収入・支出・差額。振替・引き落とし・チャージは除き、除いた額は別の行に出す）、`GET /api/bank/status`（口座ごとの最終同期・最終 CSV・エラー。A5）。`/api/status` にも要約を足す。触る: `src/bank/summary.ts`、`src/web/routes/bank.ts`。受け入れ: fixture の明細 50 件で、集計の合計 = 振替を除いた明細の合計。cursor で重複も抜けも起きない。依存: T106〜T108。残る判断: なし。
+済 **T110 明細一覧と月次集計の API**: `GET /api/bank_txns`（期間・口座・タグ・カテゴリ・金額の範囲・摘要の部分一致・cursor。上限 100）、`GET /api/summary/monthly?month=YYYY-MM`（口座別・カテゴリ別・事業/私用別の収入・支出・差額。振替・引き落とし・チャージは除き、除いた額は別の行に出す）、`GET /api/bank/status`（口座ごとの最終同期・最終 CSV・エラー。A5）。`/api/status` にも要約を足す。触る: `src/bank/summary.ts`、`src/web/routes/bank.ts`。受け入れ: fixture の明細 50 件で、集計の合計 = 振替を除いた明細の合計。cursor で重複も抜けも起きない。依存: T106〜T108。残る判断: なし。
 
-**T111 PWA の「お金」タブ**: タブを 1 つ足し、中を「明細」「月次」「口座」の切り替えにする（タブは 5 つまで）。明細は無限スクロールで、行をタップするとタグ・カテゴリを変えられる。月次は表で出す（グラフは P4）。口座は既定タグ・MCP の公開範囲・CSV の取り込み・同期の状態。触る: `pwa/src/main.tsx`、新規 `pwa/src/money/*.tsx`。受け入れ: 各画面の SSR スナップショット。CSV の結果（新規・統合・エラーの件数）を表示する。**[ユーザー確認]** スマホで月次の表が横にはみ出さない。依存: T110。残る判断: V7（ux-reviewer。既定は本タスクの形）。
+進行中 **T111 PWA の「お金」タブ**: タブを 1 つ足し、中を「明細」「月次」「口座」の切り替えにする（タブは 5 つまで）。明細は無限スクロールで、行をタップするとタグ・カテゴリを変えられる。月次は表で出す（グラフは P4）。口座は既定タグ・MCP の公開範囲・CSV の取り込み・同期の状態。触る: `pwa/src/main.tsx`、新規 `pwa/src/money/*.tsx`。受け入れ: 各画面の SSR スナップショット。CSV の結果（新規・統合・エラーの件数）を表示する。**[ユーザー確認]** スマホで月次の表が横にはみ出さない。依存: T110。残る判断: V7（ux-reviewer。既定は本タスクの形）。
 
 ---
 
@@ -105,15 +107,15 @@
 
 ## 6. P3: 将来の資金の動き（R-D）
 
-**T301 マイグレーション 0007_cashflow と予定支出の台帳**: `scheduled_items` の CRUD（API と PWA の「お金」タブの中の「予定」）。周期は once / monthly / bimonthly / yearly / biennial。変更は監査に残す。触る: 新規 `src/cashflow/schedule.ts`、`src/web/routes/cashflow.ts`、`pwa/src/money/Schedule.tsx`。受け入れ: 周期ごとの「次の期日」の計算を表駆動で確かめる（月末日・2 月 29 日を含む）。依存: T102。残る判断: なし。
+済 **T301 マイグレーション 0007_cashflow と予定支出の台帳**: `scheduled_items` の CRUD（API と PWA の「お金」タブの中の「予定」）。周期は once / monthly / bimonthly / yearly / biennial。変更は監査に残す。触る: 新規 `src/cashflow/schedule.ts`、`src/web/routes/cashflow.ts`、`pwa/src/money/Schedule.tsx`。受け入れ: 周期ごとの「次の期日」の計算を表駆動で確かめる（月末日・2 月 29 日を含む）。依存: T102。残る判断: なし。
 
-**T302 周期の検出（C11）**: 同じ口座・同じ正規化摘要の支出で、金額の差が ±5% 以内のものを次の条件で拾う。毎月は間隔 28〜31 日が 3 回以上、隔月は 58〜62 日が 3 回以上、毎年は 350〜380 日が 2 回以上、隔年は 715〜745 日が 2 回以上。拾ったものを `recurrence_candidates`（open）にする。人が受け入れると台帳に入る。dismissed にしたものは同じ条件では出さない。去年の税・保険の納付もここで拾う（C12 の段階 1）。触る: `src/cashflow/detect.ts`。受け入れ: 合成した 24 か月の明細で、毎月 2 本・毎年 1 本・ノイズ（1 回だけ）を正しく分ける。依存: T110・T301。残る判断: なし。
+済 **T302 周期の検出（C11）**: 同じ口座・同じ正規化摘要の支出で、金額の差が ±5% 以内のものを次の条件で拾う。毎月は間隔 28〜31 日が 3 回以上、隔月は 58〜62 日が 3 回以上、毎年は 350〜380 日が 2 回以上、隔年は 715〜745 日が 2 回以上。拾ったものを `recurrence_candidates`（open）にする。人が受け入れると台帳に入る。dismissed にしたものは同じ条件では出さない。去年の税・保険の納付もここで拾う（C12 の段階 1）。触る: `src/cashflow/detect.ts`。受け入れ: 合成した 24 か月の明細で、毎月 2 本・毎年 1 本・ノイズ（1 回だけ）を正しく分ける。依存: T110・T301。残る判断: なし。
 
-**T303 資金繰り表（36 か月）**: 起点は `include_in_cashflow=1` の口座の最新残高の合計。残高が取れない口座（CSV だけ）は手で入れた残高を使う。月ごとに「予定収入 − 予定支出 − 予定外の支出の目安」を足し引きして月末残高を推定する。予定外の支出の目安は、直近 6 か月の「振替と予定項目を除いた純支出」の中央値。「月末に残す額」は、今後 3 か月の予定支出の合計（設定で変えられる）。API は `GET /api/cashflow`、MCP は `get_cashflow`。触る: `src/cashflow/forecast.ts`。受け入れ: 手計算した fixture と 36 か月分が一致する。残高の日付が 7 日より古い口座があれば警告を出す。依存: T104・T301。残る判断: **V11**（予定外の支出の目安の出し方、残す額の定義）。
+済 **T303 資金繰り表（36 か月）**: 起点は `include_in_cashflow=1` の口座の最新残高の合計。残高が取れない口座（CSV だけ）は手で入れた残高を使う。月ごとに「予定収入 − 予定支出 − 予定外の支出の目安」を足し引きして月末残高を推定する。予定外の支出の目安は、直近 6 か月の「振替と予定項目を除いた純支出」の中央値。「月末に残す額」は、今後 3 か月の予定支出の合計（設定で変えられる）。API は `GET /api/cashflow`、MCP は `get_cashflow`。触る: `src/cashflow/forecast.ts`。受け入れ: 手計算した fixture と 36 か月分が一致する。残高の日付が 7 日より古い口座があれば警告を出す。依存: T104・T301。残る判断: **V11**（予定外の支出の目安の出し方、残す額の定義）。
 
-**T304 PWA の資金繰り表**: 縦に 36 行（月・推定残高・予定の内訳）を並べ、横にはスクロールさせない。触る: `pwa/src/money/Cashflow.tsx`。受け入れ: SSR スナップショット。**[ユーザー確認]** スマホで読める。依存: T303。残る判断: V7。
+進行中 **T304 PWA の資金繰り表**: 縦に 36 行（月・推定残高・予定の内訳）を並べ、横にはスクロールさせない。触る: `pwa/src/money/Cashflow.tsx`。受け入れ: SSR スナップショット。**[ユーザー確認]** スマホで読める。依存: T303。残る判断: V7。
 
-**T305 期日通知（V4）**: 期日の N 日前（既定 14 日、項目ごとに変えられる）から、PWA の「お金」タブにバッジを付け、`/api/documents/counts` に `upcoming` を足す。MCP の `list_upcoming` は今後 30 日を返す。プッシュ通知はしない。触る: `src/cashflow/upcoming.ts`、`pwa/src/main.tsx`。受け入れ: 境界日（N 日前ちょうど・期日の当日・期日の翌日）のテスト。依存: T301。残る判断: V4。
+済 **T305 期日通知（V4）**: 期日の N 日前（既定 14 日、項目ごとに変えられる）から、PWA の「お金」タブにバッジを付け、`/api/documents/counts` に `upcoming` を足す。MCP の `list_upcoming` は今後 30 日を返す。プッシュ通知はしない。触る: `src/cashflow/upcoming.ts`、`pwa/src/main.tsx`。受け入れ: 境界日（N 日前ちょうど・期日の当日・期日の翌日）のテスト。依存: T301。残る判断: V4。
 
 **T306 税額の概算（C12 の段階 2・別枠）**: 今年の freee の損益（keihi で確定した経費 + 手で入れた売上）から、所得税・住民税・国保・個人事業税を概算し、T303 に予定項目（origin=estimate）として流す。触る: `src/cashflow/tax.ts`。受け入れ: 年度の税率表を fixture にした表駆動テスト。依存: T303、税理士 #7・#9。残る判断: **V15**（概算に使う控除・国保の自治体の料率を誰が入れるか）。T303 が動いてから着手する。
 
@@ -142,22 +144,22 @@ config.toml に足すセクション: `[bank]`（backfill_from, dedup_date_windo
 | # | 問い | 初期案 | 決める人 | 止まるタスク |
 |---|---|---|---|---|
 | ― | PayPay CSV のサンプル（伏せ字のもの）と列の形式 | ユーザーが 1 か月分を出力して伏せる | ユーザー | T105 |
-| V8 | 過去の明細をいつから入れるか | 2025-01-01（周期の検出に 2 年分） | ユーザー | T104 |
-| V5 | タグの既定を口座単位にし、明細で上書きする | そうする | ユーザー（承認） | T108 |
-| V10 | カテゴリの一覧（固定 12 種） | T108 のとおり | ユーザー | T108 |
+| V8 | 過去の明細をいつから入れるか | 2025-01-01（周期の検出に 2 年分） | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。最終はユーザー | T104 |
+| V5 | タグの既定を口座単位にし、明細で上書きする | そうする | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。最終はユーザー | T108 |
+| V10 | カテゴリの一覧（固定 12 種） | T108 のとおり | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。最終はユーザー | T108 |
 | V12 | 事業口座の中の私用を freee で act=12（プライベート）にするか act=4（無視）にするか | act=12（事業主貸で残高を合わせる） | 税理士 → ユーザー | T109 |
 | V9 | 私用口座の処理方法（F17 の (a) か (b) か） | T003 の結果で (a) が使えれば (a) | spec-writer → ユーザー | T109 |
-| V7 | PWA に「お金」タブを 1 つ足す形でよいか | よい | ux-reviewer → ユーザー | T111・T304 |
+| V7 | PWA に「お金」タブを 1 つ足す形でよいか | よい | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。ux-reviewer → ユーザー | T111・T304 |
 | K1・K2 | MCP は案 A（HTTP 127.0.0.1:8796）か。繋ぐクライアントと scope | A。Claude Code と Codex、全 scope | ユーザー | T201 |
 | V2・K3 | 私用口座の公開範囲の既定と、残高を出すか | summary。残高は合計値だけ出す | ユーザー | T205 |
 | V13 | MCP からの確定に金額の上限を設けるか | 50,000 円以上は MCP から確定できず、PWA で確定する | ユーザー | T203 |
 | V14 | 1 対 1 の照合を自動で照合済み（auto）にするか | する（keihi の中だけの記録で、取り消せる） | ユーザー | T206 |
 | K7 | mcp.call の監査をいつまで残すか | 1 年。確定は 7 + 1 年 | ユーザー | T202 |
-| V11 | 予定外の支出の目安、残す額の定義 | 6 か月の中央値、3 か月分の予定支出 | ユーザー | T303 |
-| V4 | 通知の経路と N 日 | PWA のバッジ + MCP、14 日 | ユーザー | T305 |
+| V11 | 予定外の支出の目安、残す額の定義 | 6 か月の中央値、3 か月分の予定支出（月ごと） | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。最終はユーザー | T303 |
+| V4 | 通知の経路と N 日 | PWA のバッジ・14 日（通知は未実装。MCP は P2） | **採用（暫定）**: 2026-11-06 初期案のまま実装（ユーザー未承認）。最終はユーザー | T305 |
 | V15 | 税額の概算に使う料率・控除の入力 | ユーザーが年 1 回、設定に入れる | 税理士 → ユーザー | T306 |
 P0 で止まるのはユーザーの手作業（キーの発行、アプリの登録、口座の連携）だけ。Y5・U4'・税理士 #1・#4・#9 は G1 の前に要るが、本書のタスクは止めない。
 
 ## 9. 本書の外に残るもの
-- mcp.md の改訂（C9 に合わせて §3.3・§4 の提案の状態機械を「MCP から直接確定」に置き換える）、cashflow.md を新しく書く → spec-writer。
+- mcp.md の改訂（C9 に合わせて §3.3・§4 の提案の状態機械を「MCP から直接確定」に置き換える） → spec-writer。cashflow.md は 2026-11-06 に作成済み。
 - P4: 質問カード（M3）、月次のグラフ、明細の分類を Gemini に任せること、消込の API が一般公開されたら明細 1 件ごとに freee で消込・無視すること。
