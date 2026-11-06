@@ -1,16 +1,25 @@
 // 口座（モック Accounts。GET /api/accounts・GET /api/bank/status、src/web/routes/bank.ts）。上に最終同期と「今すぐ同期」（POST /api/bank/sync。created:false は 10 分以内に実行済み）。
 // 口座ごとのカード: 名前・種別・同期の時刻・過去分の取り込み・エラー・最新残高。押すと設定（既定タグ・見通しに含める・AI に見せる範囲・有効、カードなら引落元と摘要の文字）を開き、
 // PATCH /api/accounts/:id（変わった項目だけ）。引落元が未設定のカードは警告のカードにして、その場で引落元（銀行だけ）と摘要の文字を直せる。
-// focus の口座は開いたときに設定を開く（ホームの「引落元を設定」から）。設定を変えている間は onLock(true) で「戻る」を止める。CSV の取り込みは準備中（押せない）。
+// focus の口座は開いたときに設定を開く（ホームの「引落元を設定」から）。設定を変えている間は onLock(true) で「戻る」を止める。
+// CSV だけの口座（source=csv）のカードには「CSV を取り込む」（POST /api/accounts/:id/import、multipart の file）。結果の件数と壊れた行をカードの中に出し、
+// 取り込んだら口座一覧を読み直す（ホームは戻ったときに読み直す）。409 は「取り込み済み」。
+// 一番下の「CSV だけの口座を追加」で名前と種別（PayPay / 銀行 / その他 = wallet）を入れて POST /api/accounts。
 import { useCallback, useEffect, useState } from 'preact/hooks';
-import { getJson, patchJson, postJson } from '../api.ts';
+import { getJson, patchJson, postForm, postJson } from '../api.ts';
 import { Icon, type IconName } from './Icons.tsx';
 import {
   ACCOUNT_KIND_LABELS,
   accountDraft,
   accountPatch,
   cardUsage,
+  CSV_ACCOUNT_KINDS,
+  CSV_ERRORS_SHOWN,
+  CSV_MAX_BYTES,
+  ERROR_TEXT,
+  csvRowError,
   failText,
+  importSummary,
   md,
   needsSettlement,
   settlementChoices,
@@ -25,7 +34,9 @@ import {
   yen,
   type Account,
   type AccountDraft,
+  type AccountKind,
   type BankStatus,
+  type CsvImportResult,
   type MonthlySummary,
 } from './model.ts';
 import { ScreenHead } from './Money.tsx';
@@ -33,6 +44,99 @@ import { ScreenHead } from './Money.tsx';
 type Row = Account & { status: BankStatus | null };
 const KIND_ICON: Record<string, IconName> = { bank: 'bank', card: 'card', wallet: 'wallet', paypay: 'wallet', cash: 'cash' };
 const TAG_SEG_LABELS = { ...TAG_LABELS, unset: '決めない' };
+
+// CSV の取り込みの状態（口座ごと）。
+export type CsvOutcome = { busy: boolean; result?: CsvImportResult; fail?: string };
+
+function CsvImport({ a, idp, outcome, disabled, onImport }: { a: Account; idp: string; outcome?: CsvOutcome; disabled: boolean; onImport: (f: File) => void }) {
+  const paypay = a.kind === 'paypay';
+  const r = outcome?.result;
+  return (
+    <div class="m-acct-csv">
+      <label class={disabled || outcome?.busy ? 'm-csv-pick m-csv-pick-off' : 'm-csv-pick'} for={`${idp}-csv`}>
+        <Icon name="upload" size={18} />
+        {outcome?.busy ? '取り込み中…' : paypay ? 'PayPay の CSV を取り込む' : 'CSV を取り込む'}
+        <input
+          id={`${idp}-csv`}
+          type="file"
+          accept=".csv,text/csv"
+          disabled={disabled || outcome?.busy}
+          onChange={(e) => {
+            const f = e.currentTarget.files?.[0];
+            e.currentTarget.value = '';
+            if (f) onImport(f);
+          }}
+        />
+      </label>
+      <p class="m-sub">{paypay ? 'PayPay アプリ → 取引履歴 → CSV で書き出したファイル。' : ''}重なる期間は自動で重複を除きます。</p>
+      {outcome?.fail && (
+        <p class="m-msg" role="status">
+          {outcome.fail}
+        </p>
+      )}
+      {r && (
+        <div class="m-msg m-csv-result" role="status">
+          <b>取り込みました。</b>
+          <span>{importSummary(r)}</span>
+          {r.errors.length > 0 && (
+            <ul class="m-csv-errs">
+              {r.errors.slice(0, CSV_ERRORS_SHOWN).map((e) => (
+                <li key={e.line}>{csvRowError(e)}</li>
+              ))}
+              {r.errors.length > CSV_ERRORS_SHOWN && <li>ほか {r.errors.length - CSV_ERRORS_SHOWN} 件</li>}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export type NewCsvAccount = { name: string; kind: AccountKind };
+
+export function CsvAccountForm({
+  draft,
+  busy,
+  onChange,
+  onSave,
+  onClose,
+}: {
+  draft: NewCsvAccount;
+  busy: boolean;
+  onChange: (d: NewCsvAccount) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <section class="m-card m-gap12" aria-labelledby="m-newacct-h">
+      <h2 id="m-newacct-h" class="m-h3">
+        CSV だけの口座を追加
+      </h2>
+      <label class="m-field-wrap" for="m-newacct-name">
+        <span class="m-label">名前</span>
+        <input id="m-newacct-name" class="m-field" maxLength={TEXT_MAX} placeholder="例: PayPay 残高" value={draft.name} onInput={(e) => onChange({ ...draft, name: e.currentTarget.value })} />
+      </label>
+      <fieldset class="m-fs m-fs-sm">
+        <legend>種別</legend>
+        <div class="m-seg m-seg-3">
+          {CSV_ACCOUNT_KINDS.map((k) => (
+            <button type="button" key={k.kind} aria-pressed={draft.kind === k.kind} onClick={() => onChange({ ...draft, kind: k.kind })}>
+              {k.label}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+      <div class="m-grid2">
+        <button type="button" class="m-btn m-btn-primary" disabled={busy || !draft.name.trim()} onClick={onSave}>
+          追加
+        </button>
+        <button type="button" class="m-btn" onClick={onClose}>
+          やめる
+        </button>
+      </div>
+    </section>
+  );
+}
 
 function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -85,9 +189,11 @@ export function AccountCard({
   edit,
   open,
   busy,
+  csv,
   onOpen,
   onDraft,
   onSave,
+  onImport,
 }: {
   a: Row;
   today: string;
@@ -98,9 +204,11 @@ export function AccountCard({
   edit: AccountDraft | null;
   open: boolean;
   busy: boolean;
+  csv?: CsvOutcome;
   onOpen: (open: boolean) => void;
   onDraft: (d: AccountDraft) => void;
   onSave: () => void;
+  onImport: (f: File) => void;
 }) {
   const s = a.status;
   const fix = needsSettlement(a);
@@ -148,6 +256,7 @@ export function AccountCard({
           )}
         </span>
       </button>
+      {a.source === 'csv' && <CsvImport a={a} idp={idp} outcome={csv} disabled={busy} onImport={onImport} />}
       {fix && !open && (
         <div class="m-acct-fix">
           <p class="m-fs14">
@@ -184,12 +293,6 @@ export function AccountCard({
           </fieldset>
           <Switch label="有効" sub="切ると同期と集計から外す" checked={draft.active} onChange={(v) => onDraft({ ...draft, active: v })} />
           {a.kind === 'card' && <SettlementFields draft={draft} accounts={accounts} idp={idp} onChange={onDraft} />}
-          {a.source === 'csv' && (
-            <button type="button" class="m-btn m-btn-wide" disabled>
-              <Icon name="upload" size={18} />
-              CSV を取り込む（準備中）
-            </button>
-          )}
           <div class="m-grid2">
             <button type="button" class="m-btn m-btn-primary" disabled={busy || !dirty} onClick={onSave}>
               保存
@@ -213,9 +316,11 @@ export function AccountsView({
   usage = {},
   edit,
   busy,
+  csv = {},
   onOpen,
   onDraft,
   onSave,
+  onImport,
 }: {
   rows: Row[];
   today: string;
@@ -223,9 +328,11 @@ export function AccountsView({
   usage?: Record<string, number>;
   edit: Edit | null;
   busy: boolean;
+  csv?: Record<string, CsvOutcome>;
   onOpen: (a: Account, open: boolean) => void;
   onDraft: (a: Account, d: AccountDraft) => void;
   onSave: (a: Account, d: AccountDraft) => void;
+  onImport: (a: Account, f: File) => void;
 }) {
   // 引落元が未設定のカードを先に。
   const sorted = [...rows].sort((x, y) => Number(needsSettlement(y)) - Number(needsSettlement(x)));
@@ -243,9 +350,11 @@ export function AccountsView({
             edit={mine?.draft ?? null}
             open={mine?.open ?? false}
             busy={busy}
+            csv={csv[a.id]}
             onOpen={(o) => onOpen(a, o)}
             onDraft={(d) => onDraft(a, d)}
             onSave={() => onSave(a, mine?.draft ?? accountDraft(a))}
+            onImport={(f) => onImport(a, f)}
           />
         );
       })}
@@ -275,8 +384,11 @@ export function Accounts({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [summary, setSummary] = useState<MonthlySummary | null>(null);
+  const [csv, setCsv] = useState<Record<string, CsvOutcome>>({});
+  const [adding, setAdding] = useState<NewCsvAccount | null>(null);
 
   const dirty = (() => {
+    if (adding && adding.name.trim() !== '') return true;
     const a = edit ? accounts.find((x) => x.id === edit.id) : null;
     return a && edit ? Object.keys(accountPatch(a, edit.draft)).length > 0 : false;
   })();
@@ -331,6 +443,37 @@ export function Accounts({
     await Promise.all([onChanged(), loadStatus()]);
   };
 
+  const importCsv = async (a: Account, f: File) => {
+    if (f.size > CSV_MAX_BYTES) {
+      setCsv((m) => ({ ...m, [a.id]: { busy: false, fail: ERROR_TEXT.too_large! } }));
+      return;
+    }
+    setCsv((m) => ({ ...m, [a.id]: { busy: true } }));
+    const fd = new FormData();
+    fd.append('file', f, f.name);
+    const r = await postForm(`/api/accounts/${encodeURIComponent(a.id)}/import`, fd);
+    if (r.status === 201) {
+      setCsv((m) => ({ ...m, [a.id]: { busy: false, result: r.body as CsvImportResult } }));
+      await Promise.all([onChanged(), loadStatus()]);
+      return;
+    }
+    const fail = r.status === 409 ? '同じファイルは取り込み済みです。' : failText(r.status, r.body);
+    setCsv((m) => ({ ...m, [a.id]: { busy: false, fail } }));
+  };
+
+  const addAccount = async (d: NewCsvAccount) => {
+    setBusy(true);
+    const r = await postJson('/api/accounts', { name: d.name.trim(), kind: d.kind });
+    setBusy(false);
+    if (r.status !== 201) {
+      setMsg(failText(r.status, r.body));
+      return;
+    }
+    setMsg(`「${d.name.trim()}」を追加しました。`);
+    setAdding(null);
+    await Promise.all([onChanged(), loadStatus()]);
+  };
+
   const lastOk = status.map((s) => s.last_ok_at).filter((x): x is string => !!x).sort().pop() ?? null;
   return (
     <>
@@ -359,10 +502,19 @@ export function Accounts({
           usage={cardUsage(accounts, summary)}
           edit={edit}
           busy={busy}
+          csv={csv}
           onOpen={(a, open) => setEdit(open ? { id: a.id, draft: edit?.id === a.id ? edit.draft : accountDraft(a), open: true } : null)}
           onDraft={(a, d) => setEdit({ id: a.id, draft: d, open: edit?.id === a.id ? edit.open : false })}
           onSave={(a, d) => void save(a, d)}
+          onImport={(a, f) => void importCsv(a, f)}
         />
+        {adding ? (
+          <CsvAccountForm draft={adding} busy={busy} onChange={setAdding} onSave={() => void addAccount(adding)} onClose={() => setAdding(null)} />
+        ) : (
+          <button type="button" class="m-link m-link-center" onClick={() => setAdding({ name: '', kind: 'paypay' })}>
+            CSV だけの口座を追加
+          </button>
+        )}
       </div>
     </>
   );

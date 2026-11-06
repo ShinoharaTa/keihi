@@ -3,6 +3,8 @@
 // - 振替: 口座 A の出金と口座 B の入金が同額・日付差 0〜windowDays 日で、お互いに候補が 1 件ずつ → kind=transfer
 // - チャージ: 上の組のうち、入金側が paypay の口座で出金側が bank / card の口座 → kind=charge
 //   card の出金はチャージの相手としてだけ組む。card の入金（返金）は組まない
+//   paypay の口座の入金は摘要が「チャージ」で始まるものだけを候補にする（受け取った金額などを誤って組まない）。
+//   paypay の口座の出金（送った金額・支払い）は組まない
 // - 引き落とし: カードの口座に card_settlement_account_id と card_settlement_pattern があるとき、その銀行口座の出金で
 //   摘要がパターンを含むもの → kind=card_settlement（in_txn_id は NULL。カード側に引き落としの明細は無い）
 // 同じ組で最新の行が rejected なら作らない。active な組に入っている明細は候補にしない（作り直さない）。
@@ -48,9 +50,14 @@ function groupByAmount(ts: TxnWithAccount[]): Map<number, TxnWithAccount[]> {
   return m;
 }
 
+const CHARGE_PREFIX = 'チャージ';
+
 // 振替・チャージの候補になる組か。card の出金は入金側が paypay のとき（チャージ）だけ。
+// paypay の出金は組まない。paypay の入金は摘要が「チャージ」で始まるものだけ。
 function pairable(o: TxnWithAccount, i: TxnWithAccount, windowDays: number): boolean {
   if (o.account_id === i.account_id) return false;
+  if (o.account_kind === 'paypay') return false;
+  if (i.account_kind === 'paypay' && !i.description.trimStart().startsWith(CHARGE_PREFIX)) return false;
   if (o.account_kind === 'card' && i.account_kind !== 'paypay') return false;
   return dayDiff(o.txn_date, i.txn_date) <= windowDays;
 }
