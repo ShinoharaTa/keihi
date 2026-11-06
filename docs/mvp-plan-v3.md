@@ -132,9 +132,9 @@
 | | transfer_links | id, out_txn_id, in_txn_id, kind(transfer/card_settlement/charge), source(auto/human), state(active/rejected), created_at | 追記専用（最新の行が有効） |
 | | sync_status | account_id PK, last_sync_at, last_ok_at, last_error, last_csv_at, backfill_done_until | 更新可 |
 | | freee_rule_links | id, account_id, remote_matcher_id, act, state(active/deleted), created_at | 追記専用 |
-| 0006_mcp | mcp_clients | id, name, token_sha256, scopes_json, created_at, expires_at, revoked_at, last_used_at | 更新は revoked_at・last_used_at だけ |
+| 0007_mcp | mcp_clients | id, name, token_sha256, scopes_json, created_at, expires_at, revoked_at, last_used_at | 更新は revoked_at・last_used_at だけ |
 | | txn_matches | id, bank_txn_id, document_id, score, features_json, state(auto/candidate/confirmed/rejected), actor, created_at | 追記専用（最新の行が有効） |
-| 0007_cashflow | scheduled_items | id, name, amount, direction(in/out), category(tax/insurance/car/other/income), account_id, recurrence, anchor_date, end_date, notify_days_before, origin(manual/detected/estimate), active | 更新可（監査に残す） |
+| 0006_cashflow | scheduled_items | id, name, amount, direction(in/out), category(tax/insurance/car/other/income), account_id, recurrence, anchor_date, end_date, notify_days_before, origin(manual/detected/estimate), active | 更新可（監査に残す） |
 | | recurrence_candidates | id, account_id, description_norm, amount, interval, occurrences_json, state(open/accepted/dismissed), scheduled_item_id | 状態の列だけ更新 |
 config.toml に足すセクション: `[bank]`（backfill_from, dedup_date_window_days, transfer_window_days=3, match_date_window_days=3）と、`[mcp]` に inbox_dir・rate_per_hour を足す。
 
