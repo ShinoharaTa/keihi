@@ -2,13 +2,15 @@
 //   → 200 {ok, user, documents: {total, needs_attention}, jobs: {queued, running, failed},
 //          backup: {last_success_at, last_drill: {at, ok, failure_count} | null}, freee_reauth_required,
 //          retention: {earliest_retain_until: 'YYYY-MM-DD' | null, documents},
-//          bank: {accounts, last_ok_at, errors}}
+//          bank: {accounts, last_ok_at, errors, latest_txn_date}}
 // 件数と日時だけを返す（中身・エラー文は返さない）。バックアップの状態は監査ログ（backup.run / backup.drill）から読む。
 // freee_reauth_required は settings の同名キーが 1 のとき true（providers/freee/state.ts。PWA の再認可の帯）。
-// bank は使っている口座の数・最後にうまくいった明細の同期・last_error がある口座の数（src/bank/sync.ts bankSummary）。
+// bank は使っている口座の数・最後にうまくいった明細の同期・last_error がある口座の数（src/bank/sync.ts bankSummary）と、
+// 使っている口座の明細の最新の日付（latest_txn_date。無ければ null）。
 // retention は最も古い受領日の保持期限（src/retention.ts。期限は受領日の年で決まるので最小の received_on で足りる）。
 import { Hono } from 'hono';
 import { getSetting } from '../../attention.ts';
+import { latestTxnDateActive } from '../../bank/repo.ts';
 import { bankSummary } from '../../bank/sync.ts';
 import { REAUTH_KEY } from '../../providers/freee/state.ts';
 import type { AppDeps } from '../app.ts';
@@ -46,7 +48,7 @@ export function statusRoutes(deps: Pick<AppDeps, 'db' | 'config'>): Hono {
       backup,
       freee_reauth_required: freeeReauthRequired,
       retention,
-      bank: bankSummary(deps.db),
+      bank: { ...bankSummary(deps.db), latest_txn_date: latestTxnDateActive(deps.db) },
     });
   });
   return r;

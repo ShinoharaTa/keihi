@@ -163,6 +163,6 @@ describe('同期の API', () => {
       { account_id: bankId(), name: 'テスト銀行', kind: 'bank', source: 'freee', active: true, last_sync_at: T0.toISOString(), last_ok_at: T0.toISOString(), last_error: null, last_csv_at: null, backfill_done_until: '2026-08-06' },
     ]);
     const s = (await (await req('/api/status')).json()) as { bank: unknown };
-    assert.deepEqual(s.bank, { accounts: 2, last_ok_at: T0.toISOString(), errors: 1 });
+    assert.deepEqual(s.bank, { accounts: 2, last_ok_at: T0.toISOString(), errors: 1, latest_txn_date: null });
   });
 });

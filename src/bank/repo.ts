@@ -259,6 +259,75 @@ export function listBankTxnSources(db: Db, bankTxnId: string): BankTxnSourceRow[
   return db.prepare('SELECT * FROM bank_txn_sources WHERE bank_txn_id = ? ORDER BY rowid').all(bankTxnId) as BankTxnSourceRow[];
 }
 
+// ---- 明細の一覧と月次の集計（T110。src/bank/summary.ts） ----
+
+export type BankTxnListRow = BankTxnRow & { account_name: string };
+
+// SQL で絞れる条件。タグ・カテゴリは効くタグ（tags.ts）で決まるので、ここでは絞らない。
+export type BankTxnSqlFilter = {
+  from?: string;
+  to?: string;
+  accountId?: string;
+  side?: TxnSide;
+  amountMin?: number;
+  amountMax?: number;
+  // description_norm に含まれる文字列（正規化済み）。
+  descriptionNorm?: string;
+};
+
+// txn_date DESC, id DESC の順で、after（その行より後ろ）から limit 件。
+export function listBankTxnsPage(
+  db: Db,
+  f: BankTxnSqlFilter,
+  after: { txnDate: string; id: string } | null,
+  limit: number,
+): BankTxnListRow[] {
+  const where: string[] = [];
+  const args: (string | number)[] = [];
+  const add = (sql: string, ...v: (string | number)[]) => {
+    where.push(sql);
+    args.push(...v);
+  };
+  if (f.from !== undefined) add('t.txn_date >= ?', f.from);
+  if (f.to !== undefined) add('t.txn_date <= ?', f.to);
+  if (f.accountId !== undefined) add('t.account_id = ?', f.accountId);
+  if (f.side !== undefined) add('t.side = ?', f.side);
+  if (f.amountMin !== undefined) add('t.amount >= ?', f.amountMin);
+  if (f.amountMax !== undefined) add('t.amount <= ?', f.amountMax);
+  if (f.descriptionNorm !== undefined) add('instr(t.description_norm, ?) > 0', f.descriptionNorm);
+  if (after) add('(t.txn_date < ? OR (t.txn_date = ? AND t.id < ?))', after.txnDate, after.txnDate, after.id);
+  return db
+    .prepare(
+      `SELECT t.*, a.name AS account_name FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY t.txn_date DESC, t.id DESC LIMIT ?`,
+    )
+    .all(...args, limit) as BankTxnListRow[];
+}
+
+// 日付が [from, to] の明細（口座名付き）。
+export function listBankTxnsBetween(db: Db, from: string, to: string): BankTxnListRow[] {
+  return db
+    .prepare(
+      `SELECT t.*, a.name AS account_name FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
+       WHERE t.txn_date BETWEEN ? AND ? ORDER BY t.txn_date, t.rowid`,
+    )
+    .all(from, to) as BankTxnListRow[];
+}
+
+// 使っている口座（active = 1）の明細の最新の日付（無ければ null）。/api/status の bank.latest_txn_date。
+export function latestTxnDateActive(db: Db): string | null {
+  return (
+    db.prepare('SELECT max(t.txn_date) d FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id WHERE a.active = 1').get() as {
+      d: string | null;
+    }
+  ).d;
+}
+
+// last_seen_at がちょうど lastSeenAt の明細（= その時刻の同期で取った明細）の最小の日付（無ければ null）。
+export function minTxnDateSeenAt(db: Db, lastSeenAt: string): string | null {
+  return (db.prepare('SELECT min(txn_date) d FROM bank_txns WHERE last_seen_at = ?').get(lastSeenAt) as { d: string | null }).d;
+}
+
 // ---- account_balances ----
 
 export function appendBalance(db: Db, b: { accountId: string; asOfDate: string; balance: number; source: BalanceSource; now: string }): void {
