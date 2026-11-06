@@ -2,11 +2,14 @@
 // 1 文書 1 行（documents と件数が一致する）。year を渡せば受領日（received_on）の年で絞る。
 // - status は送信の状態（deals.state）。取引をまだ作っていない文書は空。
 // - paper_status は paper.ts の計算値（discarded を含む）。
+// - retain_until は keihi 側の保持期限（src/retention.ts。[retention] から計算）。
 // - CSV は RFC 4180（CRLF、必要なときだけ二重引用符）。表計算ソフトの数式にならないよう、= + - @ で始まる値は先頭に ' を付ける。
 import type { Db } from '../db/index.ts';
+import type { Config } from '../config.ts';
+import { retainUntil } from '../retention.ts';
 import { computePaperStatus, discardAllowed, paperInputOf } from './paper.ts';
 
-export const MAPPING_COLUMNS = ['document_id', 'sha256', 'received_on', 'uploaded_at', 'remote_receipt_id', 'remote_deal_id', 'status', 'paper_status'] as const;
+export const MAPPING_COLUMNS = ['document_id', 'sha256', 'received_on', 'uploaded_at', 'remote_receipt_id', 'remote_deal_id', 'status', 'paper_status', 'retain_until'] as const;
 
 type Row = {
   document_id: string;
@@ -30,7 +33,7 @@ export function csvField(v: string | number | null): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function mappingRows(db: Db, opts: { provider: string; year?: number; now?: Date }): Record<(typeof MAPPING_COLUMNS)[number], string | null>[] {
+export function mappingRows(db: Db, opts: { provider: string; retention: Config['retention']; year?: number; now?: Date }): Record<(typeof MAPPING_COLUMNS)[number], string | null>[] {
   const now = opts.now ?? new Date();
   const allowed = discardAllowed(db);
   const where = opts.year === undefined ? '' : `WHERE d.received_on >= ? AND d.received_on <= ?`;
@@ -56,10 +59,11 @@ export function mappingRows(db: Db, opts: { provider: string; year?: number; now
     remote_deal_id: r.remote_deal_id,
     status: r.status,
     paper_status: computePaperStatus(paperInputOf(r, now, allowed)).status,
+    retain_until: retainUntil(r, opts),
   }));
 }
 
-export function mappingCsv(db: Db, opts: { provider: string; year?: number; now?: Date }): string {
+export function mappingCsv(db: Db, opts: { provider: string; retention: Config['retention']; year?: number; now?: Date }): string {
   const lines = [MAPPING_COLUMNS.join(',')];
   for (const r of mappingRows(db, opts)) lines.push(MAPPING_COLUMNS.map((c) => csvField(r[c])).join(','));
   return `${lines.join('\r\n')}\r\n`;

@@ -60,6 +60,7 @@ function make() {
       ingest: { maxBytes: 20 * 1024 * 1024 },
       calendar: { deadlineMode: 'early', yearEndHolidays: false },
       deadline: { countFrom: 'receipt_day' },
+      retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
     },
     auth: allow,
     triggerWorker: () => trigger(),

@@ -6,13 +6,13 @@ import type { AppDeps } from '../app.ts';
 
 export const EXPORT_PROVIDER = 'freee';
 
-export function exportRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
+export function exportRoutes(deps: Pick<AppDeps, 'db' | 'now' | 'config'>): Hono {
   const r = new Hono();
   r.get('/export/mapping.csv', (c) => {
     const y = c.req.query('year');
     if (y !== undefined && !/^\d{4}$/.test(y)) return c.json({ error: 'invalid_year' }, 400);
     const now = (deps.now ?? (() => new Date()))();
-    const csv = mappingCsv(deps.db, { provider: EXPORT_PROVIDER, year: y === undefined ? undefined : Number(y), now });
+    const csv = mappingCsv(deps.db, { provider: EXPORT_PROVIDER, retention: deps.config.retention, year: y === undefined ? undefined : Number(y), now });
     const name = y === undefined ? 'keihi-mapping.csv' : `keihi-mapping-${y}.csv`;
     return c.body(csv, 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${name}"`, 'cache-control': 'no-store' });
   });

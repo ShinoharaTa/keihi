@@ -16,7 +16,7 @@ import { statusRoutes } from './routes/status.ts';
 export type AppDeps = {
   db: Db;
   objectsDir: string;
-  config: Pick<Config, 'ingest' | 'calendar' | 'deadline'>;
+  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention'>;
   auth: MiddlewareHandler;
   triggerWorker: () => void;
   now?: () => Date;

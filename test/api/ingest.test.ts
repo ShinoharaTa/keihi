@@ -38,6 +38,7 @@ function make(opts: { maxBytes?: number; auth?: MiddlewareHandler } = {}) {
       ingest: { maxBytes: opts.maxBytes ?? 20 * 1024 * 1024 },
       calendar: { deadlineMode: 'early', yearEndHolidays: false },
       deadline: { countFrom: 'receipt_day' },
+      retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
     },
     auth: opts.auth ?? allow,
     triggerWorker: () => triggered++,

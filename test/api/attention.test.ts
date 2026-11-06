@@ -28,7 +28,7 @@ beforeEach(() => {
   app = createApp({
     db,
     objectsDir: path.join(root, 'objects'),
-    config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' } },
+    config: { ingest: { maxBytes: 1024 }, calendar: { deadlineMode: 'early', yearEndHolidays: false }, deadline: { countFrom: 'receipt_day' }, retention: { years: 7, extraYears: 1, start: 'next_year_0316' } },
     auth: allow,
     triggerWorker: () => {},
     now: () => T0,
@@ -257,18 +257,31 @@ describe('GET /api/export/mapping.csv', () => {
     assert.match(res.headers.get('content-type')!, /^text\/csv/);
     const lines = (await res.text()).split('\r\n');
     assert.equal(lines.at(-1), '');
-    assert.equal(lines[0], 'document_id,sha256,received_on,uploaded_at,remote_receipt_id,remote_deal_id,status,paper_status');
+    assert.equal(lines[0], 'document_id,sha256,received_on,uploaded_at,remote_receipt_id,remote_deal_id,status,paper_status,retain_until');
     const body = lines.slice(1, -1);
     const docs = (db.prepare('SELECT count(*) n FROM documents').get() as { n: number }).n;
     assert.equal(body.length, docs);
     const sha = (id: string) => (db.prepare('SELECT sha256 FROM documents WHERE id = ?').get(id) as { sha256: string }).sha256;
     assert.deepEqual(body, [
-      `${b},${sha(b)},2025-12-31,,,,,keep_required`,
-      `${a},${sha(a)},2026-10-16,2026-10-16T04:00:00.000Z,11,21,verified,unknown`,
+      `${b},${sha(b)},2025-12-31,,,,,keep_required,2034-03-15`,
+      `${a},${sha(a)},2026-10-16,2026-10-16T04:00:00.000Z,11,21,verified,unknown,2035-03-15`,
     ]);
 
     const y = await (await app.request('/api/export/mapping.csv?year=2026')).text();
     assert.equal(y.split('\r\n').length - 2, 1);
     assert.equal((await app.request('/api/export/mapping.csv?year=26')).status, 400);
+  });
+});
+
+describe('GET /api/status の retention', () => {
+  test('最も古い受領日の保持期限と、documents の件数', async () => {
+    addDocument(db, { receivedOn: '2026-03-15' });
+    addDocument(db, { receivedOn: '2024-12-31', deadlineOn: '2025-01-14' });
+    const res = await app.request('/api/status');
+    assert.equal(res.status, 200);
+    const docs = (db.prepare('SELECT count(*) n FROM documents').get() as { n: number }).n;
+    const min = (db.prepare('SELECT min(received_on) d FROM documents').get() as { d: string }).d;
+    assert.equal(min, '2024-12-31');
+    assert.deepEqual((await res.json()).retention, { earliest_retain_until: '2033-03-15', documents: docs });
   });
 });
