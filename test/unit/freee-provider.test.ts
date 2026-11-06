@@ -224,9 +224,32 @@ describe('対応づけ', () => {
     env.db.close();
   });
 
-  test('listRules は act 4 / 11 / 0 だけを返す', async () => {
+  test('listRules は act 4 / 11 / 12 / 0 だけを返す', async () => {
     const env = await makeEnv(dir());
-    assert.deepEqual(await env.provider.listRules(), [{ id: 1, matchText: 'DUMMY', action: 'ignore' }]);
+    assert.deepEqual(await env.provider.listRules(), [
+      { id: 1, matchText: 'DUMMY', action: 'ignore' },
+      { id: 3, matchText: 'PRIVATE', action: 'private_register' },
+    ]);
+    env.db.close();
+  });
+
+  test('listBankTxns は 1 ページだけ取り、limit・offset の範囲外は送らずに client', async () => {
+    const env = await makeEnv(dir());
+    await env.provider.listBankTxns({ walletableType: 'bank_account', walletableId: 2, offset: 100 });
+    const q = env.mock.reqs.filter((r) => r.url.pathname === '/api/1/wallet_txns').map((r) => Object.fromEntries(r.url.searchParams));
+    assert.deepEqual(q, [{ company_id: '111', walletable_type: 'bank_account', walletable_id: '2', limit: '100', offset: '100' }]);
+    const n = env.mock.reqs.length;
+    await rejectsKind(env.provider.listBankTxns({ limit: 101 }), 'client');
+    await rejectsKind(env.provider.listBankTxns({ limit: 0 }), 'client');
+    await rejectsKind(env.provider.listBankTxns({ offset: -1 }), 'client');
+    assert.equal(env.mock.reqs.length, n);
+    env.db.close();
+  });
+
+  test('createRule の口座指定は送らずに client（walletable の書式が未確認）', async () => {
+    const env = await makeEnv(dir());
+    await rejectsKind(env.provider.createRule({ matchText: 'X', action: 'ignore', walletableId: 2 }), 'client');
+    assert.equal(env.mock.reqs.length, 0);
     env.db.close();
   });
 });
