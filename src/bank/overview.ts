@@ -2,8 +2,10 @@
 // - balances: 資金繰りに入れる口座（include_in_cashflow = 1 かつ active = 1）の最新残高。残高が無い口座（カードなど）は balance null で
 //   by_account に入れ、total には入れない。
 // - reserve / this_month の見込み: buildForecast（今月の 1 か月分）の値。available = total − reserve。
-// - this_month の income / expense: 今月の月次集計（monthlySummary の total。振替・引き落とし・チャージは除く）。
+// - this_month の income / expense: 今月の月次集計（monthlySummary。振替・引き落とし・チャージは除く）のうち、資金繰りに入れる口座の分。
+//   all_income / all_expense は対象外の口座も含めた合計（monthlySummary の total）。
 // - untagged_count: 効くタグが unset の明細の件数（振替・引き落とし・チャージは数えない）。
+//   PWA の一覧（GET /api/bank_txns?tag=unset）と一致させるため全口座（active・include_in_cashflow で絞らない）。
 // - cards_without_settlement: 使っているカードのうち、引き落とし口座かパターンが空のもの（二重計上になる。docs/cashflow.md §12）。
 // - open_candidates: open の周期の候補の件数。upcoming_due: 期日の近い予定の件数（upcoming.ts の dueSoonCount）。
 // - sync: 同期の要約（sync.ts の bankSummary の last_ok_at・errors）。
@@ -34,6 +36,8 @@ export type Overview = {
     month: string;
     income: number;
     expense: number;
+    all_income: number;
+    all_expense: number;
     planned_out_remaining: number;
     unplanned_out_estimate: number;
     projected_end_balance: number;
@@ -51,6 +55,7 @@ export function buildOverview(db: Db, opts: OverviewOptions): Overview {
   const f = buildForecast(db, { ...opts, months: 1 });
   const m0 = f.months[0]!;
   const summary = monthlySummary(db, today.slice(0, 7));
+  const target = summary.by_account.filter((a) => a.include_in_cashflow && a.active);
 
   const excluded = excludedFromCashflow(db);
   const ids = listAllBankTxnIds(db).filter((id) => !excluded.has(id));
@@ -73,8 +78,10 @@ export function buildOverview(db: Db, opts: OverviewOptions): Overview {
     upcoming_due: dueSoonCount(db, today),
     this_month: {
       month: m0.month,
-      income: summary.total.income,
-      expense: summary.total.expense,
+      income: target.reduce((s, a) => s + a.income, 0),
+      expense: target.reduce((s, a) => s + a.expense, 0),
+      all_income: summary.total.income,
+      all_expense: summary.total.expense,
       planned_out_remaining: m0.planned_out,
       unplanned_out_estimate: m0.unplanned_out,
       projected_end_balance: m0.balance_end,

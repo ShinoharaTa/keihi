@@ -326,6 +326,13 @@ export function listTxnBalances(db: Db, accountId: string, to: string): { txn_da
     .all(accountId, to) as { txn_date: string; balance: number }[];
 }
 
+// 口座の残高の記録（account_balances。as_of_date が to 以前。as_of_date, seq の昇順）。GET /api/balance_history。
+export function listBalancesUpTo(db: Db, accountId: string, to: string): { as_of_date: string; balance: number }[] {
+  return db
+    .prepare('SELECT as_of_date, balance FROM account_balances WHERE account_id = ? AND as_of_date <= ? ORDER BY as_of_date, seq')
+    .all(accountId, to) as { as_of_date: string; balance: number }[];
+}
+
 // 使っている口座（active = 1）の明細の最新の日付（無ければ null）。/api/status の bank.latest_txn_date。
 export function latestTxnDateActive(db: Db): string | null {
   return (

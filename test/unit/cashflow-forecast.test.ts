@@ -208,6 +208,28 @@ describe('buildForecast', () => {
     assert.equal(f.cut_per_month_to_survive, null);
   });
 
+  test('cut_per_month_to_survive: 予定外の目安が 0 で不足があれば null', () => {
+    const { db, mk, bal, item } = base();
+    const A = mk('銀行A', 'bank');
+    bal(A, TODAY, 100_000);
+    item('車検', 500_000, 'out', 'once', '2027-01-15');
+    const f = buildForecast(db, { today: TODAY, months: 3 });
+    assert.equal(f.unplanned_out_per_month, 0);
+    // 11 月の reserve（12〜2 月）に車検 500,000 → margin −400,000
+    assert.deepEqual(f.min_month, { month: '2026-11', balance_end: 100_000, margin: -400_000 });
+    assert.equal(f.cut_per_month_to_survive, null);
+  });
+
+  test('cut_per_month_to_survive: 今日が月末なら今月の按分は 0 で、来月からの削減だけで埋める', () => {
+    const { db } = setup();
+    const f = buildForecast(db, { today: '2026-11-30', months: 11 });
+    // 今月: 予定外 0・家賃（今日）も足さず 1,300,000。来月から毎月 −127,501、2027-02 に +200,000、2027-05 に −36,000。
+    // 2027-09（k = 10）: 1,300,000 − 10 × 127,501 + 200,000 − 36,000 = 188,990、reserve 240,000 → margin −51,010（ここだけ負）
+    assert.deepEqual(f.min_month, { month: '2027-09', balance_end: 188_990, margin: -51_010 });
+    // 10 か月分を減らすので −51,010 + 10x ≥ 0 → x = 5,101
+    assert.equal(f.cut_per_month_to_survive, 5_101);
+  });
+
   test('月末と 2 月: 家賃は月末、2 月は 28 日（閏年は 29 日）。同じ月の項目は期日順', () => {
     const { db } = setup();
     const f = buildForecast(db, { today: TODAY });

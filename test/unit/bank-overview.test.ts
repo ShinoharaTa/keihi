@@ -64,7 +64,7 @@ function mkApp(db: Db): Hono {
 //   今月の按分: round(30,000 × (30 − 6) / 30) = 24,000。今月の予定（11/7〜30）: 家賃 + 税 = 110,000。
 //   projected_end_balance = 1,250,000 − 110,000 − 24,000 = 1,116,000。
 // 今月の明細: A 入金 300,000・A 出金 20,000・振替 A → W 50,000（集計外）・W 出金 5,000（unset）・W 出金 7,000（private にした）・off 出金 1,000（unset）。
-//   income 300,000、expense 20,000 + 5,000 + 7,000 + 1,000 = 33,000。untagged = W 5,000 と off 1,000 の 2 件（振替の入金側は数えない）。
+//   income 300,000、expense 20,000 + 5,000 + 7,000 = 32,000（資金繰りの対象口座だけ）。all_income 300,000、all_expense 32,000 + off 1,000 = 33,000。untagged = W 5,000 と off 1,000 の 2 件（振替の入金側は数えない）。
 function setupOverview() {
   const b = base();
   const { db, mk, txn, bal, item } = b;
@@ -128,7 +128,7 @@ describe('GET /api/bank/overview', () => {
       cards_without_settlement: [{ account_id: card1, name: 'カード1' }, { account_id: card4, name: 'カード4' }], // 口座の作成順
       open_candidates: 2,
       upcoming_due: 1,
-      this_month: { month: '2026-11', income: 300_000, expense: 33_000, planned_out_remaining: 110_000, unplanned_out_estimate: 24_000, projected_end_balance: 1_116_000 },
+      this_month: { month: '2026-11', income: 300_000, expense: 32_000, all_income: 300_000, all_expense: 33_000, planned_out_remaining: 110_000, unplanned_out_estimate: 24_000, projected_end_balance: 1_116_000 },
       sync: { last_ok_at: '2026-11-05T21:00:00.000Z', errors: 2 },
     });
   });
@@ -146,24 +146,28 @@ describe('GET /api/bank/overview', () => {
       cards_without_settlement: [],
       open_candidates: 0,
       upcoming_due: 0,
-      this_month: { month: '2026-11', income: 0, expense: 0, planned_out_remaining: 0, unplanned_out_estimate: 0, projected_end_balance: 0 },
+      this_month: { month: '2026-11', income: 0, expense: 0, all_income: 0, all_expense: 0, planned_out_remaining: 0, unplanned_out_estimate: 0, projected_end_balance: 0 },
       sync: { last_ok_at: null, errors: 0 },
     });
   });
 });
 
-// 銀行 A・B と、残高も明細も無い銀行 C。カード・include_in_cashflow = 0・active = 0 の口座は出さない。今日は 2026-11-06、4 か月（08〜11）。
-//   A: 05/20 100（期間の前）、08/05 1,000、08/20 1,200、08/25 balance NULL、09 なし、10/03 900、10/30 1,500、11/02 1,600、
-//      account_balances 11/05 1,700 → 08 1,200 / 09 1,200（引き継ぎ）/ 10 1,500 / 11 1,700（account_balances）
-//   B: 07/31 5,000（期間の前）、09/10 4,000、11/04 4,500、11/20 9,999（今日より後）、account_balances なし
+// 銀行 A・B・D と、残高も明細も無い銀行 C。カード・include_in_cashflow = 0・active = 0 の口座は出さない。今日は 2026-11-06、4 か月（08〜11）。
+// 各月は「月末までの残高の記録の最後」と「月末までの明細の最後の balance」のうち日付が新しいほう。
+//   A: 明細 05/20 100（期間の前）、08/05 1,000、08/20 1,200、08/25 balance NULL、10/03 900、10/30 1,500、11/02 1,600
+//      記録 09/15 1,100、11/05 1,700、11/20 8,888（今日より後）
+//      → 08 1,200 / 09 1,100（記録 09/15 が明細 08/20 より新しい）/ 10 1,500（明細 10/30 が記録 09/15 より新しい）/ 11 1,700（記録 11/05）
+//   B: 明細 07/31 5,000（期間の前）、09/10 4,000、11/04 4,500、11/20 9,999（今日より後）、記録なし
 //      → 08 5,000（期間の前から引き継ぎ）/ 09 4,000 / 10 4,000 / 11 4,500（今日までの明細）
-//   C: 0。合計: 08 6,200 / 09 5,200 / 10 5,500 / 11 6,200
+//   D: 明細なし、記録 08/15 3,000、10/01 3,500、12/01 99,999（今日より後）→ 08 3,000 / 09 3,000 / 10 3,500 / 11 3,500
+//   C: 0。合計: 08 9,200 / 09 8,100 / 10 9,000 / 11 9,700
 function setupHistory() {
   const b = base();
   const { db, mk, txn, bal } = b;
   const A = mk('銀行A', 'bank');
   const B = mk('銀行B', 'bank');
   const C = mk('銀行C', 'bank');
+  const D = mk('銀行D', 'bank');
   const card = mk('カード', 'card');
   const off = mk('私用', 'bank');
   const closed = mk('旧口座', 'cash');
@@ -176,7 +180,12 @@ function setupHistory() {
   txn(A, '2026-10-03', 1, 'expense', 900);
   txn(A, '2026-10-30', 1, 'income', 1_500);
   txn(A, '2026-11-02', 1, 'income', 1_600);
+  bal(A, '2026-09-15', 1_100);
   bal(A, '2026-11-05', 1_700);
+  bal(A, '2026-11-20', 8_888);
+  bal(D, '2026-08-15', 3_000);
+  bal(D, '2026-10-01', 3_500);
+  bal(D, '2026-12-01', 99_999);
   txn(B, '2026-07-31', 1, 'income', 5_000);
   txn(B, '2026-09-10', 1, 'expense', 4_000);
   txn(B, '2026-11-04', 1, 'income', 4_500);
@@ -185,20 +194,20 @@ function setupHistory() {
   txn(off, '2026-10-10', 1, 'expense', 456);
   txn(closed, '2026-10-10', 1, 'expense', 789);
   bal(off, '2026-11-05', 777);
-  return { ...b, A, B, C };
+  return { ...b, A, B, C, D };
 }
 
 describe('GET /api/balance_history', () => {
-  test('手計算した fixture と一致する（明細が無い月は引き継ぎ、今月は残高の記録を優先）', async () => {
-    const { db, A, B, C } = setupHistory();
+  test('手計算した fixture と一致する（記録と明細の新しいほう、無い月は引き継ぎ、今日より後は見ない）', async () => {
+    const { db, A, B, C, D } = setupHistory();
     const res = await mkApp(db).request('/api/balance_history?months=4', { headers });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), {
       months: [
-        { month: '2026-08', total: 6_200, by_account: { [A]: 1_200, [B]: 5_000, [C]: 0 } },
-        { month: '2026-09', total: 5_200, by_account: { [A]: 1_200, [B]: 4_000, [C]: 0 } },
-        { month: '2026-10', total: 5_500, by_account: { [A]: 1_500, [B]: 4_000, [C]: 0 } },
-        { month: '2026-11', total: 6_200, by_account: { [A]: 1_700, [B]: 4_500, [C]: 0 } },
+        { month: '2026-08', total: 9_200, by_account: { [A]: 1_200, [B]: 5_000, [C]: 0, [D]: 3_000 } },
+        { month: '2026-09', total: 8_100, by_account: { [A]: 1_100, [B]: 4_000, [C]: 0, [D]: 3_000 } },
+        { month: '2026-10', total: 9_000, by_account: { [A]: 1_500, [B]: 4_000, [C]: 0, [D]: 3_500 } },
+        { month: '2026-11', total: 9_700, by_account: { [A]: 1_700, [B]: 4_500, [C]: 0, [D]: 3_500 } },
       ],
     });
   });
@@ -223,11 +232,20 @@ describe('GET /api/balance_history', () => {
     }
   });
 
+  test('同じ日なら残高の記録を採る', () => {
+    const { db, mk, txn, bal } = base();
+    const E = mk('銀行E', 'bank');
+    txn(E, '2026-11-03', 1, 'expense', 500);
+    bal(E, '2026-11-03', 600);
+    assert.equal(balanceHistory(db, { today: '2026-11-06', months: 1 }).months[0]!.by_account[E], 600);
+  });
+
   test('年をまたぐ', () => {
-    const { db, A } = setupHistory();
+    const { db, A, D } = setupHistory();
     const h = balanceHistory(db, { today: '2027-01-10', months: 3 });
     assert.deepEqual(h.months.map((m) => m.month), ['2026-11', '2026-12', '2027-01']);
-    // 2026-11: 11/02 1,600（過去の月は明細だけを見る）、12 は引き継ぎ、2027-01 は account_balances の 1,700
-    assert.deepEqual(h.months.map((m) => m.by_account[A]), [1_600, 1_600, 1_700]);
+    // 今日が 2027-01-10 なら A の 11/20 の記録 8,888 も D の 12/01 の記録 99,999 も過去になる（12・1 月は引き継ぎ）
+    assert.deepEqual(h.months.map((m) => m.by_account[A]), [8_888, 8_888, 8_888]);
+    assert.deepEqual(h.months.map((m) => m.by_account[D]), [3_500, 99_999, 99_999]);
   });
 });

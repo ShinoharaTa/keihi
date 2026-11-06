@@ -404,6 +404,25 @@ describe('acceptCandidate / dismissCandidate', () => {
     db.close();
   });
 
+  test('3 か月ごと: 検出して受け入れると quarterly の項目になり、次の期日は最後の出現月 + 3 か月', () => {
+    const { db, A } = fresh();
+    for (const d of ['2026-02-20', '2026-05-20', '2026-08-20']) txn(db, A, d, 45000, '国保');
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
+    const c = listRecurrenceCandidates(db)[0];
+    assert.equal(c.interval, 'quarterly');
+    assert.equal(nextDueFromCandidate(c), '2026-11-20');
+    const { candidate, item } = acceptCandidate(db, c.id, by, { category: 'insurance' }, T0);
+    assert.equal(candidate.state, 'accepted');
+    assert.equal(item.recurrence, 'quarterly');
+    assert.equal(item.anchor_date, '2026-11-20');
+    assert.equal(item.category, 'insurance');
+    assert.equal(item.origin, 'detected');
+    // 受け入れた後は再検出で作らない。
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
+    assert.equal(verifyAudit(db).ok, true);
+    db.close();
+  });
+
   test('値が不正なら台帳も候補も変わらない', () => {
     const { db, A, B } = fresh();
     seed(db, A, B);
