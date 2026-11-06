@@ -102,7 +102,7 @@ export const HANDLERS: Handlers = {
   }),
   sync_bank: createSyncBankHandler(() => {
     const rt = runtime();
-    return { provider: rt.provider(), providerKind: rt.cfg.provider.kind, backfillFrom: rt.cfg.bank.backfillFrom };
+    return { provider: rt.provider(), providerKind: rt.cfg.provider.kind, backfillFrom: rt.cfg.bank.backfillFrom, transferWindowDays: rt.cfg.bank.transferWindowDays };
   }),
   daily: createDailyHandler(() => {
     const rt = runtime();

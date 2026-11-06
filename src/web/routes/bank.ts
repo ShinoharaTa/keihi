@@ -5,8 +5,13 @@
 //         → 200 Account / 400 / 404。変わった列を監査ログ（money_account.updated）に残す。
 //   POST  /api/bank/sync      → 200 {job_id, created}（今すぐ同期。未完了の sync_bank があるか、前回積んでから 10 分以内なら積まない）
 //   GET   /api/bank/status    → 200 {accounts: [{account_id, name, kind, source, active, last_sync_at, last_ok_at, last_error, last_csv_at, backfill_done_until}]}
+//   GET   /api/bank_txns      ?from&to（YYYY-MM-DD）&account_id&tag&category&side&amount_min&amount_max&q&cursor&limit（1〜100、既定 100）
+//         → 200 {items: [TxnView], next_cursor: string | null} / 400（T110。src/bank/summary.ts）
+//   GET   /api/summary/monthly ?month=YYYY-MM → 200 MonthlySummary
+//                              ?from=YYYY-MM&to=YYYY-MM（最大 36 か月）→ 200 {months: [MonthlySummary]} / 400
 import { Hono } from 'hono';
 import { AccountError, accountView, createCsvAccount, listAccountViews, parseAccountPatch, updateAccount } from '../../bank/accounts.ts';
+import { listTxns, monthlySummaries, monthlySummary, monthsBetween, parseTxnQuery, SummaryError } from '../../bank/summary.ts';
 import { bankStatus, enqueueSyncBank, MANUAL_SYNC_INTERVAL_MS } from '../../bank/sync.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
@@ -66,6 +71,30 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
   });
 
   r.get('/bank/status', (c) => c.json({ accounts: bankStatus(deps.db) }));
+
+  r.get('/bank_txns', (c) => {
+    try {
+      return c.json(listTxns(deps.db, parseTxnQuery(c.req.query())));
+    } catch (e) {
+      if (e instanceof SummaryError) return c.json({ error: e.reason }, e.status);
+      throw e;
+    }
+  });
+
+  r.get('/summary/monthly', (c) => {
+    const { month, from, to } = c.req.query();
+    try {
+      if (month !== undefined) {
+        if (from !== undefined || to !== undefined) return c.json({ error: 'month_and_range' }, 400);
+        return c.json(monthlySummary(deps.db, month));
+      }
+      if (from === undefined || to === undefined) return c.json({ error: 'month_required' }, 400);
+      return c.json({ months: monthlySummaries(deps.db, monthsBetween(from, to)) });
+    } catch (e) {
+      if (e instanceof SummaryError) return c.json({ error: e.reason }, e.status);
+      throw e;
+    }
+  });
 
   return r;
 }

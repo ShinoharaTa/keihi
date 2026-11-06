@@ -329,7 +329,7 @@ describe('syncBank', () => {
 });
 
 describe('sync_bank ジョブ', () => {
-  const handlers = () => ({ sync_bank: createSyncBankHandler(() => ({ provider: fake, providerKind: 'fake', backfillFrom: BACKFILL_FROM })) });
+  const handlers = () => ({ sync_bank: createSyncBankHandler(() => ({ provider: fake, providerKind: 'fake', backfillFrom: BACKFILL_FROM, transferWindowDays: 3 })) });
 
   test('動かすと明細が入り、ジョブは完了する', async () => {
     addBankTxns(3);
@@ -364,6 +364,44 @@ describe('sync_bank ジョブ', () => {
     const a = enqueueSyncBank(db, T0).job_id;
     assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => T0 }), { done: 0, failed: 1 });
     assert.deepEqual([getJob(db, a)!.state, getJob(db, a)!.attempts], ['queued', 1]);
+  });
+
+  test('同期のあとに振替（カードの引き落とし）を検出し、作った組の数を監査に残す', async () => {
+    const card = getAccountByWalletable(db, 'fake', 'credit_card:1')!.id;
+    updateAccountSettings(db, card, { cardSettlementAccountId: bankId(), cardSettlementPattern: 'ﾃｽﾄｶｰﾄﾞ' }, T0.toISOString());
+    fake.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-10-27', amount: 32100, entrySide: 'expense', description: 'ﾃｽﾄｶｰﾄﾞ ﾋｷｵﾄｼ', balance: null, status: 1, dueAmount: 32100, ruleMatched: false });
+    addBankTxns(2);
+    enqueueSyncBank(db, T0);
+    assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => T0 }), { done: 1, failed: 0 });
+    assert.deepEqual(db.prepare('SELECT kind, source, state FROM transfer_links').all().map((r) => ({ ...r })), [{ kind: 'card_settlement', source: 'auto', state: 'active' }]);
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'transfers.detected'`).all() as { payload_json: string }[];
+    assert.equal(a.length, 1);
+    // 範囲は今回取った最小の日付（2026-10-01）− 2 × 3 日 〜 今日。
+    assert.deepEqual(JSON.parse(a[0]!.payload_json), { from: '2026-09-25', to: '2026-11-06', created: 1, kinds: { card_settlement: 1 } });
+    assert.equal(verifyAudit(db).ok, true);
+
+    // 2 回目は組を作り直さない（作った数 0 を残す）。
+    const t1 = new Date(T0.getTime() + 3_600_000);
+    enqueueSyncBank(db, t1);
+    await runUntilEmpty(db, handlers(), { now: () => t1 });
+    assert.equal(count('SELECT count(*) n FROM transfer_links'), 1);
+    assert.equal(JSON.parse((db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'transfers.detected' ORDER BY seq DESC LIMIT 1`).get() as { payload_json: string }).payload_json).created, 0);
+  });
+
+  test('取った明細が 0 件なら検出しない', async () => {
+    enqueueSyncBank(db, T0);
+    assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => T0 }), { done: 1, failed: 0 });
+    assert.equal(count(`SELECT count(*) n FROM audit_log WHERE action = 'transfers.detected'`), 0);
+  });
+
+  test('一部の口座が失敗しても、取れた分で検出してから再試行に回す', async () => {
+    const card = getAccountByWalletable(db, 'fake', 'credit_card:1')!.id;
+    updateAccountSettings(db, card, { cardSettlementAccountId: bankId(), cardSettlementPattern: 'ﾃｽﾄｶｰﾄﾞ' }, T0.toISOString());
+    fake.addBankTxn({ walletableType: 'bank_account', walletableId: 2, date: '2026-10-27', amount: 32100, entrySide: 'expense', description: 'ﾃｽﾄｶｰﾄﾞ ﾋｷｵﾄｼ', balance: null, status: 1, dueAmount: 32100, ruleMatched: false });
+    fake.failNext('server'); // 先に取るカードの口座が失敗する
+    enqueueSyncBank(db, T0);
+    assert.deepEqual(await runUntilEmpty(db, handlers(), { now: () => T0 }), { done: 0, failed: 1 });
+    assert.equal(count('SELECT count(*) n FROM transfer_links'), 1);
   });
 
   test('enqueueSyncBank: 未完了があれば積まない。minIntervalMs の間は積まない', () => {
