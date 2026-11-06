@@ -9,10 +9,17 @@
 //         → 200 {items: [TxnView], next_cursor: string | null} / 400（T110。src/bank/summary.ts。category=none は未分類）
 //   GET   /api/summary/monthly ?month=YYYY-MM → 200 MonthlySummary
 //                              ?from=YYYY-MM&to=YYYY-MM（最大 36 か月）→ 200 {months: [MonthlySummary]} / 400
+//   GET   /api/bank/overview  → 200 Overview（お金タブのホーム。src/bank/overview.ts。[cashflow] の設定は deps.config.cashflow）
+//   GET   /api/balance_history ?months=12（1〜BALANCE_HISTORY_MAX_MONTHS の整数）→ 200 {months: [{month, total, by_account}]}
+//         / 400 {error: invalid_months}（src/bank/balanceHistory.ts。古い順、最後は今月 = 今日時点）
+// 今日は Asia/Tokyo の暦日。
 import { Hono } from 'hono';
+import { BALANCE_HISTORY_DEFAULT_MONTHS, BALANCE_HISTORY_MAX_MONTHS, balanceHistory } from '../../bank/balanceHistory.ts';
 import { AccountError, accountView, createCsvAccount, listAccountViews, parseAccountPatch, updateAccount } from '../../bank/accounts.ts';
+import { buildOverview } from '../../bank/overview.ts';
 import { listTxns, monthlySummaries, monthlySummary, monthsBetween, parseTxnQuery, SummaryError } from '../../bank/summary.ts';
 import { bankStatus, enqueueSyncBank, MANUAL_SYNC_INTERVAL_MS } from '../../bank/sync.ts';
+import { todayInTokyo } from '../../calendar/businessDays.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -71,6 +78,25 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
   });
 
   r.get('/bank/status', (c) => c.json({ accounts: bankStatus(deps.db) }));
+
+  r.get('/bank/overview', (c) => {
+    const cf = deps.config.cashflow;
+    return c.json(
+      buildOverview(deps.db, {
+        today: todayInTokyo(now()),
+        unplannedLookbackMonths: cf.unplannedLookbackMonths,
+        reserveMonths: cf.reserveMonths,
+        includeUnplannedIncome: cf.includeUnplannedIncome,
+      }),
+    );
+  });
+
+  r.get('/balance_history', (c) => {
+    const q = c.req.query('months');
+    const months = q === undefined ? BALANCE_HISTORY_DEFAULT_MONTHS : /^\d+$/.test(q) ? Number(q) : NaN;
+    if (!Number.isSafeInteger(months) || months < 1 || months > BALANCE_HISTORY_MAX_MONTHS) return c.json({ error: 'invalid_months' }, 400);
+    return c.json(balanceHistory(deps.db, { today: todayInTokyo(now()), months }));
+  });
 
   r.get('/bank_txns', (c) => {
     try {

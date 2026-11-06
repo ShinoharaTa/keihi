@@ -32,6 +32,7 @@ export const AMOUNT_TOLERANCE_PCT = 5;
 export const RULES: readonly { interval: Interval; minDays: number; maxDays: number; minCount: number; months: number }[] = [
   { interval: 'monthly', minDays: 28, maxDays: 31, minCount: 3, months: 1 },
   { interval: 'bimonthly', minDays: 58, maxDays: 62, minCount: 3, months: 2 },
+  { interval: 'quarterly', minDays: 85, maxDays: 97, minCount: 3, months: 3 },
   { interval: 'yearly', minDays: 350, maxDays: 380, minCount: 2, months: 12 },
   { interval: 'biennial', minDays: 715, maxDays: 745, minCount: 2, months: 24 },
 ];

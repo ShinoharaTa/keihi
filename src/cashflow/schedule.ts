@@ -27,7 +27,7 @@ export const NOTIFY_DAYS_MAX = 365;
 export const NAME_MAX = 200;
 
 // 周期ごとの月数（once は 1 回だけ）。
-const STEP_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, yearly: 12, biennial: 24 };
+const STEP_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, quarterly: 3, yearly: 12, biennial: 24 };
 
 export class ScheduleError extends Error {
   readonly code: string;
