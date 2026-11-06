@@ -7,6 +7,9 @@
 // 入力の並び順によらず結果が同じになる。バッチの開始時点で候補があったのに組めなかった入力を「重複の疑い」にする。
 // 統合したとき、入力が freee なら freee_status・due_amount を書き、残高は NULL のときだけ埋める。csv なら last_seen_at だけ書く。
 // 全体を 1 トランザクションで書く。入力の検査に落ちた行は errors に入れ、他の行は続ける。
+// dryRun: 候補の検索だけ行い、何も書かずに同じ結果（件数・組む相手）を返す。新しい明細の bankTxnId は `dry:<index>`。
+// CSV の取り込み（src/bank/csv/import.ts）が csv_imports の件数を先に決めるために使う（csv_imports は追記専用で件数が NOT NULL）。
+// dryRun では csvImportId の検査をしない（まだ取り込みの行が無い）。
 import { tx, type Db } from '../db/index.ts';
 import { normalizeVendor } from '../vendors/normalize.ts';
 import {
@@ -80,18 +83,45 @@ function dayDiff(a: string, b: string): number {
   return Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000;
 }
 
-export function dedupAndInsert(db: Db, inputs: DedupInput[], opts: { dateWindowDays: number; now: string }): DedupResult {
+// dryRun で書いたことにする明細。added: 既存の明細に足したことにする取得元。virtual: 新しく入れたことにする明細。
+type DryState = {
+  added: Map<string, Set<TxnSource>>;
+  virtual: { id: string; c: DedupInput; seq: number; sources: Set<TxnSource> }[];
+};
+
+// 新しい明細の rowid は既存のどれよりも大きく、入れた順に増える。dryRun の仮の明細もその順にする。
+const DRY_SEQ_BASE = Number.MAX_SAFE_INTEGER / 2;
+
+export function dedupAndInsert(
+  db: Db,
+  inputs: DedupInput[],
+  opts: { dateWindowDays: number; now: string; dryRun?: boolean },
+): DedupResult {
   const res: DedupResult = { new: [], merged: [], touched: [], suspects: [], errors: [] };
   const w = opts.dateWindowDays;
-  const candidatesOf = (c: DedupInput) =>
-    findDedupCandidates(db, { accountId: c.accountId, side: c.side, amount: c.amount, from: addDays(c.txnDate, -w), to: addDays(c.txnDate, w), source: c.source });
+  const dry: DryState | null = opts.dryRun ? { added: new Map(), virtual: [] } : null;
+  const candidatesOf = (c: DedupInput): { id: string; txn_date: string; seq: number }[] => {
+    const from = addDays(c.txnDate, -w);
+    const to = addDays(c.txnDate, w);
+    const found = findDedupCandidates(db, { accountId: c.accountId, side: c.side, amount: c.amount, from, to, source: c.source });
+    if (!dry) return found;
+    const real = found.filter((x) => !dry.added.get(x.id)?.has(c.source));
+    const virt = dry.virtual
+      .filter((v) => v.c.accountId === c.accountId && v.c.side === c.side && v.c.amount === c.amount && v.c.txnDate >= from && v.c.txnDate <= to && !v.sources.has(c.source))
+      .map((v) => ({ id: v.id, txn_date: v.c.txnDate, seq: v.seq }));
+    return [...real, ...virt].sort((x, y) => (x.txn_date < y.txn_date ? -1 : x.txn_date > y.txn_date ? 1 : x.seq - y.seq));
+  };
+  const touch = (id: string, c: DedupInput) => {
+    if (!dry) touchFrom(db, id, c, opts.now);
+  };
+  const validateFor = (c: DedupInput) => validate(db, dry ? { ...c, csvImportId: null } : c);
   return tx(db, () => {
     // 1. 外部 ID の一致。同じ入力の中で同じ外部 ID が重なった 2 行目以降は、日付・金額・side が同じなら先の行の touch、違えば errors。
     const rest: number[] = [];
     const firstOf = new Map<string, number>(); // key → 最初の index
     const dupOf = new Map<number, number>(); // 2 行目以降の index → 最初の index
     for (const [i, c] of inputs.entries()) {
-      const err = validate(db, c);
+      const err = validateFor(c);
       if (err) {
         res.errors.push({ index: i, reason: err });
         continue;
@@ -111,7 +141,7 @@ export function dedupAndInsert(db: Db, inputs: DedupInput[], opts: { dateWindowD
           res.errors.push({ index: i, reason: 'external_id_conflict' });
           continue;
         }
-        touchFrom(db, hit.id, c, opts.now);
+        touch(hit.id, c);
         res.touched.push({ index: i, bankTxnId: hit.id });
       } else rest.push(i);
     }
@@ -137,9 +167,23 @@ export function dedupAndInsert(db: Db, inputs: DedupInput[], opts: { dateWindowD
         const cands = candidatesOf(c).sort((x, y) => dayDiff(x.txn_date, c.txnDate) - dayDiff(y.txn_date, c.txnDate) || x.seq - y.seq);
         const pair = cands[0];
         if (pair) {
-          addBankTxnSource(db, { bankTxnId: pair.id, source: c.source, externalId: c.externalId, csvImportId: c.csvImportId, rawSha256: c.rawSha256 });
-          touchFrom(db, pair.id, c, opts.now);
+          if (dry) {
+            const v = dry.virtual.find((x) => x.id === pair.id);
+            if (v) v.sources.add(c.source);
+            else dry.added.set(pair.id, (dry.added.get(pair.id) ?? new Set<TxnSource>()).add(c.source));
+          } else {
+            addBankTxnSource(db, { bankTxnId: pair.id, source: c.source, externalId: c.externalId, csvImportId: c.csvImportId, rawSha256: c.rawSha256 });
+            touchFrom(db, pair.id, c, opts.now);
+          }
           res.merged.push({ index: i, bankTxnId: pair.id });
+          continue;
+        }
+        if (dry) {
+          const id = `dry:${i}`;
+          dry.virtual.push({ id, c, seq: DRY_SEQ_BASE + dry.virtual.length, sources: new Set([c.source]) });
+          res.new.push({ index: i, bankTxnId: id });
+          const init = initial.get(i)!;
+          if (init.length > 0) res.suspects.push({ index: i, bankTxnId: id, candidateIds: init });
           continue;
         }
         const t = insertBankTxn(db, {
@@ -171,7 +215,7 @@ export function dedupAndInsert(db: Db, inputs: DedupInput[], opts: { dateWindowD
         res.errors.push({ index: i, reason: 'external_id_conflict' }); // 先の行が errors に入った
         continue;
       }
-      touchFrom(db, id, inputs[i]!, opts.now);
+      touch(id, inputs[i]!);
       res.touched.push({ index: i, bankTxnId: id });
     }
     for (const k of ['new', 'merged', 'touched', 'suspects', 'errors'] as const) (res[k] as { index: number }[]).sort((a, b) => a.index - b.index);

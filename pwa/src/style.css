@@ -2084,6 +2084,49 @@ button:disabled {
   flex-direction: column;
   gap: 10px;
 }
+/* CSV の取り込み（モック Accounts の PayPay のカード） */
+.m-acct-csv {
+  border-top: 1px solid var(--m-line2);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.m-csv-pick {
+  position: relative;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--m-fg2);
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+.m-csv-pick input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.m-csv-pick:focus-within {
+  outline: 2px solid var(--m-accent);
+  outline-offset: 2px;
+}
+.m-csv-pick-off {
+  opacity: 0.45;
+}
+.m-csv-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.m-csv-errs {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
 .m-err {
   color: var(--m-out-text);
   font-weight: 700;

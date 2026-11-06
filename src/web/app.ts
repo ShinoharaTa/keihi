@@ -19,8 +19,8 @@ import { tagRoutes } from './routes/tags.ts';
 export type AppDeps = {
   db: Db;
   objectsDir: string;
-  // provider は口座（money_accounts.provider）に使う。省略時は freee。
-  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention' | 'cashflow'> & Partial<Pick<Config, 'provider'>>;
+  // provider は口座（money_accounts.provider）に使う。省略時は freee。bank は CSV の取り込み（重複排除・振替の日付幅）に使う。省略時は既定値。
+  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention' | 'cashflow'> & Partial<Pick<Config, 'provider' | 'bank'>>;
   auth: MiddlewareHandler;
   triggerWorker: () => void;
   now?: () => Date;

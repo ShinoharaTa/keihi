@@ -3,6 +3,10 @@
 //   POST  /api/accounts       body {name, kind} → 201 Account（CSV だけの口座。source = csv、provider = [provider] kind）/ 400
 //   PATCH /api/accounts/:id   body {default_tag?, mcp_visibility?, include_in_cashflow?, card_settlement_account_id?, card_settlement_pattern?, active?}
 //         → 200 Account / 400 / 404。変わった列を監査ログ（money_account.updated）に残す。
+//   POST  /api/accounts/:id/import  multipart: file（CSV、5MB まで）→ 201 CsvImportResult（src/bank/csv/import.ts）
+//         / 400 {error: file_required | not_csv_account | unknown_format} / 404 {error: not_found} / 409 {error: already_imported, csv_import_id}
+//         / 413 {error: too_large, max_bytes}。取り込みの後に振替を検出する（[bank] transfer_window_days）。
+//   GET   /api/accounts/:id/imports → 200 {imports: [{id, imported_at, file_name, parser_id, rows_total, rows_new, rows_merged, rows_error}]} / 404
 //   POST  /api/bank/sync      → 200 {job_id, created}（今すぐ同期。未完了の sync_bank があるか、前回積んでから 10 分以内なら積まない）
 //   GET   /api/bank/status    → 200 {accounts: [{account_id, name, kind, source, active, last_sync_at, last_ok_at, last_error, last_csv_at, backfill_done_until}]}
 //   GET   /api/bank_txns      ?from&to（YYYY-MM-DD）&account_id&tag&category&side&amount_min&amount_max&q&cursor&limit（1〜100、既定 100）
@@ -14,14 +18,22 @@
 //         / 400 {error: invalid_months}（src/bank/balanceHistory.ts。古い順、最後は今月 = 今日時点）
 // 今日は Asia/Tokyo の暦日。
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { BALANCE_HISTORY_DEFAULT_MONTHS, BALANCE_HISTORY_MAX_MONTHS, balanceHistory } from '../../bank/balanceHistory.ts';
 import { AccountError, accountView, createCsvAccount, listAccountViews, parseAccountPatch, updateAccount } from '../../bank/accounts.ts';
+import { CsvImportError, importCsv, listCsvImports } from '../../bank/csv/import.ts';
 import { buildOverview } from '../../bank/overview.ts';
+import { getAccount } from '../../bank/repo.ts';
 import { listTxns, monthlySummaries, monthlySummary, monthsBetween, parseTxnQuery, SummaryError } from '../../bank/summary.ts';
 import { bankStatus, enqueueSyncBank, MANUAL_SYNC_INTERVAL_MS } from '../../bank/sync.ts';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
+import { DEFAULT_DEDUP_DATE_WINDOW_DAYS, DEFAULT_TRANSFER_WINDOW_DAYS } from '../../config.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
+
+// CSV の上限（docs/mvp-plan-v3.md T105）。multipart の境界の分の余裕は ingest.ts と同じ。
+export const CSV_MAX_BYTES = 5 * 1024 * 1024;
+const MULTIPART_OVERHEAD = 64 * 1024;
 
 async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   const text = await req.text();
@@ -34,7 +46,7 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
-export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'triggerWorker'>): Hono {
+export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'triggerWorker' | 'objectsDir'>): Hono {
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
   const providerKind = () => deps.config.provider?.kind ?? 'freee';
@@ -63,6 +75,50 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
       if (e instanceof AccountError) return c.json({ error: e.reason }, e.status);
       throw e;
     }
+  });
+
+  r.post(
+    '/accounts/:id/import',
+    bodyLimit({ maxSize: CSV_MAX_BYTES + MULTIPART_OVERHEAD, onError: (c) => c.json({ error: 'too_large', max_bytes: CSV_MAX_BYTES }, 413) }),
+    async (c) => {
+      let body: Record<string, string | File>;
+      try {
+        body = (await c.req.parseBody()) as Record<string, string | File>;
+      } catch {
+        return c.json({ error: 'file_required' }, 400);
+      }
+      const file = body.file;
+      if (!(file instanceof File)) return c.json({ error: 'file_required' }, 400);
+      if (file.size > CSV_MAX_BYTES) return c.json({ error: 'too_large', max_bytes: CSV_MAX_BYTES }, 413);
+      const bank = deps.config.bank;
+      try {
+        const res = await importCsv(deps.db, {
+          accountId: c.req.param('id'),
+          bytes: new Uint8Array(await file.arrayBuffer()),
+          fileName: file.name || null,
+          objectsDir: deps.objectsDir,
+          user: c.req.header(USER_HEADER) ?? null,
+          dedupDateWindowDays: bank?.dedupDateWindowDays ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
+          transferWindowDays: bank?.transferWindowDays ?? DEFAULT_TRANSFER_WINDOW_DAYS,
+          now: now(),
+        });
+        return c.json(res, 201);
+      } catch (e) {
+        if (e instanceof CsvImportError) return c.json({ error: e.reason, ...e.extra }, e.status);
+        throw e;
+      }
+    },
+  );
+
+  r.get('/accounts/:id/imports', (c) => {
+    const id = c.req.param('id');
+    if (!getAccount(deps.db, id)) return c.json({ error: 'not_found' }, 404);
+    return c.json({
+      imports: listCsvImports(deps.db, id).map((i) => ({
+        id: i.id, imported_at: i.imported_at, file_name: i.file_name, parser_id: i.parser_id,
+        rows_total: i.rows_total, rows_new: i.rows_new, rows_merged: i.rows_merged, rows_error: i.rows_error,
+      })),
+    });
   });
 
   r.post('/bank/sync', (c) => {

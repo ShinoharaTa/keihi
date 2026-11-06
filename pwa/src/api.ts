@@ -41,3 +41,13 @@ export async function postJson(url: string, body: unknown, method: 'POST' | 'PAT
 }
 
 export const patchJson = (url: string, body: unknown) => postJson(url, body, 'PATCH');
+
+// multipart で送る（CSV の取り込み）。Content-Type は境界ごとブラウザに付けさせる。
+export async function postForm(url: string, body: FormData): Promise<{ status: number; body: unknown }> {
+  try {
+    const res = await fetch(url, { method: 'POST', body, credentials: 'same-origin', cache: 'no-store' });
+    return { status: res.status, body: await jsonOrNull(res) };
+  } catch {
+    return { status: 0, body: null };
+  }
+}

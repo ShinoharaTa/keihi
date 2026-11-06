@@ -51,7 +51,7 @@ function mkApp(db: Db): Hono {
   const app = new Hono();
   app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }));
   const config = { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } as unknown as Config;
-  app.route('/api', bankRoutes({ db, config, now: () => T0, triggerWorker: () => {} }));
+  app.route('/api', bankRoutes({ db, config, objectsDir: '/nonexistent', now: () => T0, triggerWorker: () => {} }));
   return app;
 }
 

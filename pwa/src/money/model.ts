@@ -209,6 +209,12 @@ export const ERROR_TEXT: Record<string, string> = {
   unknown_account: '口座が見つかりません。',
   not_open: 'この提案はもう処理されています。',
   not_found: '見つかりませんでした。読み直してください。',
+  invalid_kind: '種別が正しくありません。',
+  not_csv_account: 'この口座は CSV では取り込めません（freee から同期する口座です）。',
+  unknown_format: 'この CSV の形式は読めません（今は PayPay の CSV だけ）。',
+  file_required: 'ファイルを選んでください。',
+  too_large: 'ファイルが大きすぎます（5MB まで）。',
+  already_imported: '同じファイルは取り込み済みです。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -217,6 +223,47 @@ export function failText(status: number, body?: unknown): string {
   if (err) return ERROR_TEXT[err] ?? `受け付けられませんでした（${err}）`;
   return `サーバーから読めませんでした（HTTP ${status}）`;
 }
+
+// ---- CSV の取り込み（POST /api/accounts/:id/import、src/bank/csv/import.ts） ----
+
+export type CsvImportResult = {
+  csv_import_id: string;
+  parser: string;
+  rows_total: number;
+  rows_new: number;
+  rows_merged: number;
+  rows_skipped_points: number;
+  rows_error: number;
+  errors: { line: number; reason: string }[];
+  date_range: { from: string; to: string } | null;
+};
+
+const CSV_ROW_ERROR_TEXT: Record<string, string> = {
+  invalid_columns: '列の数が違います',
+  invalid_date: '日付が読めません',
+  invalid_amount: '金額が読めません',
+  no_amount: '出金にも入金にも金額がありません',
+  both_amounts: '出金と入金の両方に金額があります',
+  missing_external_id: '取引番号がありません',
+  duplicate_in_file: '同じ取引番号の行が前にあります',
+  external_id_conflict: '取り込み済みの同じ取引番号と日付か金額が違います',
+};
+export const CSV_ERRORS_SHOWN = 20;
+
+export function csvRowError(e: { line: number; reason: string }): string {
+  return `${e.line} 行目: ${CSV_ROW_ERROR_TEXT[e.reason] ?? e.reason}`;
+}
+
+export function importSummary(r: CsvImportResult): string {
+  return `新規 ${r.rows_new} 件・統合 ${r.rows_merged} 件・ポイント ${r.rows_skipped_points} 件を除外・エラー ${r.rows_error} 件`;
+}
+
+// CSV だけの口座の種別（POST /api/accounts の kind）。「その他」は wallet。
+export const CSV_ACCOUNT_KINDS: readonly { kind: AccountKind; label: string }[] = [
+  { kind: 'paypay', label: 'PayPay' },
+  { kind: 'bank', label: '銀行' },
+  { kind: 'wallet', label: 'その他' },
+];
 
 // ---- 明細の絞り込み ----
 

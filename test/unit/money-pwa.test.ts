@@ -781,7 +781,7 @@ describe('SSR スナップショット', () => {
     t.assert.snapshot(lines(out));
   });
 
-  test('口座: 引落元が未設定のカードはその場で直す、設定を開いたカード、CSV は準備中', async (t) => {
+  test('口座: 引落元が未設定のカードはその場で直す、設定を開いたカード、CSV の取り込みと結果、CSV だけの口座の追加', async (t) => {
     const m = await load('/src/money/Accounts.tsx');
     const mm = await load('/src/money/model.ts');
     const withStatus = mm.withStatus as unknown as (a: Account[], s: BankStatus[]) => unknown[];
@@ -791,16 +791,33 @@ describe('SSR スナップショット', () => {
       html(m.AccountsView!, { rows: withStatus(accounts, status), today: TODAY, accounts, usage: { C1: 36420, C2: 0 }, edit: { id: 'C1', draft, open: true }, busy: false, onOpen: noop, onDraft: noop, onSave: noop }),
       html(m.AccountsView!, { rows: withStatus([wallet], status), today: TODAY, accounts: [wallet], edit: { id: 'W1', draft: { ...draft, default_tag: 'private', mcp_visibility: 'none', include_in_cashflow: false }, open: true }, busy: false, onOpen: noop, onDraft: noop, onSave: noop }),
     ].join('\n');
+    const result = {
+      csv_import_id: 'I1', parser: 'paypay', rows_total: 30, rows_new: 25, rows_merged: 1, rows_skipped_points: 4, rows_error: 2,
+      errors: [{ line: 10, reason: 'invalid_date' }, { line: 12, reason: 'mystery' }], date_range: { from: '2026-10-01', to: '2026-10-31' },
+    };
+    const csvOut = [
+      html(m.AccountsView!, { rows: withStatus([wallet], status), today: TODAY, accounts: [wallet], edit: null, busy: false, csv: { W1: { busy: false, result } }, onOpen: noop, onDraft: noop, onSave: noop, onImport: noop }),
+      html(m.AccountsView!, { rows: withStatus([wallet], status), today: TODAY, accounts: [wallet], edit: null, busy: false, csv: { W1: { busy: false, fail: '同じファイルは取り込み済みです。' } }, onOpen: noop, onDraft: noop, onSave: noop, onImport: noop }),
+      html(m.AccountsView!, { rows: withStatus([wallet], status), today: TODAY, accounts: [wallet], edit: null, busy: false, csv: { W1: { busy: true } }, onOpen: noop, onDraft: noop, onSave: noop, onImport: noop }),
+      html(m.CsvAccountForm!, { draft: { name: '', kind: 'paypay' }, busy: false, onChange: noop, onSave: noop, onClose: noop }),
+    ].join('\n');
     assert.ok(out.indexOf('PayPay カード') < out.indexOf('三井住友 普通'), '引落元が未設定のカードを先に');
     assert.match(out, /引落の設定が済んでいません。[\s\S]*disabled>保存して二重計上を直す/, '摘要の文字が空のあいだは押せない');
     assert.match(out, /同期エラー: freee_http_503/);
     assert.match(out, /過去分 2024-11 まで済み/);
     assert.match(out, /CSV · 最後の取り込み 10\/31/);
-    assert.match(out, /CSV を取り込む（準備中）/);
+    assert.doesNotMatch(out, /準備中/);
+    assert.equal(out.match(/type="file"/g)?.length, 2, 'CSV の口座のカードだけ（設定を開いていても 1 つ）');
+    assert.match(out, /PayPay の CSV を取り込む[\s\S]*accept="\.csv,text\/csv"/);
+    assert.match(csvOut, /新規 25 件・統合 1 件・ポイント 4 件を除外・エラー 2 件/);
+    assert.match(csvOut, /<li>10 行目: 日付が読めません<\/li>\s*<li>12 行目: mystery<\/li>/);
+    assert.match(csvOut, /同じファイルは取り込み済みです。/);
+    assert.match(csvOut, /m-csv-pick m-csv-pick-off[\s\S]*取り込み中…[\s\S]*disabled/);
+    assert.match(csvOut, /CSV だけの口座を追加[\s\S]*PayPay<\/button>[\s\S]*銀行<\/button>[\s\S]*その他<\/button>[\s\S]*disabled>追加/);
     assert.match(out, /−36,420<br\/?>\s*<span class="m-sub">今月の利用<\/span>/, 'カードは残高ではなく今月の利用');
     assert.doesNotMatch(out, /294,061/);
     assert.match(out, /見せない<\/button>[\s\S]*合計だけ<\/button>[\s\S]*明細も<\/button>/);
     assert.doesNotMatch(out.split('aria-expanded="true"')[1]!.split('</article>')[0]!, /value="W1"/, '引落元は銀行だけ');
-    t.assert.snapshot(lines(out));
+    t.assert.snapshot(lines(`${out}\n${csvOut}`));
   });
 });
