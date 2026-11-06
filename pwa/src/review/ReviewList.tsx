@@ -41,11 +41,11 @@ export function ReviewList({ onChanged }: { onChanged: () => void }) {
     void load();
   }, [load]);
 
-  const decide = async (action: DecisionAction, draft: Values) => {
+  const decide = async (action: DecisionAction, draft: Values, integrityChecked?: boolean) => {
     if (!card) return;
     setBusy(true);
     const id = card.dataModel.document_id;
-    const r = await postJson(`/api/documents/${encodeURIComponent(id)}/${ENDPOINTS[action]}`, requestBody(card.card_id, card.dataModel, draft));
+    const r = await postJson(`/api/documents/${encodeURIComponent(id)}/${ENDPOINTS[action]}`, requestBody(card.card_id, card.dataModel, draft, integrityChecked));
     setBusy(false);
     if (r.status === 200) {
       setMsg('');
@@ -75,7 +75,7 @@ export function ReviewList({ onChanged }: { onChanged: () => void }) {
           一覧へ戻る
         </button>
         {msg && <p class="msg">{msg}</p>}
-        <ReviewCard key={card.card_id} card={card} busy={busy} onDecide={(a, d) => void decide(a, d)} />
+        <ReviewCard key={card.card_id} card={card} busy={busy} onDecide={(a, d, ic) => void decide(a, d, ic)} />
       </section>
     );
   }

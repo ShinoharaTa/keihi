@@ -94,6 +94,16 @@ describe('DB', () => {
     assert.equal(markPaperDiscarded(db, id, { actor: 'user' }, T0).ok, false);
   });
 
+  test('期限内アップロード済み・paper_discard_allowed・integrity_checked_at ありなら discard_ok（T004）', () => {
+    allowDiscard();
+    const id = addDocument(db, { integrityCheckedAt: T0.toISOString() });
+    markUploaded(db, id, 1);
+    assert.deepEqual(paperStatusOf(db, id, T0), { status: 'discard_ok', reasons: [] });
+    const unchecked = addDocument(db);
+    markUploaded(db, unchecked, 2);
+    assert.equal(paperStatusOf(db, unchecked, T0)!.status, 'unknown');
+  });
+
   test('refreshPaperStatuses は変わったものだけ保存して監査ログに残す', () => {
     allowDiscard();
     const a = addDocument(db, { integrityCheckedAt: T0.toISOString() });

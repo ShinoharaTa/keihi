@@ -2,7 +2,8 @@
 //   GET  /api/documents/:id/card       → 200 {card_id, surface, dataModel}（src/review/card.ts）/ 404
 //   GET  /api/documents/:id/thumbnail  → 200 image/jpeg（長辺 640px、メタデータなし）/ 404（文書なし・PDF）
 //   POST /api/documents/:id/approve | reject | mark_private | mark_duplicate
-//        body {card_id, expected_version, values?}（values は変えた項目だけでよい。U8）
+//        body {card_id, expected_version, values?, integrity_checked?}（values は変えた項目だけでよい。U8。
+//        integrity_checked は approve・scan のときだけ documents.integrity_checked_at に反映する。T004）
 //        → 200 {review_id, version, decision, status, changed, warnings, jobs, learned}
 //        → 400 本文の不正 / 404 / 409 版の食い違い・古いカード / 422 値の不正・必須の欠け（R10）
 import { Hono } from 'hono';

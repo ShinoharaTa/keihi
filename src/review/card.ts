@@ -60,6 +60,7 @@ export type DataModel = {
   candidates: Candidate[];
   accounts: { id: string; name: string; private: boolean }[];
   warnings: string[];
+  integrity_checked?: boolean; // 同等確認（欠け・折れ・裏面）のチェック。scan のときだけ置く（既定 false。T004）
 };
 
 // 保存・比較しない（日々変わる）項目。
@@ -291,6 +292,7 @@ export function buildCard(db: Db, documentId: string, opts: CardOptions): Card |
     candidates,
     accounts: accounts.map((a) => ({ id: a.id, name: a.name, private: a.private })),
     warnings,
+    ...(doc.kind === 'scan' ? { integrity_checked: false } : {}),
   };
   const proposer = rv ? null : top ? top.source : ex ? 'ai' : null;
   return { surface, dataModel, proposer };
