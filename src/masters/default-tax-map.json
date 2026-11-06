@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "provisional": true,
+  "method": "general",
+  "note": "仮の表（課税方式は本則を仮定。税理士 #9 の回答前）。T0-4 で config/tax-map.json に置き換える。tax_name は freee の税区分の名前（未確認）で、同期済みのマスタを名前で引く。登録番号の無い仕入は経過措置（2023-10-01〜2026-09-30 は 80%、2026-10-01〜2029-09-30 は 50%）。範囲外の日付は変換できずエラーになる。",
+  "rules": [
+    { "category": "taxable_10", "invoice": "qualified", "from": null, "to": null, "tax_code": null, "tax_name": "課対仕入10%" },
+    { "category": "taxable_10", "invoice": "not_qualified", "from": "2023-10-01", "to": "2026-09-30", "tax_code": null, "tax_name": "課対仕入（控80）10%" },
+    { "category": "taxable_10", "invoice": "not_qualified", "from": "2026-10-01", "to": "2029-09-30", "tax_code": null, "tax_name": "課対仕入（控50）10%" },
+    { "category": "taxable_8_reduced", "invoice": "qualified", "from": null, "to": null, "tax_code": null, "tax_name": "課対仕入8%（軽）" },
+    { "category": "taxable_8_reduced", "invoice": "not_qualified", "from": "2023-10-01", "to": "2026-09-30", "tax_code": null, "tax_name": "課対仕入（控80）8%（軽）" },
+    { "category": "taxable_8_reduced", "invoice": "not_qualified", "from": "2026-10-01", "to": "2029-09-30", "tax_code": null, "tax_name": "課対仕入（控50）8%（軽）" },
+    { "category": "non_taxable", "invoice": "any", "from": null, "to": null, "tax_code": null, "tax_name": "非課仕入" },
+    { "category": "out_of_scope", "invoice": "any", "from": null, "to": null, "tax_code": null, "tax_name": "対象外" }
+  ]
+}

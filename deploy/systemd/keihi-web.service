@@ -1,0 +1,22 @@
+# keihi の web（docs/mvp-plan.md T1-14・§4.4、docs/mvp-plan-v0.1.md §4.4）。systemctl --user 用。唯一の常駐。
+# 127.0.0.1:8795 にだけバインドする（src/web/main.ts）。外からは tailscale serve（https 8444）経由のみ（docs/ops/serve.md）。
+# M7 からは 8796（MCP）も同じプロセスで開く予定。それまでは開かない。
+# インストールと起動は手作業（docs/ops/systemd.md）:
+#   ln -s ~/workspace/keihi/deploy/systemd/keihi-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now keihi-web.service
+[Unit]
+Description=keihi web (127.0.0.1:8795)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/keihi
+EnvironmentFile=%h/.config/keihi/secrets.env
+ExecStart=%h/.nvm/versions/node/v24.20.0/bin/node %h/workspace/keihi/src/web/main.ts
+Restart=on-failure
+RestartSec=5
+MemoryMax=256M
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

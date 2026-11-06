@@ -1,0 +1,368 @@
+/* 片手・小画面前提。押す場所は 48px 以上、主ボタンは画面下（親指の届く範囲）。 */
+:root {
+  --bg: #fafafa;
+  --fg: #1b1b1b;
+  --muted: #666;
+  --line: #ddd;
+  --accent: #1f5fbf;
+  --accent-fg: #fff;
+  --danger: #b3261e;
+  --warn-bg: #fff4d6;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616;
+    --fg: #eee;
+    --muted: #aaa;
+    --line: #333;
+    --accent: #6ea0ff;
+    --accent-fg: #000;
+    --danger: #ff8a80;
+    --warn-bg: #3a3000;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.5 system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+}
+.app {
+  min-height: 100dvh;
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+.top {
+  padding: 12px 16px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+}
+.screen {
+  padding: 12px 16px 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.notice,
+.msg {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--warn-bg);
+  border-radius: 8px;
+}
+.notice {
+  margin: 12px 16px 0;
+}
+/* 警告帯（バックアップ・freee の再認可。GET /api/status） */
+.band-warn {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--danger);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--danger);
+}
+.btn,
+.seg button,
+.tabs button {
+  min-height: 48px;
+  font: inherit;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  padding: 8px 12px;
+}
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+.btn-big {
+  min-height: 72px;
+  font-size: 20px;
+  font-weight: 700;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.btn-danger {
+  color: var(--danger);
+}
+button:disabled {
+  opacity: 0.4;
+}
+.hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.pickers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.file,
+.sub {
+  margin: 0;
+  color: var(--muted);
+  word-break: break-all;
+}
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.label {
+  font-size: 14px;
+  color: var(--muted);
+}
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.seg-wrap {
+  grid-template-columns: repeat(3, 1fr);
+}
+.seg-on,
+.tabs .tab-on {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+.date {
+  min-height: 48px;
+  font: inherit;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+}
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+}
+.toggle input {
+  width: 24px;
+  height: 24px;
+}
+.bottom {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  padding: 8px 16px;
+  background: var(--bg);
+}
+.tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.item-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.item-name {
+  flex: 1;
+  word-break: break-all;
+}
+.badge {
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.badge-rejected {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.row-btns {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 8px;
+}
+.empty {
+  padding: 24px 16px;
+  color: var(--muted);
+}
+.status {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+.status dd {
+  margin: 0;
+}
+/* 確認カード（T2-10）。縦 1 画面: 上にサムネイルと金額、下（親指の範囲）に確定。 */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 150px;
+}
+.card-top {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.card-head {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.thumb {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  width: 88px;
+  height: 88px;
+  overflow: hidden;
+  flex: none;
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-zoom {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+  background: var(--bg);
+  border: 0;
+  border-radius: 0;
+}
+.thumb-zoom img {
+  object-fit: contain;
+}
+.amount {
+  font: inherit;
+  font-size: 28px;
+  font-weight: 700;
+  text-align: left;
+  padding: 0;
+  min-height: 48px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+}
+.amount-input {
+  font-size: 24px;
+}
+.urgent {
+  color: var(--danger);
+}
+.row {
+  display: grid;
+  grid-template-columns: 4.5em 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.row-value {
+  min-height: 48px;
+  font: inherit;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  word-break: break-all;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chip {
+  min-height: 48px;
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+}
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 80dvh;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+}
+.sheet-list {
+  overflow-y: auto;
+  gap: 6px;
+}
+.decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.row-btns-even {
+  grid-template-columns: 1fr 1fr;
+}
+.item-btn {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+}
+.item-warn {
+  border-color: var(--danger);
+}

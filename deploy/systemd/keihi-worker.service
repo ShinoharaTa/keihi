@@ -1,0 +1,17 @@
+# keihi のワンショット worker（docs/mvp-plan-v0.1.md §4.4、T1-8）。systemctl --user 用。
+# 取り込み時に web が `systemctl --user start --no-block keihi-worker.service` で起動する。
+# oneshot なので動作中に start しても二重には起動しない。キューが空になったら（[worker] linger_ms の猶予の後）終了する。
+# keihi-worker.timer が 2 分ごとにも起動する（再試行・取りこぼしの安全網）。
+# インストール例（手作業）: ln -s ~/workspace/keihi/deploy/systemd/keihi-worker.service ~/.config/systemd/user/
+[Unit]
+Description=keihi worker (oneshot)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/keihi
+ExecStart=%h/.nvm/versions/node/v24.20.0/bin/node %h/workspace/keihi/src/worker/main.ts
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+NoNewPrivileges=yes
+UMask=0077

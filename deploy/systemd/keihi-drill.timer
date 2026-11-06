@@ -1,0 +1,12 @@
+# keihi-drill.service を四半期に 1 回起動する（docs/mvp-plan-v0.1.md T5-3・T5-4）。
+# quarterly = *-01,04,07,10-01 00:00:00（本機は UTC なので JST の 09:00）。日次バックアップ（JST 03:30 頃）と重ならない。
+[Unit]
+Description=keihi quarterly restore drill timer
+
+[Timer]
+OnCalendar=quarterly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

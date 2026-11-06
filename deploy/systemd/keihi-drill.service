@@ -1,0 +1,18 @@
+# keihi のリストア訓練（docs/mvp-plan-v0.1.md T5-3・T5-4、docs/ops/restore-drill.md）。systemctl --user 用。
+# keihi-drill.timer から四半期に 1 回起動する。restic check --read-data-subset=5% → 全量 restore → sha256 と DB の照合。
+# 結果は audit と標準出力（journal）。失敗は終了コード非 0。通知は Q6 が未決なので行わない。
+# インストール例（手作業）: ln -s ~/workspace/keihi/deploy/systemd/keihi-drill.{service,timer} ~/.config/systemd/user/
+[Unit]
+Description=keihi quarterly restore drill (restic)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/workspace/keihi
+ExecStart=%h/.nvm/versions/node/v24.20.0/bin/node %h/workspace/keihi/tools/backup/drill.ts
+MemoryMax=1G
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+UMask=0077
+TimeoutStartSec=12h
