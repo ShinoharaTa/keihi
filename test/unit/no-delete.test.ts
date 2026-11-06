@@ -6,8 +6,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const SRC = path.join(import.meta.dirname, '..', '..', 'src');
-const TABLES = ['documents', 'reviews', 'deals', 'audit_log', 'extractions', 'classifications', 'ai_turns'];
-const DELETE_RE = new RegExp(`DELETE\\s+FROM\\s+["\`]?(${TABLES.join('|')})\\b`, 'i');
+const TABLES = ['documents', 'reviews', 'deals', 'audit_log', 'extractions', 'classifications', 'ai_turns', 'provider_uploads', 'answers'];
+// 表名の前の `main.` と、" ` ' [ の引用にも当たる。
+const DELETE_RE = new RegExp(`DELETE\\s+FROM\\s+(?:main\\.)?["\`'\\[]?(${TABLES.join('|')})\\b`, 'i');
 
 function tsFiles(dir: string): string[] {
   return readdirSync(dir, { recursive: true, encoding: 'utf8' })
@@ -19,6 +20,9 @@ describe('削除の経路が無い', () => {
   test('正規表現が DELETE 文に当たる（自己確認）', () => {
     assert.match('DELETE FROM documents WHERE id = ?', DELETE_RE);
     assert.match('delete  from\n  audit_log', DELETE_RE);
+    assert.match('DELETE FROM main.documents', DELETE_RE);
+    assert.match("DELETE FROM 'reviews'", DELETE_RE);
+    assert.match('DELETE FROM [deals]', DELETE_RE);
     assert.doesNotMatch('DELETE FROM walletable_aliases WHERE provider = ?', DELETE_RE);
     assert.doesNotMatch('DELETE FROM documents_fts', DELETE_RE);
   });
