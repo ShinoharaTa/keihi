@@ -3,6 +3,7 @@
 //   butSucceed なら操作を反映してから投げる（「タイムアウトを返すが実は成功している」）。
 // - 呼び出しは成否を問わず calls に記録する（capabilities() は API 呼び出しではないので記録しない）。
 // - ID は種類ごとに 1 から採番する（決定的）。
+// - listBankTxns は freee と同じく 1 ページだけ返す（limit 既定 100、上限 100。続きは offset）。
 import { createHash } from 'node:crypto';
 import {
   ProviderError,
@@ -20,7 +21,10 @@ import {
   type ReceiptMeta,
   type Rule,
   type UploadReceiptInput,
+  type WalletableType,
 } from '../types.ts';
+
+const TXN_PAGE = 100;
 
 export const FAKE_CAPABILITIES: Capabilities = {
   receiptMetaOnUpload: true,
@@ -72,10 +76,14 @@ export type FakeProvider = Provider & {
   failNext(kind: ProviderErrorKind, opts?: FailOptions): void;
   // テストの前提を作る（API 呼び出しではないので calls に記録しない）。
   addBankTxn(txn: Omit<BankTxn, 'id'>): BankTxn;
+  // listWalletables が返す残高（既定は null）。
+  setWalletableBalance(type: WalletableType, id: number, balance: number | null): void;
   readonly state: {
     receipts: Map<number, Receipt & { bytes: Buffer; sha256: string }>;
     deals: Map<number, Deal>;
     bankTxns: Map<number, BankTxn>;
+    // `type:id` → 残高。
+    balances: Map<string, number | null>;
     rules: Map<number, Rule>;
   };
 };
@@ -87,7 +95,7 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
   const calls: FakeCall[] = [];
   const pending: Pending[] = [];
   const seq = { receipt: 0, deal: 0, txn: 0, rule: 0, request: 0 };
-  const state: FakeProvider['state'] = { receipts: new Map(), deals: new Map(), bankTxns: new Map(), rules: new Map() };
+  const state: FakeProvider['state'] = { receipts: new Map(), deals: new Map(), bankTxns: new Map(), balances: new Map(), rules: new Map() };
 
   const requestId = () => `fake-req-${++seq.request}`;
   const notFound = (what: string, id: number) => new ProviderError('client', `${what} ${id} が無い`, { status: 404, requestId: requestId() });
@@ -156,6 +164,10 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
       const t = { ...txn, id: ++seq.txn };
       state.bankTxns.set(t.id, t);
       return { ...t };
+    },
+
+    setWalletableBalance(type, id, balance) {
+      state.balances.set(`${type}:${id}`, balance);
     },
 
     capabilities() {
@@ -267,9 +279,17 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
       return run('syncMasters', [], () => structuredClone(masters));
     },
 
+    listWalletables() {
+      return run('listWalletables', [], () => masters.walletables.map((w) => ({ ...w, lastBalance: state.balances.get(`${w.type}:${w.id}`) ?? null })));
+    },
+
     listBankTxns(q: ListBankTxnsQuery = {}) {
-      return run('listBankTxns', [{ ...q }], () =>
-        [...state.bankTxns.values()]
+      return run('listBankTxns', [{ ...q }], () => {
+        const limit = q.limit ?? TXN_PAGE;
+        const offset = q.offset ?? 0;
+        if (!Number.isInteger(limit) || limit < 1 || limit > TXN_PAGE) throw badRequest(`limit は 1〜${TXN_PAGE}: ${limit}`);
+        if (!Number.isInteger(offset) || offset < 0) throw badRequest(`offset が不正: ${offset}`);
+        return [...state.bankTxns.values()]
           .filter(
             (t) =>
               (q.walletableType === undefined || t.walletableType === q.walletableType) &&
@@ -277,8 +297,9 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
               (q.startDate === undefined || t.date >= q.startDate) &&
               (q.endDate === undefined || t.date <= q.endDate),
           )
-          .map((t) => ({ ...t })),
-      );
+          .slice(offset, offset + limit)
+          .map((t) => ({ ...t }));
+      });
     },
 
     listRules() {
@@ -287,6 +308,8 @@ export function createFakeProvider(opts: { masters?: Masters } = {}): FakeProvid
 
     createRule(input: CreateRuleInput) {
       return run('createRule', [{ ...input }], () => {
+        // freee と同じく、口座の指定は未対応（walletable の書式が未確認）。
+        if (input.walletableId !== undefined) throw badRequest('ルールの口座の指定は未対応');
         const r: Rule = { ...input, id: ++seq.rule };
         state.rules.set(r.id, r);
         return { ...r };

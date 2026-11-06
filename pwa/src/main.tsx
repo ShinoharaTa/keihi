@@ -1,7 +1,7 @@
 // PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13、mvp-plan.md T2-10・T2-11）。画面は 撮影 / 確認 / 送信待ち / 送信済み の 4 つ（下のタブで切り替え）。
-// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
+// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。5 つ目の「お金」（T111・T304）には期日の近い予定の件数（counts.upcoming、T305）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
 // 送信待ちは開いたとき・オンラインに戻ったとき・画面に戻ったとき・追加したときに再送する（iOS は Background Sync が無いため）。
-import { render } from 'preact';
+import { h, render } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import { getJson, sendIngest } from './api.ts';
 import { Capture } from './capture/Capture.tsx';
@@ -14,8 +14,10 @@ import { createFlusher, type FlushReport, type QueueItem } from './queue/queue.t
 import { backupWarning, reauthWarning, STATUS_URL, type StatusResponse } from './status.ts';
 import './style.css';
 
-type Tab = 'capture' | 'review' | 'queue' | 'sent';
-type Counts = { review: number; attention: number; urgent: number };
+type MoneyComponent = (typeof import('./money/Money.tsx'))['Money'];
+type Tab = 'capture' | 'review' | 'queue' | 'sent' | 'money';
+// upcoming は T305 で足す。無いサーバーでは 0 として扱う。
+type Counts = { review: number; attention: number; urgent: number; upcoming?: number };
 
 // 共有シートから戻ったときの知らせ（?share=...）。読んだら URL から消す。
 function shareNotice(): { text: string; toQueue: boolean } | null {
@@ -45,6 +47,34 @@ function reportText(r: FlushReport): string {
   return parts.join('');
 }
 
+// タブの件数。アイコンの右上に数字のピル（0 なら出さない）。
+function Pill({ n }: { n: number }) {
+  return n > 0 ? <span class="tab-pill">{n > 99 ? '99+' : n}</span> : null;
+}
+
+// 下タブのアイコン（線のインライン SVG。色は currentColor）。お金タブの Icons.tsx は別チャンクなのでここに持つ。
+const TAB_ICONS = {
+  capture: ['M4 8h3l2-3h6l2 3h3v11H4z', 'M12 9.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z'],
+  review: ['M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z', 'M9 12l2 2 4-4'],
+  queue: ['M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z', 'M12 8v4l3 2'],
+  sent: ['M4 12l16-8-6 16-2-7z'],
+  money: ['M5 6h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z', 'M3 10h18', 'M16 14.5h2'],
+} as const;
+
+function TabButton({ on, icon, label, n = 0, onClick }: { on: boolean; icon: keyof typeof TAB_ICONS; label: string; n?: number; onClick: () => void }) {
+  return (
+    <button type="button" class={on ? 'tab-on' : ''} aria-current={on ? 'page' : undefined} onClick={onClick}>
+      <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={on ? 2 : 1.8} stroke-linecap="round" stroke-linejoin="round">
+        {TAB_ICONS[icon].map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+      <span>{label}</span>
+      <Pill n={n} />
+    </button>
+  );
+}
+
 function App() {
   const notice = useMemo(shareNotice, []);
   const [tab, setTab] = useState<Tab>(notice?.toQueue ? 'queue' : 'capture');
@@ -52,10 +82,20 @@ function App() {
   const [msg, setMsg] = useState(notice?.text ?? '');
   const [sentKey, setSentKey] = useState(0);
   const [counts, setCounts] = useState<Counts | null>(null);
+  // お金タブは別チャンク（撮影タブの初回を軽くする）。初めて開いたときに読む。
+  const [money, setMoney] = useState<MoneyComponent | 'error' | null>(null);
   const [backupWarn, setBackupWarn] = useState<string | null>(null);
   const [reauthWarn, setReauthWarn] = useState<string | null>(null);
   const today = todayLocal(new Date());
   const flusher = useMemo(() => createFlusher(idbStore, sendIngest), []);
+
+  useEffect(() => {
+    if (tab !== 'money' || (money !== null && money !== 'error')) return;
+    import('./money/Money.tsx').then(
+      (m) => setMoney(() => m.Money),
+      () => setMoney('error'),
+    );
+  }, [tab]);
 
   const reloadCounts = useCallback(async () => {
     const [r, st] = await Promise.all([getJson<Counts>('/api/documents/counts'), getJson<StatusResponse>(STATUS_URL)]);
@@ -108,9 +148,11 @@ function App() {
   };
 
   const waiting = items.length;
+  const upcoming = counts?.upcoming ?? 0;
   return (
     <div class="app">
-      <header class="top">keihi</header>
+      {/* お金タブは画面ごとに自分のヘッダ（戻る・題）を持つ */}
+      {tab !== 'money' && <header class="top">keihi</header>}
       {reauthWarn && (
         <p class="band-warn" role="alert">
           {reauthWarn}
@@ -131,20 +173,14 @@ function App() {
         {tab === 'review' && <ReviewList onChanged={() => void reloadCounts()} />}
         {tab === 'queue' && <QueueList items={items} today={today} onSave={save} onRemove={remove} onRetry={() => void flush()} />}
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
+        {tab === 'money' && (typeof money === 'function' ? h(money, { today }) : <p class="empty">{money === 'error' ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>)}
       </main>
-      <nav class="tabs">
-        <button type="button" class={tab === 'capture' ? 'tab-on' : ''} onClick={() => setTab('capture')}>
-          撮影
-        </button>
-        <button type="button" class={tab === 'review' ? 'tab-on' : ''} onClick={() => setTab('review')}>
-          確認{counts && counts.review + counts.attention ? `（${counts.review + counts.attention}）` : ''}
-        </button>
-        <button type="button" class={tab === 'queue' ? 'tab-on' : ''} onClick={() => setTab('queue')}>
-          送信待ち{waiting ? `（${waiting}）` : ''}
-        </button>
-        <button type="button" class={tab === 'sent' ? 'tab-on' : ''} onClick={() => setTab('sent')}>
-          送信済み
-        </button>
+      <nav class="tabs" aria-label="メイン">
+        <TabButton on={tab === 'capture'} icon="capture" label="撮影" onClick={() => setTab('capture')} />
+        <TabButton on={tab === 'review'} icon="review" label="確認" n={counts ? counts.review + counts.attention : 0} onClick={() => setTab('review')} />
+        <TabButton on={tab === 'queue'} icon="queue" label="送信待ち" n={waiting} onClick={() => setTab('queue')} />
+        <TabButton on={tab === 'sent'} icon="sent" label="送信済み" onClick={() => setTab('sent')} />
+        <TabButton on={tab === 'money'} icon="money" label="お金" n={upcoming} onClick={() => setTab('money')} />
       </nav>
     </div>
   );

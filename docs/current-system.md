@@ -1,5 +1,9 @@
 # keihi 現行実装の見取り図（feature/m0-poc、HEAD 0292ef6、2026-11-05）
 
+> **2026-11-06 追記**: feature/cashflow（P1 の明細・P3 の資金繰り）により大きく変わった。
+> 0005_bank・0006_cashflow、sync_bank ジョブ、口座・明細・月次・予定・資金繰りの API が増えている。
+> 新しい部分は cashflow.md を参照（本書は 2026-11-05 時点のまま。全面改訂はしていない）。
+
 Explore エージェントが src/ の実コードで裏を取って作成。docs/ops/system-overview.md v0.1 と食い違う点は §9。【推測】は未確認。
 
 Node 24 で TypeScript をそのまま実行（ビルドなし）し、Hono と `node:sqlite`（WAL）を使う。PWA は Preact + Vite。

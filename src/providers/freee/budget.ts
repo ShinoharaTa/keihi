@@ -177,6 +177,7 @@ export const DEFAULT_PURPOSES: Record<ProviderMethod, Purpose> = {
   listDeals: 'sync',
   deleteDeal: 'execute',
   syncMasters: 'sync',
+  listWalletables: 'sync',
   listBankTxns: 'sync',
   listRules: 'sync',
   createRule: 'execute',

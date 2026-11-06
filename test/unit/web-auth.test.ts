@@ -41,6 +41,7 @@ before(async () => {
       calendar: { deadlineMode: 'early', yearEndHolidays: false },
       deadline: { countFrom: 'receipt_day' },
       retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
+      cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false },
     },
     auth: createAuth({ allowedUsers: [USER], allowedHosts: [LOCAL, TS_HOST] }),
     triggerWorker: () => {},
@@ -99,6 +100,7 @@ describe('Tailscale-User-Login', () => {
       backup: { last_success_at: null, last_drill: null },
       freee_reauth_required: false,
       retention: { earliest_retain_until: null, documents: 0 },
+      bank: { accounts: 0, last_ok_at: null, errors: 0, latest_txn_date: null },
     });
   });
   test('取り込み API・一覧・PWA も認証の後ろにある', async () => {

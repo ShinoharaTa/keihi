@@ -167,6 +167,50 @@ describe('[reconcile]', () => {
   });
 });
 
+describe('[bank]', () => {
+  test('既定は backfill_from = 2025-01-01、dedup 0 日、振替・照合 3 日。指定を読み、不正な値・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).bank, {
+      backfillFrom: '2025-01-01', dedupDateWindowDays: 0, transferWindowDays: 3, matchDateWindowDays: 3,
+    });
+    assert.deepEqual(
+      loadConfig({
+        configDir: dir2('[bank]\nbackfill_from = "2024-02-29"\ndedup_date_window_days = 1\ntransfer_window_days = 0\nmatch_date_window_days = 5\n'),
+        dataDir: '/data/keihi',
+      }).bank,
+      { backfillFrom: '2024-02-29', dedupDateWindowDays: 1, transferWindowDays: 0, matchDateWindowDays: 5 },
+    );
+    for (const bad of [
+      '[bank]\nbackfill_from = "2025-1-1"',
+      '[bank]\nbackfill_from = "2025-02-30"',
+      '[bank]\nbackfill_from = 2025-01-01',
+      '[bank]\nbackfill_from = ""',
+      '[bank]\ndedup_date_window_days = -1',
+      '[bank]\ntransfer_window_days = 1.5',
+      '[bank]\nmatch_date_window_days = "3"',
+      '[bank]\nbackfill = "2025-01-01"',
+    ]) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  });
+});
+
+describe('[cashflow]', () => {
+  test('既定は予定外の目安 6 か月・残す額 3 か月・予定外の収入は足さない。指定を読み、不正な値・知らないキーは拒否', () => {
+    assert.deepEqual(loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' }).cashflow, { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false });
+    assert.deepEqual(
+      loadConfig({ configDir: dir2('[cashflow]\nunplanned_lookback_months = 24\nreserve_months = 12\ninclude_unplanned_income = true\n'), dataDir: '/data/keihi' }).cashflow,
+      { unplannedLookbackMonths: 24, reserveMonths: 12, includeUnplannedIncome: true },
+    );
+    for (const bad of [
+      '[cashflow]\nunplanned_lookback_months = 0',
+      '[cashflow]\nunplanned_lookback_months = 25',
+      '[cashflow]\nreserve_months = 0',
+      '[cashflow]\nreserve_months = 13',
+      '[cashflow]\ninclude_unplanned_income = 1',
+      '[cashflow]\nreserve_months = "3"',
+      '[cashflow]\nlookback_months = 6',
+    ]) assert.throws(() => loadConfig({ configDir: dir2(bad), dataDir: '/data/keihi' }), ConfigError, bad);
+  });
+});
+
 describe('[backup] / [retention]', () => {
   test('既定値（drill_dir は <data_dir>/drill）', () => {
     const c = loadConfig({ configDir: dir2(''), dataDir: '/data/keihi' });

@@ -224,9 +224,47 @@ describe('対応づけ', () => {
     env.db.close();
   });
 
-  test('listRules は act 4 / 11 / 0 だけを返す', async () => {
+  test('listRules は act 4 / 11 / 12 / 0 だけを返す', async () => {
     const env = await makeEnv(dir());
-    assert.deepEqual(await env.provider.listRules(), [{ id: 1, matchText: 'DUMMY', action: 'ignore' }]);
+    assert.deepEqual(await env.provider.listRules(), [
+      { id: 1, matchText: 'DUMMY', action: 'ignore' },
+      { id: 3, matchText: 'PRIVATE', action: 'private_register' },
+    ]);
+    env.db.close();
+  });
+
+  test('listBankTxns は 1 ページだけ取り、limit・offset の範囲外は送らずに client', async () => {
+    const env = await makeEnv(dir());
+    await env.provider.listBankTxns({ walletableType: 'bank_account', walletableId: 2, offset: 100 });
+    const q = env.mock.reqs.filter((r) => r.url.pathname === '/api/1/wallet_txns').map((r) => Object.fromEntries(r.url.searchParams));
+    assert.deepEqual(q, [{ company_id: '111', walletable_type: 'bank_account', walletable_id: '2', limit: '100', offset: '100' }]);
+    const n = env.mock.reqs.length;
+    await rejectsKind(env.provider.listBankTxns({ limit: 101 }), 'client');
+    await rejectsKind(env.provider.listBankTxns({ limit: 0 }), 'client');
+    await rejectsKind(env.provider.listBankTxns({ offset: -1 }), 'client');
+    assert.equal(env.mock.reqs.length, n);
+    env.db.close();
+  });
+
+  test('listBankTxns は status・due_amount・balance が欠けた明細も読む', async () => {
+    const env = await makeEnv(dir(), {
+      override: (r) =>
+        r.url.pathname === '/api/1/wallet_txns'
+          ? new Response(JSON.stringify({ wallet_txns: [{ id: 5, date: '2026-10-01', amount: 100, entry_side: 'expense', walletable_type: 'credit_card', walletable_id: 1, description: 'X', status: 5 }, { id: 6, date: '2026-10-01', amount: 100, entry_side: 'expense', walletable_type: 'credit_card', walletable_id: 1, description: 'Y' }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+          : null,
+    });
+    const ts = await env.provider.listBankTxns();
+    assert.deepEqual(ts.map((t) => [t.id, t.status, t.dueAmount, t.balance, t.ruleMatched]), [
+      [5, 5, 0, null, false],
+      [6, null, 0, null, false],
+    ]);
+    env.db.close();
+  });
+
+  test('createRule の口座指定は送らずに client（walletable の書式が未確認）', async () => {
+    const env = await makeEnv(dir());
+    await rejectsKind(env.provider.createRule({ matchText: 'X', action: 'ignore', walletableId: 2 }), 'client');
+    assert.equal(env.mock.reqs.length, 0);
     env.db.close();
   });
 });
