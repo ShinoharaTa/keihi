@@ -31,6 +31,8 @@ export type ScheduledItemRow = {
   active: 0 | 1;
   created_at: string;
   updated_at: string;
+  estimate_key: string | null; // origin = estimate のときだけ（0008_tax.sql）
+  pinned: 0 | 1; // 人が手直しした見積もりの項目。再計算で上書きしない
 };
 
 export type RecurrenceCandidateRow = {
@@ -59,15 +61,18 @@ export type NewScheduledItem = {
   endDate: string | null;
   notifyDaysBefore: number;
   origin: Origin;
+  estimateKey?: string | null;
   now: string;
 };
 
+// estimate_key は渡したときだけ書く（0008 より前の版の DB でも見積もり以外は作れるように。マイグレーションのテストが使う）。
 export function insertScheduledItem(db: Db, a: NewScheduledItem): ScheduledItemRow {
   const id = ulid(Date.parse(a.now));
+  const key = a.estimateKey ?? null;
   db.prepare(
-    `INSERT INTO scheduled_items (id, name, amount, direction, category, account_id, recurrence, anchor_date, end_date, notify_days_before, origin, active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-  ).run(id, a.name, a.amount, a.direction, a.category, a.accountId, a.recurrence, a.anchorDate, a.endDate, a.notifyDaysBefore, a.origin, a.now, a.now);
+    `INSERT INTO scheduled_items (id, name, amount, direction, category, account_id, recurrence, anchor_date, end_date, notify_days_before, origin, active, created_at, updated_at${key !== null ? ', estimate_key' : ''})
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?${key !== null ? ', ?' : ''})`,
+  ).run(id, a.name, a.amount, a.direction, a.category, a.accountId, a.recurrence, a.anchorDate, a.endDate, a.notifyDaysBefore, a.origin, a.now, a.now, ...(key !== null ? [key] : []));
   return getScheduledItem(db, id)!;
 }
 
@@ -92,6 +97,7 @@ export type ScheduledItemPatch = Partial<{
   notifyDaysBefore: number;
   origin: Origin;
   active: 0 | 1;
+  pinned: 0 | 1;
 }>;
 
 const ITEM_COLUMNS: Record<keyof ScheduledItemPatch, string> = {
@@ -106,6 +112,7 @@ const ITEM_COLUMNS: Record<keyof ScheduledItemPatch, string> = {
   notifyDaysBefore: 'notify_days_before',
   origin: 'origin',
   active: 'active',
+  pinned: 'pinned',
 };
 
 // 渡したキーだけ書く。項目が無ければ null。

@@ -15,6 +15,7 @@ import { reviewRoutes } from './routes/review.ts';
 import { staticRoutes } from './routes/static.ts';
 import { statusRoutes } from './routes/status.ts';
 import { tagRoutes } from './routes/tags.ts';
+import { taxRoutes } from './routes/tax.ts';
 
 export type AppDeps = {
   db: Db;
@@ -40,6 +41,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', exportRoutes(deps));
   app.route('/api', bankRoutes(deps));
   app.route('/api', tagRoutes(deps));
+  app.route('/api', taxRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
   return app;
 }

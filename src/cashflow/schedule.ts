@@ -2,6 +2,8 @@
 // 項目は削除しない（active = 0 にする）。変更はすべて監査ログに残す（同じトランザクションで）。
 // 期日は anchor_date から周期の分だけ月を足して出す。応当日が無い月は月末（31 日起点 → 4/30・2/28、2/29 起点の毎年 → 平年は 2/28）。
 // 毎回 anchor_date から数えるので、月末に寄せた後も 31 日の月には 31 日に戻る。
+// 見積もりの項目（origin = estimate。src/cashflow/tax/sync.ts が作る）を system 以外が name・amount・anchor_date を変えるか止める・戻すと pinned = 1 にする
+// （再計算で上書きしない）。pinned は見積もりの項目にだけ付けられる。
 import { appendAudit } from '../audit.ts';
 import { addDays, addMonths } from '../calendar/businessDays.ts';
 import { tx, type Db } from '../db/index.ts';
@@ -39,7 +41,13 @@ export class ScheduleError extends Error {
   }
 }
 
-export type By = { actor: string; user?: string | null };
+// payload は監査ログの payload に足すもの（再計算の run_id・reason など）。
+export type By = { actor: string; user?: string | null; payload?: Record<string, unknown> };
+
+// これ以外の actor が見積もりの項目を手直しすると pinned = 1 にする。
+export const SYSTEM_ACTOR = 'system';
+// 手直しとみなす列（docs/cashflow.md §14.2）。
+const PIN_ON_CHANGE = new Set<string>(['name', 'amount', 'anchor_date']);
 
 // ---- 値の検査 ----
 
@@ -61,7 +69,11 @@ export type ItemInput = {
   endDate: string | null;
   notifyDaysBefore: number;
   origin: Origin;
+  estimateKey?: string | null; // 見積もりの項目だけ（API からは受けない）
 };
+
+// 更新で渡せるもの。pinned は見積もりの項目だけ。
+export type ItemPatch = Partial<ItemInput> & { pinned?: boolean };
 
 // API の body（snake_case）のキーと ItemInput のキー。
 const BODY_KEYS = {
@@ -117,10 +129,15 @@ function checkField(key: keyof ItemInput, v: unknown): unknown {
 
 const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 
-// API の body を検査して ItemInput（作成）か部分（更新）にする。知らないキーも 400。
-export function parseBody(body: Record<string, unknown>, mode: 'create' | 'update'): Partial<ItemInput> {
-  const out: Partial<Record<keyof ItemInput, unknown>> = {};
+// API の body を検査して ItemInput（作成）か部分（更新）にする。知らないキーも 400。更新では pinned（真偽値）も受ける。
+export function parseBody(body: Record<string, unknown>, mode: 'create' | 'update'): ItemPatch {
+  const out: Partial<Record<keyof ItemPatch, unknown>> = {};
   for (const [k, v] of Object.entries(body)) {
+    if (mode === 'update' && k === 'pinned') {
+      if (typeof v !== 'boolean') throw new ScheduleError('invalid_pinned');
+      out.pinned = v;
+      continue;
+    }
     if (!Object.hasOwn(BODY_KEYS, k) || (mode === 'update' && CREATE_ONLY.has(k))) throw new ScheduleError('invalid_field');
     const key = BODY_KEYS[k as keyof typeof BODY_KEYS];
     out[key] = checkField(key, v);
@@ -134,7 +151,7 @@ export function parseBody(body: Record<string, unknown>, mode: 'create' | 'updat
       if (out[k] === undefined) throw new ScheduleError(`missing_${snake(k)}`);
     }
   }
-  return out as Partial<ItemInput>;
+  return out as ItemPatch;
 }
 
 function checkConsistent(db: Db, v: { direction: Direction; category: Category; accountId: string | null; anchorDate: string; endDate: string | null }): void {
@@ -148,25 +165,33 @@ function checkConsistent(db: Db, v: { direction: Direction; category: Category; 
 export function createItem(db: Db, input: ItemInput, by: By, now: Date = new Date()): ScheduledItemRow {
   input = { ...input };
   for (const k of Object.values(BODY_KEYS)) (input as Record<string, unknown>)[k] = checkField(k, input[k]);
+  const key = input.estimateKey ?? null;
+  if (key !== null && (typeof key !== 'string' || key === '' || input.origin !== 'estimate')) throw new ScheduleError('invalid_estimate_key');
   checkConsistent(db, input);
   return tx(db, () => {
     const row = insertScheduledItem(db, { ...input, now: now.toISOString() });
-    appendAudit(db, { actor: by.actor, action: 'scheduled_item.created', entity: 'scheduled_item', entityId: row.id, payload: { ...rowPayload(row), user: by.user ?? null } }, now);
+    const extra = row.estimate_key !== null ? { estimate_key: row.estimate_key } : {};
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.created', entity: 'scheduled_item', entityId: row.id, payload: { ...rowPayload(row), ...extra, user: by.user ?? null, ...by.payload } }, now);
     return row;
   });
 }
 
 // 渡したキーだけ変える。変わった列の前後を監査ログに残す（何も変わらなければ書かない）。
-export function updateItem(db: Db, id: string, patch: Partial<ItemInput>, by: By, now: Date = new Date()): ScheduledItemRow {
+// 見積もりの項目を system 以外が name・amount・anchor_date で変えたら pinned = 1 も一緒に書く（pinned を明示したらそちらを優先）。
+export function updateItem(db: Db, id: string, patch: ItemPatch, by: By, now: Date = new Date()): ScheduledItemRow {
   patch = { ...patch };
+  const { pinned } = patch;
+  delete patch.pinned;
+  if (pinned !== undefined && typeof pinned !== 'boolean') throw new ScheduleError('invalid_pinned');
   for (const [k, v] of Object.entries(patch) as [keyof ItemInput, unknown][]) {
     if (v === undefined) continue;
-    if (k === 'origin') throw new ScheduleError('invalid_field');
+    if (k === 'origin' || k === 'estimateKey') throw new ScheduleError('invalid_field');
     (patch as Record<string, unknown>)[k] = checkField(k, v);
   }
   return tx(db, () => {
     const cur = getScheduledItem(db, id);
     if (!cur) throw new ScheduleError('not_found', 404);
+    if (pinned !== undefined && cur.origin !== 'estimate') throw new ScheduleError('invalid_pinned');
     const next = {
       direction: patch.direction ?? cur.direction,
       category: patch.category ?? cur.category,
@@ -185,21 +210,29 @@ export function updateItem(db: Db, id: string, patch: Partial<ItemInput>, by: By
       changes[col] = { from: before[col], to: v };
       (p as Record<string, unknown>)[k] = v;
     }
+    const pin = pinned !== undefined ? (pinned ? 1 : 0) : cur.origin === 'estimate' && by.actor !== SYSTEM_ACTOR && Object.keys(changes).some((c) => PIN_ON_CHANGE.has(c)) ? 1 : cur.pinned;
+    if (pin !== cur.pinned) {
+      changes.pinned = { from: cur.pinned, to: pin };
+      p.pinned = pin;
+    }
     if (Object.keys(changes).length === 0) return cur;
     const row = updateScheduledItem(db, id, p, now.toISOString())!;
-    appendAudit(db, { actor: by.actor, action: 'scheduled_item.updated', entity: 'scheduled_item', entityId: id, payload: { changes, user: by.user ?? null } }, now);
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.updated', entity: 'scheduled_item', entityId: id, payload: { changes, user: by.user ?? null, ...by.payload } }, now);
     return row;
   });
 }
 
 // active = 0 にする。既に止めてあればそのまま返す（監査ログは書かない）。
+// 見積もりの項目を system 以外が止めたら pinned = 1 も書く（再計算で作り直さない）。
 export function deactivateItem(db: Db, id: string, by: By, now: Date = new Date()): ScheduledItemRow {
   return tx(db, () => {
     const cur = getScheduledItem(db, id);
     if (!cur) throw new ScheduleError('not_found', 404);
     if (cur.active === 0) return cur;
-    const row = updateScheduledItem(db, id, { active: 0 }, now.toISOString())!;
-    appendAudit(db, { actor: by.actor, action: 'scheduled_item.deactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null } }, now);
+    const pin = cur.origin === 'estimate' && by.actor !== SYSTEM_ACTOR && cur.pinned === 0;
+    const row = updateScheduledItem(db, id, pin ? { active: 0, pinned: 1 } : { active: 0 }, now.toISOString())!;
+    const extra = pin ? { pinned: { from: 0, to: 1 } } : {};
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.deactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null, ...extra, ...by.payload } }, now);
     return row;
   });
 }
@@ -210,8 +243,15 @@ export function activateItem(db: Db, id: string, by: By, now: Date = new Date())
     const cur = getScheduledItem(db, id);
     if (!cur) throw new ScheduleError('not_found', 404);
     if (cur.active === 1) return cur;
-    const row = updateScheduledItem(db, id, { active: 1 }, now.toISOString())!;
-    appendAudit(db, { actor: by.actor, action: 'scheduled_item.reactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null } }, now);
+    // 見積もりの項目は、同じ key の有効な行が既にあれば戻せない（再計算が作り直した後など）。
+    if (cur.estimate_key != null && db.prepare('SELECT 1 FROM scheduled_items WHERE estimate_key = ? AND active = 1').get(cur.estimate_key)) {
+      throw new ScheduleError('estimate_key_active');
+    }
+    // system 以外が戻した見積もりの項目は pinned = 1（次の再計算で止め直さない）。
+    const pin = cur.origin === 'estimate' && by.actor !== SYSTEM_ACTOR && cur.pinned === 0;
+    const row = updateScheduledItem(db, id, pin ? { active: 1, pinned: 1 } : { active: 1 }, now.toISOString())!;
+    const extra = pin ? { pinned: { from: 0, to: 1 } } : {};
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.reactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null, ...extra, ...by.payload } }, now);
     return row;
   });
 }
