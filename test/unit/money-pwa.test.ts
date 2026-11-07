@@ -71,6 +71,7 @@ import {
   taxProfileBody,
   taxProfileDraft,
   taxSaveBody,
+  taxWarningText,
   taxYearBodies,
   taxYearDrafts,
   tokyoDate,
@@ -718,11 +719,8 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(warningText({ kind: 'simplified_class_missing' }, (x) => x), '簡易課税の事業区分が未設定なので消費税は見通しに入りません。');
     assert.match(warningText({ kind: 'tax_profile_missing' }, (x) => x), /税・保険の見積もりが未設定/);
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
-    assert.equal(warningText({ kind: 'consumption_tax_not_implemented', mode: 'special20' }, (x) => x), '消費税（方式: 2 割特例）はまだ見通しに入りません。');
-    assert.equal(
-      runText(r({ warnings: [{ kind: 'consumption_tax_not_implemented', mode: 'simplified' }] }), '保存しました。'),
-      '保存しました。予定は作成 0・更新 0・停止 0 件。消費税（方式: 簡易課税）はまだ見通しに入りません。',
-    );
+    assert.equal(warningText({ kind: 'revenue_missing', year: 2026 }, (x) => x), '2026 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
+    assert.equal(taxWarningText({ kind: 'revenue_missing', year: 2025 }), '2025 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
   });
 });
 
