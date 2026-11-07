@@ -182,20 +182,27 @@ describe('個人事業税', () => {
 
 describe('国民年金', () => {
   const ys = [yr(2025, 'actual', { business_income: 3_000_000 })];
-  test('月払い: 毎月末。2027 年度から 18,290', () => {
+  test('月払い: 年度ごとに 1 項目（monthly、4 月末〜翌 3 月末）。2027 年度から 18,290', () => {
     const r = run({ pension_mode: 'monthly' }, ys, { from: '2027-02-01', to: '2027-05-31' });
-    assert.deepEqual(pick(r, 'pension:'), [
-      ['pension:2026:01', '2027-02-01', 17_920],
-      ['pension:2026:02', '2027-03-01', 17_920],
-      ['pension:2026:03', '2027-03-31', 17_920],
-      ['pension:2027:04', '2027-04-30', 18_290],
-      ['pension:2027:05', '2027-05-31', 18_290],
+    const rows = r.items.filter((i) => i.kind === 'pension').map((i) => [i.key, i.due, i.end_date, i.recurrence, i.amount, i.name]);
+    assert.deepEqual(rows, [
+      ['pension:2026:monthly', '2026-04-30', '2027-03-31', 'monthly', 17_920, '国民年金 2026 年度 月払い（見積）'],
+      ['pension:2027:monthly', '2027-04-30', '2028-03-31', 'monthly', 18_290, '国民年金 2027 年度 月払い（見積）'],
     ]);
-    assert.equal(byKey(r).get('pension:2027:04')!.name, '国民年金 2027 年度 4 月分（見積）');
+    // 期間の始まりより前の年度（2025 年度は 2026-03-31 で終わる）は出さない。期間の終わりより後に始まる年度も出さない。
+    assert.deepEqual(pick(run({ pension_mode: 'monthly' }, ys, { from: '2026-04-01', to: '2027-03-31' }), 'pension:').map(([k]) => k), ['pension:2026:monthly']);
+    // 年度の内訳は 12 か月分。
+    assert.equal(r.breakdown.find((b) => b.group === 'pension:2027')!.total, 18_290 * 12);
+  });
+  test('月払い: 社会保険料控除は月ごとに数える（2026 年 = 2025 年度の 1〜3 月 + 2026 年度の 4〜12 月）', () => {
+    const r = run({ pension_mode: 'monthly', nhi_preset: null }, [yr(2026, 'estimate', { business_income: 3_000_000 })], { from: '2026-01-01', to: '2028-12-31' });
+    const soc = (y: number) => r.breakdown.find((b) => b.group === `income_tax:${y}`)!.lines.find((l) => l.label === '社会保険料控除')!.amount;
+    assert.equal(soc(2026), 17_920 * 12);
+    assert.equal(soc(2027), 17_920 * 3 + 18_290 * 9);
   });
   test('付加保険料は月 400 円', () => {
     const r = run({ pension_mode: 'monthly', pension_addon: 1 }, ys, { from: '2026-04-01', to: '2026-04-30' });
-    assert.deepEqual(pick(r, 'pension:'), [['pension:2026:04', '2026-04-30', 18_320]]);
+    assert.deepEqual(pick(r, 'pension:'), [['pension:2026:monthly', '2026-04-30', 18_320]]);
   });
   test('6 か月前納: 4 月末と 10 月末', () => {
     const r = run({ pension_mode: 'prepay6' }, ys, { from: '2026-01-01', to: '2026-12-31' });
@@ -256,7 +263,9 @@ describe('入力が無いとき', () => {
   test('期間の外の期日は出さない', () => {
     const r = run({}, [yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0 })], { from: '2026-07-01', to: '2026-07-31' });
     assert.ok(r.items.length > 0);
-    assert.ok(r.items.every((i) => i.due >= '2026-07-01' && i.due <= '2026-07-31'));
+    // monthly（年金の月払い）は最初の回〜end_date が期間に掛かるもの。
+    assert.ok(r.items.every((i) => (i.end_date ?? i.due) >= '2026-07-01' && i.due <= '2026-07-31'));
+    assert.ok(r.items.filter((i) => i.recurrence === 'once').every((i) => i.due >= '2026-07-01'));
   });
 });
 
@@ -303,10 +312,90 @@ describe('レビュー対応', () => {
     assert.equal(full?.basic_deduction, 430_000);
   });
 
-  test('消費税の方式が設定済み（exempt 以外）なら consumption_tax_not_implemented', () => {
+});
+
+describe('消費税', () => {
+  const ctaxWarnings = (r: ReturnType<typeof estimate>) => r.warnings.filter((w) => w.kind !== 'income_missing');
+
+  // 2026 年分。売上 500 万・経費 100 万。期日は 2027-03-31（水）。
+  // 税込: 税抜売上 4,545,454・売上税額 454,545。税抜: 5,000,000・500,000。本則の控除は税抜経費 × 10%。
+  const cases: [0 | 1, 'exempt' | 'special20' | 'simplified' | 'standard', number | null, number | null][] = [
+    [1, 'exempt', null, null],
+    [1, 'special20', null, 90_900],
+    [1, 'simplified', 1, 45_400],
+    [1, 'simplified', 5, 227_200],
+    [1, 'standard', null, 363_600],
+    [0, 'exempt', null, null],
+    [0, 'special20', null, 100_000],
+    [0, 'simplified', 1, 50_000],
+    [0, 'simplified', 5, 250_000],
+    [0, 'standard', null, 400_000],
+  ];
+  for (const [incl, mode, cls, want] of cases) {
+    test(`売上 500 万・${incl ? '税込' : '税抜'}・${mode}${cls ? ` 第 ${cls} 種` : ''} → ${want ?? '作らない'}`, () => {
+      const r = run({ consumption_mode: mode, simplified_class: cls, revenue_includes_tax: incl }, [yr(2026, 'estimate', { revenue: 5_000_000, expenses: 1_000_000 })], { from: '2026-01-01', to: '2027-12-31' });
+      const it = byKey(r).get('ctax:2026:final');
+      assert.deepEqual(ctaxWarnings(r), []);
+      if (want === null) return assert.equal(it, undefined);
+      assert.ok(it);
+      assert.deepEqual([it.amount, it.due, it.name, it.category, it.recurrence, it.end_date], [want, '2027-03-31', '消費税 2026 年分 確定申告（見積）', 'tax', 'once', null]);
+      const b = r.breakdown.find((x) => x.group === 'ctax:2026')!;
+      assert.equal(b.method, mode);
+      assert.equal(b.lines[0].amount, incl ? 4_545_454 : 5_000_000);
+      assert.equal(b.lines[1].amount, incl ? 454_545 : 500_000);
+      assert.equal(b.lines.find((l) => l.label === '年税額（国税 + 地方消費税）')!.amount, want);
+    });
+  }
+
+  test('2 割特例は 2026 年分まで。2027 年分以降は作らず special20_expired（期日が期間に入る年だけ）', () => {
+    const ys = [yr(2026, 'estimate', { revenue: 5_000_000, expenses: 0 }), yr(2027, 'estimate', { revenue: 5_000_000, expenses: 0 })];
+    const r = run({ consumption_mode: 'special20', revenue_includes_tax: 0 }, ys);
+    assert.deepEqual(pick(r, 'ctax:'), [['ctax:2026:final', '2027-03-31', 100_000]]);
+    // 2029 年分の期日 2030-04-01 は期間（〜2029-12-31）の外。
+    assert.deepEqual(ctaxWarnings(r), [{ kind: 'special20_expired', year: 2027 }, { kind: 'special20_expired', year: 2028 }]);
+  });
+
+  test('簡易課税で事業区分が無ければ作らず simplified_class_missing', () => {
+    const r = run({ consumption_mode: 'simplified', simplified_class: null }, [yr(2026, 'estimate', { revenue: 5_000_000, expenses: 0 })]);
+    assert.deepEqual(pick(r, 'ctax:'), []);
+    assert.deepEqual(ctaxWarnings(r), [{ kind: 'simplified_class_missing' }]);
+  });
+
+  for (const [prev, want] of [[480_000, null], [480_100, 307_600]] as const) {
+    test(`中間申告: 前年の国税分 ${prev} → ${want ?? '無し'}（確定申告は中間の分を引く）`, () => {
+      const ys = [yr(2025, 'actual', { business_income: 3_000_000, consumption_tax_final: prev }), yr(2026, 'estimate', { revenue: 5_000_000, expenses: 0 })];
+      const r = run({ consumption_mode: 'standard', revenue_includes_tax: 0 }, ys);
+      const m = byKey(r);
+      if (want === null) {
+        assert.equal(m.get('ctax:2026:interim1'), undefined);
+        assert.equal(m.get('ctax:2026:final')!.amount, 500_000);
+        return;
+      }
+      // 480,100 × 6/12 = 240,050 → 240,000。地方分 240,000 × 22/78 = 67,692 → 67,600。
+      const it = m.get('ctax:2026:interim1')!;
+      assert.deepEqual([it.amount, it.due, it.name], [307_600, '2026-08-31', '消費税 2026 年分 中間申告（見積）']);
+      assert.equal(m.get('ctax:2026:final')!.amount, 500_000 - 307_600);
+      const lines = r.breakdown.find((b) => b.group === 'ctax:2026')!.lines;
+      assert.deepEqual(lines.slice(0, 4).map((l) => l.amount), [480_100, 240_000, 67_600, 307_600]);
+    });
+  }
+
+  test('中間申告: 前年が見込み（estimate）なら見積もりの年税額 × 78/100 を国税分とみなす', () => {
+    const r = run({ consumption_mode: 'standard', revenue_includes_tax: 0 }, [yr(2026, 'estimate', { revenue: 8_000_000, expenses: 0 })]);
+    const m = byKey(r);
+    assert.equal(m.get('ctax:2026:final')!.amount, 800_000);
+    assert.equal(m.get('ctax:2026:interim1'), undefined); // 2025 年分が無い
+    // 800,000 × 78/100 = 624,000 → 中間 312,000 + 地方 88,000。2027 年分は 2026 年の売上を繰り越す。
+    assert.deepEqual([m.get('ctax:2027:interim1')!.amount, m.get('ctax:2027:interim1')!.due], [400_000, '2027-08-31']);
+    assert.equal(m.get('ctax:2027:final')!.amount, 400_000);
+    const b = r.breakdown.find((x) => x.group === 'ctax:2027')!;
+    assert.equal(b.carried_from, 2026);
+    assert.deepEqual(b.lines[0], { label: '中間申告の基準（2026 年分の見積もり × 78/100 を国税分とみなす）', amount: 624_000 });
+  });
+
+  test('方式が設定済みなら consumption_tax_not_implemented は出さない', () => {
     const ys = [yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0 })];
-    for (const mode of ['special20', 'simplified', 'standard'] as const) {
-      assert.deepEqual(run({ consumption_mode: mode }, ys).warnings, [{ kind: 'consumption_tax_not_implemented', mode }]);
-    }
+    assert.deepEqual(run({ consumption_mode: 'simplified', simplified_class: 1 }, ys).warnings, []);
+    assert.deepEqual(run({ consumption_mode: 'standard' }, ys).warnings, []);
   });
 });

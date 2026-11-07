@@ -79,8 +79,9 @@ describe('税の見積もりの API', () => {
     // 資金繰りの items にも同じ列。
     const cf = (await get('/api/cashflow')).body;
     const dec = cf.months.find((m: { month: string }) => m.month === '2026-12');
-    const pension = dec.items.find((i: { estimate_key: string }) => i.estimate_key === 'pension:2026:12');
-    assert.deepEqual([pension.origin, pension.pinned, pension.amount, pension.due], ['estimate', 0, 17_920, '2026-12-31']);
+    // 年金の月払いは monthly の 1 項目（anchor 2026-04-30）。毎月の期日は anchor の日（30 日）で展開される。
+    const pension = dec.items.find((i: { estimate_key: string }) => i.estimate_key === 'pension:2026:monthly');
+    assert.deepEqual([pension.origin, pension.pinned, pension.amount, pension.due], ['estimate', 0, 17_920, '2026-12-30']);
     assert.equal(cf.warnings.some((w: { kind: string }) => w.kind === 'tax_profile_missing'), false);
     assert.ok(cf.warnings.some((w: { kind: string }) => w.kind === 'consumption_tax_mode_unset'));
 
@@ -134,6 +135,39 @@ describe('税の見積もりの API', () => {
     assert.equal((db.prepare('SELECT count(*) n FROM tax_profile').get() as { n: number }).n, 0);
     assert.equal((db.prepare('SELECT count(*) n FROM tax_years').get() as { n: number }).n, 0);
     assert.deepEqual((await get('/api/tax/estimates')).body.run_id, null);
+  });
+
+  test('PUT /api/tax: profile と years を一括で保存し、再計算は 1 回', async () => {
+    const r = await send('PUT', '/api/tax', {
+      profile: { consumption_mode: 'standard', revenue_includes_tax: false, nhi_members_40_64: 1 },
+      years: [
+        { year: 2025, kind: 'actual', business_income: 3_000_000, income_tax_final: 150_000, prepaid_income_tax: 0, social_insurance_paid: 600_000 },
+        { year: 2026, kind: 'estimate', revenue: 5_000_000, expenses: 1_500_000 },
+      ],
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(Object.keys(r.body).sort(), ['profile', 'run', 'years']);
+    assert.equal(r.body.profile.revenue_includes_tax, false);
+    assert.deepEqual(r.body.years.map((y: { year: number }) => y.year), [2025, 2026]);
+    assert.deepEqual(Object.keys(r.body.run).sort(), ['created', 'deactivated', 'run_id', 'skipped_pinned', 'updated', 'warnings']);
+    assert.equal((db.prepare('SELECT count(*) n FROM tax_estimate_runs').get() as { n: number }).n, 1);
+    // 消費税（本則・税抜）: 500,000 − 150,000 = 350,000。
+    const list = (await get('/api/scheduled_items')).body.items as Record<string, any>[];
+    assert.equal(list.find((i) => i.estimate_key === 'ctax:2026:final')!.amount, 350_000);
+    // 資金繰りの警告に消費税の未実装は出ない。
+    assert.equal((await get('/api/cashflow')).body.warnings.some((w: { kind: string }) => w.kind.startsWith('consumption_tax')), false);
+
+    for (const [body, code] of [
+      [{}, 'empty_body'],
+      [{ nope: 1 }, 'invalid_field'],
+      [{ profile: { nope: 1 } }, 'invalid_field'],
+      [{ years: [{ year: 2026, kind: 'weekly' }] }, 'invalid_kind'],
+      ['nope', 'invalid_json'],
+    ] as [unknown, string][]) {
+      assert.deepEqual(await send('PUT', '/api/tax', body), { status: 400, body: { error: code } }, JSON.stringify(body));
+    }
+    assert.equal((db.prepare('SELECT count(*) n FROM tax_estimate_runs').get() as { n: number }).n, 1);
+    assert.ok(verifyAudit(db).ok);
   });
 
   test('PATCH /api/scheduled_items/:id の pinned は見積もりの項目だけ', async () => {

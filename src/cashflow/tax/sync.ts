@@ -1,7 +1,8 @@
 // 税金・保険料の見積もりの入力の保存と、予定台帳への同期（docs/cashflow.md §14.2）。
-// 再計算: engine.ts の結果を scheduled_items（origin = estimate、recurrence = once）に estimate_key で突き合わせる。
-//   key が無い → 作る / 同じ → 何もしない / 額・期日・名前・口座が違う・pinned = 0 → その行を書き換える（id は変えない）/ pinned = 1 → 触らない（skipped_pinned）。
-//   今回出なくなった key（期日が対象の期間にあるもの）: pinned = 0 → 止める / pinned = 1 → 触らず警告。
+// 再計算: engine.ts の結果を scheduled_items（origin = estimate、recurrence = once。国民年金の月払いだけ monthly + end_date）に estimate_key で突き合わせる。
+//   key が無い → 作る / 同じ → 何もしない / 額・期日・end_date・recurrence・名前・口座が違う・pinned = 0 → その行を書き換える（id は変えない）/
+//   pinned = 1 → 触らない（skipped_pinned）。
+//   今回出なくなった key（anchor_date〜end_date が対象の期間に掛かるもの）: pinned = 0 → 止める / pinned = 1 → 触らず警告。
 //   同じ category で ±45 日・±10% の manual / detected の有効な項目があれば possible_duplicate を出す（消さない）。
 // 対象の期間: 今年の 1/1 〜 今日 + 39 か月（36 か月 + 3 か月）。過去の期日も作る（forecast が履歴から予定分を引く）。
 // 台帳への書き込みは actor = system（監査の payload に run_id と reason）。1 回の再計算を tax_estimate_runs に 1 行残す。
@@ -129,8 +130,8 @@ export function recalculate(db: Db, opts: { today: string; now: Date; actor: str
         id = createItem(
           db,
           {
-            name: it.name, amount: it.amount, direction: 'out', category: it.category, accountId: profile!.payment_account_id, recurrence: 'once',
-            anchorDate: it.due, endDate: null, notifyDaysBefore: ESTIMATE_NOTIFY_DAYS_BEFORE, origin: 'estimate', estimateKey: it.key,
+            name: it.name, amount: it.amount, direction: 'out', category: it.category, accountId: profile!.payment_account_id, recurrence: it.recurrence,
+            anchorDate: it.due, endDate: it.end_date, notifyDaysBefore: ESTIMATE_NOTIFY_DAYS_BEFORE, origin: 'estimate', estimateKey: it.key,
           },
           system({}),
           opts.now,
@@ -139,8 +140,12 @@ export function recalculate(db: Db, opts: { today: string; now: Date; actor: str
       } else {
         id = cur.id;
         const account = profile!.payment_account_id;
-        if (cur.amount !== it.amount || cur.anchor_date !== it.due || cur.name !== it.name || cur.account_id !== account) {
-          updateItem(db, cur.id, { amount: it.amount, anchorDate: it.due, name: it.name, accountId: account }, system({ reason: 'tax_recalc' }), opts.now);
+        if (
+          cur.amount !== it.amount || cur.anchor_date !== it.due || cur.end_date !== it.end_date || cur.recurrence !== it.recurrence ||
+          cur.name !== it.name || cur.account_id !== account
+        ) {
+          const patch = { amount: it.amount, anchorDate: it.due, endDate: it.end_date, recurrence: it.recurrence, name: it.name, accountId: account };
+          updateItem(db, cur.id, patch, system({ reason: 'tax_recalc' }), opts.now);
           updated++;
         }
       }
@@ -149,7 +154,7 @@ export function recalculate(db: Db, opts: { today: string; now: Date; actor: str
 
     const keys = new Set(res.items.map((i) => i.key));
     for (const [key, row] of latest) {
-      if (row.active === 0 || keys.has(key) || row.anchor_date < window.from || row.anchor_date > window.to) continue;
+      if (row.active === 0 || keys.has(key) || (row.end_date ?? row.anchor_date) < window.from || row.anchor_date > window.to) continue;
       if (row.pinned === 1) {
         warnings.push({ kind: 'pinned_withdrawn', key, item_id: row.id });
         continue;
@@ -292,34 +297,65 @@ function diff<T extends Record<string, unknown>>(before: T | null, after: T, col
 
 type SaveOpts = { by: { actor: string; user?: string | null }; today: string; now: Date };
 
-// プロファイルを保存して再計算する（同じトランザクション）。
-export function saveProfile(db: Db, body: Record<string, unknown>, o: SaveOpts): { profile: TaxProfileRow; run: RunSummary } {
-  return tx(db, () => {
-    const cur = getTaxProfile(db);
-    const v = parseProfileBody(body, cur ?? DEFAULT_PROFILE);
-    if (v.payment_account_id !== null && !db.prepare('SELECT 1 FROM money_accounts WHERE id = ?').get(v.payment_account_id)) throw new TaxError('unknown_account');
-    const changes = diff(cur, v, PROFILE_COLUMNS);
-    const profile = cur && Object.keys(changes).length === 0 ? cur : upsertTaxProfile(db, v, o.now.toISOString());
-    if (Object.keys(changes).length > 0) {
-      appendAudit(db, { actor: o.by.actor, action: 'tax_profile.updated', entity: 'tax_profile', entityId: 'default', payload: { changes, user: o.by.user ?? null } }, o.now);
-    }
-    return { profile, run: recalculate(db, { today: o.today, now: o.now, actor: o.by.actor, user: o.by.user }) };
-  });
+// プロファイルを保存する（再計算はしない。呼ぶ側のトランザクションの中で）。
+function writeProfile(db: Db, body: Record<string, unknown>, o: SaveOpts): TaxProfileRow {
+  const cur = getTaxProfile(db);
+  const v = parseProfileBody(body, cur ?? DEFAULT_PROFILE);
+  if (v.payment_account_id !== null && !db.prepare('SELECT 1 FROM money_accounts WHERE id = ?').get(v.payment_account_id)) throw new TaxError('unknown_account');
+  const changes = diff(cur, v, PROFILE_COLUMNS);
+  const profile = cur && Object.keys(changes).length === 0 ? cur : upsertTaxProfile(db, v, o.now.toISOString());
+  if (Object.keys(changes).length > 0) {
+    appendAudit(db, { actor: o.by.actor, action: 'tax_profile.updated', entity: 'tax_profile', entityId: 'default', payload: { changes, user: o.by.user ?? null } }, o.now);
+  }
+  return profile;
 }
 
 const YEAR_COLS = [...YEAR_BODY_KEYS, 'source'] as const;
 
+// 1 年分を保存する（再計算はしない。呼ぶ側のトランザクションの中で）。
+function writeYear(db: Db, year: number, body: Record<string, unknown>, o: SaveOpts): TaxYearRow {
+  const cur = getTaxYear(db, year);
+  const v = parseYearBody(body, cur);
+  const changes = diff(cur, v, YEAR_COLS);
+  const row = cur && Object.keys(changes).length === 0 ? cur : upsertTaxYear(db, year, v, o.now.toISOString());
+  if (Object.keys(changes).length > 0) {
+    appendAudit(db, { actor: o.by.actor, action: 'tax_year.updated', entity: 'tax_year', entityId: String(year), payload: { year, changes, user: o.by.user ?? null } }, o.now);
+  }
+  return row;
+}
+
+const rerun = (db: Db, o: SaveOpts) => recalculate(db, { today: o.today, now: o.now, actor: o.by.actor, user: o.by.user });
+
+// プロファイルを保存して再計算する（同じトランザクション）。
+export function saveProfile(db: Db, body: Record<string, unknown>, o: SaveOpts): { profile: TaxProfileRow; run: RunSummary } {
+  return tx(db, () => ({ profile: writeProfile(db, body, o), run: rerun(db, o) }));
+}
+
 // 1 年分を保存して再計算する（同じトランザクション）。
 export function saveYear(db: Db, year: number, body: Record<string, unknown>, o: SaveOpts): { year: TaxYearRow; run: RunSummary } {
+  return tx(db, () => ({ year: writeYear(db, year, body, o), run: rerun(db, o) }));
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+// PUT /api/tax の一括保存。body {profile?: 部分更新, years?: [{year, ...部分更新}]}。
+// 1 トランザクションで profile → years（配列の順）を保存し、再計算は最後に 1 回。どこかで 400 なら何も残さない。
+// 応答の profile は保存後のプロファイル（無ければ null）、years は保存後の全年。
+export function saveAll(db: Db, body: Record<string, unknown>, o: SaveOpts): { profile: TaxProfileRow | null; years: TaxYearRow[]; run: RunSummary } {
+  for (const k of Object.keys(body)) if (k !== 'profile' && k !== 'years') throw new TaxError('invalid_field');
+  if (body.profile === undefined && body.years === undefined) throw new TaxError('empty_body');
+  if (body.profile !== undefined && !isObject(body.profile)) throw new TaxError('invalid_profile');
+  if (body.years !== undefined && (!Array.isArray(body.years) || !body.years.every(isObject))) throw new TaxError('invalid_years');
+  const years = (body.years ?? []) as Record<string, unknown>[];
   return tx(db, () => {
-    const cur = getTaxYear(db, year);
-    const v = parseYearBody(body, cur);
-    const changes = diff(cur, v, YEAR_COLS);
-    const row = cur && Object.keys(changes).length === 0 ? cur : upsertTaxYear(db, year, v, o.now.toISOString());
-    if (Object.keys(changes).length > 0) {
-      appendAudit(db, { actor: o.by.actor, action: 'tax_year.updated', entity: 'tax_year', entityId: String(year), payload: { year, changes, user: o.by.user ?? null } }, o.now);
+    if (body.profile !== undefined) writeProfile(db, body.profile as Record<string, unknown>, o);
+    for (const y of years) {
+      const { year, ...rest } = y;
+      if (!Number.isSafeInteger(year) || (year as number) < YEAR_MIN || (year as number) > YEAR_MAX) throw new TaxError('invalid_year');
+      writeYear(db, year as number, rest, o);
     }
-    return { year: row, run: recalculate(db, { today: o.today, now: o.now, actor: o.by.actor, user: o.by.user }) };
+    const run = rerun(db, o);
+    return { profile: getTaxProfile(db), years: listTaxYears(db), run };
   });
 }
 
@@ -356,7 +392,7 @@ export function presets(): { id: string; label: string }[] {
 export function latestEstimates(db: Db) {
   const run = latestTaxEstimateRun(db);
   if (!run) return null;
-  const r = JSON.parse(run.results_json) as { window: EstimateWindow; items: EstimateItem[]; breakdown: Breakdown[]; skipped_pinned: SkippedPinned[] };
+  const r = JSON.parse(run.results_json) as { window: EstimateWindow; items: (Omit<EstimateItem, 'recurrence' | 'end_date'> & Partial<EstimateItem>)[]; breakdown: Breakdown[]; skipped_pinned: SkippedPinned[] };
   const groups = new Map(r.breakdown.map((b) => [b.group, b]));
   return {
     run_id: run.id,
@@ -364,7 +400,8 @@ export function latestEstimates(db: Db) {
     window: r.window,
     items: r.items.map((i) => {
       const b = groups.get(i.group);
-      return { ...i, lines: b?.lines ?? [], income_year: b?.income_year ?? null, assumed_prev_year: b?.assumed_prev_year ?? false, carried_from: b?.carried_from ?? null };
+      // 第 1 版の再計算の結果には recurrence・end_date が無い（すべて once）。
+      return { ...i, recurrence: i.recurrence ?? 'once', end_date: i.end_date ?? null, lines: b?.lines ?? [], income_year: b?.income_year ?? null, assumed_prev_year: b?.assumed_prev_year ?? false, carried_from: b?.carried_from ?? null };
     }),
     breakdown: r.breakdown,
     skipped_pinned: r.skipped_pinned,
@@ -373,11 +410,8 @@ export function latestEstimates(db: Db) {
 }
 
 // GET /api/cashflow の warnings に足すもの。
-export function cashflowTaxWarnings(
-  db: Db,
-): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' } | { kind: 'consumption_tax_not_implemented'; mode: string })[] {
+export function cashflowTaxWarnings(db: Db): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' })[] {
   const p = getTaxProfile(db);
   if (!p) return [{ kind: 'tax_profile_missing' }];
-  if (p.consumption_mode === 'unset') return [{ kind: 'consumption_tax_mode_unset' }];
-  return p.consumption_mode === 'exempt' ? [] : [{ kind: 'consumption_tax_not_implemented', mode: p.consumption_mode }];
+  return p.consumption_mode === 'unset' ? [{ kind: 'consumption_tax_mode_unset' }] : [];
 }

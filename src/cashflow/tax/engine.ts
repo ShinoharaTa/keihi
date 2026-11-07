@@ -1,7 +1,9 @@
 // 税金・保険料の見積もり（docs/cashflow.md §14）。純関数: 税プロファイルと年ごとの所得から、期日と額の一覧を出す。DB には触らない。
-// 対象: 所得税（確定申告 + 予定納税）・住民税（普通徴収 4 期）・国民健康保険税・個人事業税（biz_tax_rate が NULL なら作らない）・国民年金。
-// 消費税は作らない（PR2。consumption_mode = 'unset' なら警告だけ出す）。法定の数値は rates.ts。
+// 対象: 所得税（確定申告 + 予定納税）・住民税（普通徴収 4 期）・国民健康保険税・個人事業税（biz_tax_rate が NULL なら作らない）・国民年金・
+// 消費税（確定申告 + 中間申告 1 回。consumption_mode が exempt なら作らず、unset なら警告だけ）。法定の数値は rates.ts。
 // どの年の所得で決まるか: 所得税は Y、予定納税は Y−1 の申告納税額、住民税・国保・事業税（Y 年度）は Y−1。
+// 消費税は Y の売上・経費（無ければ前の年で最も新しい売上を繰り越す）、中間申告は Y−1 年分の国税分。
+// 国民年金の月払いは年度ごとに 1 項目（recurrence = monthly、4 月末〜翌 3 月末）。社会保険料控除は月ごとの内訳で数える。
 // 所得 = 事業所得（青色申告特別控除の後）。business_income があればそれ、無ければ revenue − expenses − 青色控除（負なら 0）。
 // 入力が無い年: 直近の前の年の所得を繰り越す（carried_from）。Y−1 がどこにも無ければ Y の所得で代える（assumed_prev_year。住民税・国保・事業税だけ）。
 // 丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨てにし、端数は 1 期目。
@@ -11,6 +13,9 @@ import {
   BIZ_TAX_DEDUCTION,
   BIZ_TAX_SINGLE_PAYMENT_MAX,
   BLUE_RETURN_DEDUCTION,
+  CTAX_DEEMED_PURCHASE_PCT,
+  CTAX_INTERIM_THRESHOLD,
+  CTAX_SPECIAL20_LAST_YEAR,
   INCOME_TAX_BASIC_DEDUCTION,
   INCOME_TAX_BRACKETS,
   INCOME_TAX_PERSONAL_DEDUCTION,
@@ -29,9 +34,9 @@ import {
   type NhiSegment,
   type Step,
 } from './rates.ts';
-import type { TaxProfileValues, TaxYearValues } from './repo.ts';
+import type { ConsumptionMode, TaxProfileValues, TaxYearValues } from './repo.ts';
 
-export type EstimateKind = 'income_tax' | 'resident' | 'nhi' | 'biz_tax' | 'pension';
+export type EstimateKind = 'income_tax' | 'resident' | 'nhi' | 'biz_tax' | 'pension' | 'ctax';
 
 export type EstimateItem = {
   key: string; // 'income_tax:2026:final' など（scheduled_items.estimate_key）
@@ -39,7 +44,9 @@ export type EstimateItem = {
   year: number; // 所得税は年分、それ以外は年度
   name: string;
   amount: number;
-  due: string; // 休日を翌営業日に寄せた期日
+  due: string; // 休日を翌営業日に寄せた期日（monthly は最初の回。休日に寄せない）
+  recurrence: 'once' | 'monthly';
+  end_date: string | null; // monthly の最後の回の上限（once は null）
   category: 'tax' | 'insurance';
   group: string; // breakdown の group
 };
@@ -55,11 +62,13 @@ export type Breakdown = {
   income_year?: number; // 所得を使った年（住民税・国保・事業税は通常 year − 1）
   assumed_prev_year?: true; // 前年の所得が無く、year の所得で代えた
   carried_from?: number; // 所得をこの年から繰り越した
+  method?: Exclude<ConsumptionMode, 'unset' | 'exempt'>; // 消費税の方式
 };
 
 export type EstimateWarning =
   | { kind: 'consumption_tax_mode_unset' }
-  | { kind: 'consumption_tax_not_implemented'; mode: string } // 方式は設定済みだが PR1 は消費税を作らない
+  | { kind: 'simplified_class_missing' } // 簡易課税なのに事業区分が無い（消費税を作らない）
+  | { kind: 'special20_expired'; year: number } // 2 割特例は 2026 年分まで（その年分の消費税を作らない）
   | { kind: 'income_missing'; year: number };
 
 export type EstimateWindow = { from: string; to: string }; // 両端を含む
@@ -122,7 +131,10 @@ export function nhiRatesOf(p: Pick<TaxProfileValues, 'nhi_preset' | 'nhi_rates_j
 
 type Resolved = { income: number; preBlue: number; carriedFrom?: number; incomeYear: number; assumed?: true };
 
-type Due = { key: string; name: string; amount: number; nominal: string; due: string };
+type Due = { key: string; name: string; amount: number; nominal: string; due: string; recurrence?: 'monthly'; end?: string };
+
+// 台帳に出す項目（emit）が内訳の期（dues）と違うとき（国民年金の月払い）は emit を使う。
+type Group = { dues: Due[]; b: Breakdown | null; emit?: Due[] };
 
 export function estimate(profile: TaxProfileValues, years: EstimateYear[], window: EstimateWindow): EstimateResult {
   const blue = BLUE_RETURN_DEDUCTION[profile.blue_return];
@@ -184,7 +196,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   };
 
   // ---- 国民年金（F 年度 = F 年 4 月〜F+1 年 3 月） ----
-  const pension = (f: number): { dues: Due[]; b: Breakdown | null } =>
+  const pension = (f: number): Group =>
     cached(`pension:${f}`, () => {
       if (profile.pension_mode === 'none') return { dues: [], b: null };
       const r = ratesFor(PENSION_RATES, f);
@@ -212,7 +224,14 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
         push(4, r.prepay24 + addon * 24, '2 年前納');
       }
       const total = dues.reduce((s, d) => s + d.amount, 0);
-      return { dues, b: dues.length ? { group: `pension:${f}`, kind: 'pension', year: f, total, lines: [...lines, { label: '年度の合計', amount: total }] } : null };
+      const b: Breakdown | null = dues.length ? { group: `pension:${f}`, kind: 'pension', year: f, total, lines: [...lines, { label: '年度の合計', amount: total }] } : null;
+      if (profile.pension_mode !== 'monthly') return { dues, b };
+      // 月払いは 4 月末を起点に毎月、翌 3 月末まで（月ごとの dues は社会保険料控除の計算だけに使う）。
+      const anchor = monthEnd(f, 4);
+      const emit: Due[] = [
+        { key: `pension:${f}:monthly`, name: `国民年金 ${f} 年度 月払い（見積）`, amount: r.monthly + addon, nominal: anchor, due: anchor, recurrence: 'monthly', end: monthEnd(f, 15) },
+      ];
+      return { dues, b, emit };
     });
 
   // ---- 国民健康保険税（F 年度。F−1 年の所得） ----
@@ -370,27 +389,135 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     return { dues, b: { group: `biz_tax:${f}`, kind: 'biz_tax', year: f, total, lines, ...meta(r) } };
   };
 
+  // ---- 消費税（Y 年分。Y の売上・経費。中間申告は Y−1 年分の国税分） ----
+  const mode = profile.consumption_mode;
+  const ctaxOn = mode === 'special20' || mode === 'simplified' || mode === 'standard';
+  const exTax = (x: number) => (profile.revenue_includes_tax ? Math.floor((x * 100) / 110) : x);
+  // Y の売上のある行。Y に無ければ前の年で最も新しいものを繰り越す。
+  const ctaxRow = (year: number): { row: EstimateYear; carriedFrom?: number } | null => {
+    for (let i = sortedYears.length - 1; i >= 0; i--) {
+      const y = sortedYears[i];
+      if (y > year) continue;
+      const row = rows.get(y)!;
+      if (row.revenue !== null) return { row, ...(y !== year ? { carriedFrom: y } : {}) };
+    }
+    return null;
+  };
+  // Y 年分の年税額（国税 + 地方消費税。中間申告を引く前）。
+  const ctaxAnnual = (year: number): { tax: number; lines: BreakdownLine[]; incomeYear: number; carriedFrom?: number } | null =>
+    cached(`ctax:${year}`, () => {
+      if (!ctaxOn) return null;
+      if (mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR) return null;
+      if (mode === 'simplified' && profile.simplified_class === null) return null;
+      const src = ctaxRow(year);
+      if (!src) return null;
+      const sales = exTax(src.row.revenue!);
+      const salesTax = Math.floor((sales * 10) / 100);
+      const lines: BreakdownLine[] = [{ label: `${src.row.year} 年の売上（税抜）`, amount: sales }, { label: '売上税額（10%）', amount: salesTax }];
+      let tax: number;
+      if (mode === 'special20') {
+        tax = Math.floor((salesTax * 20) / 100);
+        lines.push({ label: '控除（2 割特例: 売上税額の 80%）', amount: salesTax - tax });
+      } else if (mode === 'simplified') {
+        const pct = CTAX_DEEMED_PURCHASE_PCT[profile.simplified_class!];
+        tax = Math.floor((salesTax * (100 - pct)) / 100);
+        lines.push({ label: `控除（簡易課税 第 ${profile.simplified_class} 種: みなし仕入率 ${pct}%）`, amount: salesTax - tax });
+      } else {
+        // 本則（概算）: 経費を全額課税仕入とみなす。
+        const purchase = exTax(src.row.expenses ?? 0);
+        const credit = Math.floor((purchase * 10) / 100);
+        tax = Math.max(0, salesTax - credit);
+        lines.push({ label: `${src.row.year} 年の経費（税抜）`, amount: purchase }, { label: '控除（本則・概算: 税抜経費 × 10%）', amount: credit });
+      }
+      const total = floorTo(tax, 100);
+      lines.push({ label: '年税額（国税 + 地方消費税）', amount: total });
+      return { tax: total, lines, incomeYear: src.row.year, ...(src.carriedFrom !== undefined ? { carriedFrom: src.carriedFrom } : {}) };
+    });
+  // Y 年分の中間申告（年 1 回）。Y−1 年分の国税分が 48 万円超のとき。
+  const ctaxInterim = (year: number): { due: Due; lines: BreakdownLine[] } | null => {
+    if (!ctaxOn) return null;
+    const a = actual(year - 1);
+    let national: number;
+    let label: string;
+    if (a && a.consumption_tax_final !== null) {
+      national = a.consumption_tax_final;
+      label = `中間申告の基準（${year - 1} 年分の国税分）`;
+    } else {
+      const prev = ctaxAnnual(year - 1);
+      if (!prev) return null;
+      national = Math.floor((prev.tax * 78) / 100);
+      label = `中間申告の基準（${year - 1} 年分の見積もり × 78/100 を国税分とみなす）`;
+    }
+    if (national <= CTAX_INTERIM_THRESHOLD) return null;
+    const nat = floorTo((national * 6) / 12, 100);
+    const local = floorTo(Math.floor((nat * 22) / 78), 100);
+    const nominal = `${year}-08-31`;
+    return {
+      due: { key: `ctax:${year}:interim1`, name: `消費税 ${year} 年分 中間申告（見積）`, amount: nat + local, nominal, due: nextBusinessDay(nominal) },
+      lines: [
+        { label, amount: national },
+        { label: '中間申告 国税分（6/12）', amount: nat },
+        { label: '中間申告 地方消費税（国税分 × 22/78）', amount: local },
+        { label: '中間申告', amount: nat + local },
+      ],
+    };
+  };
+  const ctaxGroup = (year: number): Group => {
+    const an = ctaxAnnual(year);
+    const it = ctaxInterim(year);
+    if (!an && !it) return { dues: [], b: null };
+    const dues: Due[] = it ? [it.due] : [];
+    const lines: BreakdownLine[] = it ? [...it.lines] : [];
+    if (an) {
+      const paid = it ? it.due.amount : 0;
+      const final = an.tax - paid;
+      lines.push(...an.lines, { label: '中間申告で納めた額', amount: paid }, { label: '確定申告で納める額', amount: Math.max(0, final) });
+      if (final > 0) {
+        const nominal = `${year + 1}-03-31`;
+        dues.push({ key: `ctax:${year}:final`, name: `消費税 ${year} 年分 確定申告（見積）`, amount: final, nominal, due: nextBusinessDay(nominal) });
+      }
+    }
+    const b: Breakdown = {
+      group: `ctax:${year}`,
+      kind: 'ctax',
+      year,
+      total: an ? an.tax : it!.due.amount,
+      lines,
+      method: mode as Exclude<ConsumptionMode, 'unset' | 'exempt'>,
+      ...(an ? { income_year: an.incomeYear, ...(an.carriedFrom !== undefined ? { carried_from: an.carriedFrom } : {}) } : {}),
+    };
+    return { dues, b };
+  };
+
   const items: EstimateItem[] = [];
   const breakdown: Breakdown[] = [];
-  const add = (kind: EstimateKind, year: number, g: { dues: Due[]; b: Breakdown | null }) => {
-    // 0 円以下の期（上限 0 の上書きなど）は作らない。
-    const inWindow = g.dues.filter((d) => d.amount > 0 && d.due >= window.from && d.due <= window.to);
+  const add = (kind: EstimateKind, year: number, g: Group) => {
+    // 0 円以下の期（上限 0 の上書きなど）は作らない。monthly は最初の回〜end_date が期間に掛かれば出す。
+    const inWindow = (g.emit ?? g.dues).filter((d) => d.amount > 0 && (d.end ?? d.due) >= window.from && d.due <= window.to);
     if (!inWindow.length || !g.b) return;
     const category = kind === 'nhi' || kind === 'pension' ? 'insurance' : 'tax';
-    for (const d of inWindow) items.push({ key: d.key, kind, year, name: d.name, amount: d.amount, due: d.due, category, group: g.b.group });
+    for (const d of inWindow) {
+      items.push({ key: d.key, kind, year, name: d.name, amount: d.amount, due: d.due, recurrence: d.recurrence ?? 'once', end_date: d.end ?? null, category, group: g.b.group });
+    }
     breakdown.push(g.b);
   };
+  const special20Expired: number[] = [];
   for (let y = y0; y <= y1; y++) {
     add('income_tax', y, incomeTaxGroup(y));
     add('resident', y, resident(y));
     add('nhi', y, nhi(y));
     add('biz_tax', y, bizTax(y));
     add('pension', y, pension(y));
+    add('ctax', y, ctaxGroup(y));
+    // 2 割特例の期限切れは、その年分の確定申告の期日が期間に入る年だけ数える。
+    const finalDue = nextBusinessDay(`${y + 1}-03-31`);
+    if (mode === 'special20' && y > CTAX_SPECIAL20_LAST_YEAR && finalDue >= window.from && finalDue <= window.to) special20Expired.push(y);
   }
   items.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.key < b.key ? -1 : 1));
 
-  if (profile.consumption_mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
-  else if (profile.consumption_mode !== 'exempt') warnings.push({ kind: 'consumption_tax_not_implemented', mode: profile.consumption_mode });
+  if (mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
+  if (mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
+  for (const year of special20Expired) warnings.push({ kind: 'special20_expired', year });
   for (const year of [...missing].sort((a, b) => a - b)) warnings.push({ kind: 'income_missing', year });
   return { items, warnings, breakdown };
 }
