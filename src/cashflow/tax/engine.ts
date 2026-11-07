@@ -3,7 +3,7 @@
 // 消費税（確定申告 + 中間申告 1 回。consumption_mode が exempt なら作らず、unset なら警告だけ）。法定の数値は rates.ts。
 // どの年の所得で決まるか: 所得税は Y、予定納税は Y−1 の申告納税額、住民税・国保・事業税（Y 年度）は Y−1。
 // 消費税は Y の売上・経費（無ければ前の年で最も新しい売上を繰り越す）、中間申告は Y−1 年分の国税分。
-// 国民年金の月払いは年度ごとに 1 項目（recurrence = monthly、4 月末〜翌 3 月末）。社会保険料控除は月ごとの内訳で数える。
+// 国民年金の月払いは年度ごとに 1 項目（recurrence = monthly、5 月末〜翌 4 月末に 12 回）。社会保険料控除は月ごとの内訳で数える。
 // 所得 = 事業所得（青色申告特別控除の後）。business_income があればそれ、無ければ revenue − expenses − 青色控除（負なら 0）。
 // 入力が無い年: 直近の前の年の所得を繰り越す（carried_from）。Y−1 がどこにも無ければ Y の所得で代える（assumed_prev_year。住民税・国保・事業税だけ）。
 // 丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨てにし、端数は 1 期目。
@@ -69,6 +69,7 @@ export type EstimateWarning =
   | { kind: 'consumption_tax_mode_unset' }
   | { kind: 'simplified_class_missing' } // 簡易課税なのに事業区分が無い（消費税を作らない）
   | { kind: 'special20_expired'; year: number } // 2 割特例は 2026 年分まで（その年分の消費税を作らない）
+  | { kind: 'revenue_missing'; year: number } // 消費税を作る方式なのに、その年分の売上がどの年にも無い（消費税を作らない）
   | { kind: 'income_missing'; year: number };
 
 export type EstimateWindow = { from: string; to: string }; // 両端を含む
@@ -226,10 +227,10 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       const total = dues.reduce((s, d) => s + d.amount, 0);
       const b: Breakdown | null = dues.length ? { group: `pension:${f}`, kind: 'pension', year: f, total, lines: [...lines, { label: '年度の合計', amount: total }] } : null;
       if (profile.pension_mode !== 'monthly') return { dues, b };
-      // 月払いは 4 月末を起点に毎月、翌 3 月末まで（月ごとの dues は社会保険料控除の計算だけに使う）。
-      const anchor = monthEnd(f, 4);
+      // 月払いは各月分を翌月末に納める: 5 月末を起点に毎月、翌 4 月末まで（月ごとの dues は社会保険料控除の計算だけに使う）。
+      const anchor = monthEnd(f, 5);
       const emit: Due[] = [
-        { key: `pension:${f}:monthly`, name: `国民年金 ${f} 年度 月払い（見積）`, amount: r.monthly + addon, nominal: anchor, due: anchor, recurrence: 'monthly', end: monthEnd(f, 15) },
+        { key: `pension:${f}:monthly`, name: `国民年金 ${f} 年度 月払い（見積）`, amount: r.monthly + addon, nominal: anchor, due: anchor, recurrence: 'monthly', end: monthEnd(f, 16) },
       ];
       return { dues, b, emit };
     });
@@ -436,6 +437,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   // Y 年分の中間申告（年 1 回）。Y−1 年分の国税分が 48 万円超のとき。
   const ctaxInterim = (year: number): { due: Due; lines: BreakdownLine[] } | null => {
     if (!ctaxOn) return null;
+    // 2 割特例の期限が切れた年分は確定申告と同じく作らない。
+    if (mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR) return null;
     const a = actual(year - 1);
     let national: number;
     let label: string;
@@ -502,6 +505,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     breakdown.push(g.b);
   };
   const special20Expired: number[] = [];
+  const revenueMissing: number[] = [];
   for (let y = y0; y <= y1; y++) {
     add('income_tax', y, incomeTaxGroup(y));
     add('resident', y, resident(y));
@@ -512,12 +516,16 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     // 2 割特例の期限切れは、その年分の確定申告の期日が期間に入る年だけ数える。
     const finalDue = nextBusinessDay(`${y + 1}-03-31`);
     if (mode === 'special20' && y > CTAX_SPECIAL20_LAST_YEAR && finalDue >= window.from && finalDue <= window.to) special20Expired.push(y);
+    // 売上がどの年にも無い（所得だけ入れた年）なら作らず警告する。方式の設定で作らない年は数えない。
+    const ctaxBlocked = (mode === 'special20' && y > CTAX_SPECIAL20_LAST_YEAR) || (mode === 'simplified' && profile.simplified_class === null);
+    if (ctaxOn && !ctaxBlocked && !ctaxRow(y) && finalDue >= window.from && finalDue <= window.to) revenueMissing.push(y);
   }
   items.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.key < b.key ? -1 : 1));
 
   if (mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
   if (mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
   for (const year of special20Expired) warnings.push({ kind: 'special20_expired', year });
+  for (const year of revenueMissing) warnings.push({ kind: 'revenue_missing', year });
   for (const year of [...missing].sort((a, b) => a - b)) warnings.push({ kind: 'income_missing', year });
   return { items, warnings, breakdown };
 }

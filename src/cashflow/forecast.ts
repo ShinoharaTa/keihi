@@ -6,7 +6,7 @@
 // 予定外の目安: 今月より前の直近 N か月（[cashflow] unplanned_lookback_months）のうち、対象口座の最初の明細の月より後の月について、
 //   対象口座どうしの振替等を除いた明細の合計から、その月に期日のあった予定項目の金額を引いたものの中央値（負なら 0）。
 //   振替・チャージは出金側と入金側の両方が対象口座のときだけ、カードの引き落としはカードの口座が対象のときだけ除く。
-//   控除する予定は停止したものも含め（期日は anchor_date・end_date から出す）、account_id が null か対象口座のものだけ。
+//   控除する予定は停止したものも含め（期日は anchor_date・end_date から出す。止めた見積もりの項目は除く）、account_id が null か対象口座のものだけ。
 //   使える月が N か月に満たなければ short_history の警告を出す（0 か月なら目安は 0）。
 // 月末に残す額: 各月について、その月末の翌日から [cashflow] reserve_months か月の予定支出の合計。
 //   トップレベルの reserve は今日から reserve_months か月（今日を含み、応当日の前日まで）の予定支出の合計。
@@ -182,7 +182,9 @@ export function buildForecast(db: Db, opts: ForecastOptions): Forecast {
       map.set(m, (map.get(m) ?? 0) + t.amount);
     }
     // 履歴から引く予定は、停止したものも含め、口座が無いか対象口座のもの。
+    // ただし止めた見積もりの項目（再計算で置き換えたもの）は除く（新しい項目と二重に引かない）。
     const pastItems = listScheduledItems(db, { includeInactive: true })
+      .filter((it) => !(it.origin === 'estimate' && it.active === 0))
       .filter((it) => it.account_id === null || target.has(it.account_id))
       .map((it) => ({ ...it, active: 1 as const }));
     const netIn: number[] = [];

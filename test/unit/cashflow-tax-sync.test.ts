@@ -496,19 +496,19 @@ describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 �
   const o = { by: user, today: TODAY, now: T0 };
   const pensions = (db: Db) => [...byKey(db).values()].filter((i) => i.estimate_key!.startsWith('pension:')).sort((a, b) => (a.anchor_date < b.anchor_date ? -1 : 1));
 
-  test('年度ごとに recurrence=monthly・anchor=4 月末・end_date=翌 3 月末の項目を作る。前納は once', () => {
+  test('年度ごとに recurrence=monthly・anchor=5 月末・end_date=翌 4 月末の項目を作る。前納は once', () => {
     const db = freshDb();
     try {
       setup(db, { pension_mode: 'monthly' });
       assert.deepEqual(
         pensions(db).map((i) => [i.estimate_key, i.recurrence, i.anchor_date, i.end_date, i.amount, i.name, i.category]),
         [
-          // 2025 年度は 2026-01〜03 が期間に掛かる。2029 年度は 2029-04-30 が期間（〜2030-02-07）の中。
-          ['pension:2025:monthly', 'monthly', '2025-04-30', '2026-03-31', 17_920, '国民年金 2025 年度 月払い（見積）', 'insurance'],
-          ['pension:2026:monthly', 'monthly', '2026-04-30', '2027-03-31', 17_920, '国民年金 2026 年度 月払い（見積）', 'insurance'],
-          ['pension:2027:monthly', 'monthly', '2027-04-30', '2028-03-31', 18_290, '国民年金 2027 年度 月払い（見積）', 'insurance'],
-          ['pension:2028:monthly', 'monthly', '2028-04-30', '2029-03-31', 18_290, '国民年金 2028 年度 月払い（見積）', 'insurance'],
-          ['pension:2029:monthly', 'monthly', '2029-04-30', '2030-03-31', 18_290, '国民年金 2029 年度 月払い（見積）', 'insurance'],
+          // 2025 年度は 2026-01〜04 が期間に掛かる。2029 年度は 2029-05-31 が期間（〜2030-02-07）の中。
+          ['pension:2025:monthly', 'monthly', '2025-05-31', '2026-04-30', 17_920, '国民年金 2025 年度 月払い（見積）', 'insurance'],
+          ['pension:2026:monthly', 'monthly', '2026-05-31', '2027-04-30', 17_920, '国民年金 2026 年度 月払い（見積）', 'insurance'],
+          ['pension:2027:monthly', 'monthly', '2027-05-31', '2028-04-30', 18_290, '国民年金 2027 年度 月払い（見積）', 'insurance'],
+          ['pension:2028:monthly', 'monthly', '2028-05-31', '2029-04-30', 18_290, '国民年金 2028 年度 月払い（見積）', 'insurance'],
+          ['pension:2029:monthly', 'monthly', '2029-05-31', '2030-04-30', 18_290, '国民年金 2029 年度 月払い（見積）', 'insurance'],
         ],
       );
       saveProfile(db, { pension_mode: 'prepay12' }, { ...o, now: T1 });
@@ -523,8 +523,8 @@ describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 �
   });
 
   const variants: [string, Parameters<typeof updateItem>[2], Record<string, unknown>][] = [
-    ['end_date', { endDate: '2027-02-28' }, { end_date: { from: '2027-02-28', to: '2027-03-31' } }],
-    ['recurrence', { recurrence: 'once', endDate: null }, { recurrence: { from: 'once', to: 'monthly' }, end_date: { from: null, to: '2027-03-31' } }],
+    ['end_date', { endDate: '2027-02-28' }, { end_date: { from: '2027-02-28', to: '2027-04-30' } }],
+    ['recurrence', { recurrence: 'once', endDate: null }, { recurrence: { from: 'once', to: 'monthly' }, end_date: { from: null, to: '2027-04-30' } }],
   ];
   for (const [label, patch, changes] of variants) {
     test(`${label} が違う・pinned=0 → その行を書き換える（id は同じ）`, () => {
@@ -537,7 +537,7 @@ describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 �
         const r = recalculate(db, { today: TODAY, now: T2, actor: 'user' });
         assert.deepEqual([r.created, r.updated, r.deactivated], [0, 1, 0]);
         const after = byKey(db).get('pension:2026:monthly')!;
-        assert.deepEqual([after.id, after.recurrence, after.end_date], [cur.id, 'monthly', '2027-03-31']);
+        assert.deepEqual([after.id, after.recurrence, after.end_date], [cur.id, 'monthly', '2027-04-30']);
         const a = auditsFor(db, cur.id).at(-1)!;
         assert.equal(a.payload.reason, 'tax_recalc');
         assert.deepEqual(a.payload.changes, changes);
@@ -546,6 +546,20 @@ describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 �
       }
     });
   }
+
+  test('人が monthly 項目の end_date を変えたら pinned=1（再計算で戻さない）', () => {
+    const db = freshDb();
+    try {
+      setup(db, { pension_mode: 'monthly' });
+      const cur = byKey(db).get('pension:2026:monthly')!;
+      assert.equal(updateItem(db, cur.id, { endDate: '2027-01-31' }, user, T1).pinned, 1);
+      const r = recalculate(db, { today: TODAY, now: T2, actor: 'user' });
+      assert.ok(r.skipped_pinned.some((s) => s.key === 'pension:2026:monthly'));
+      assert.equal(getScheduledItem(db, cur.id)!.end_date, '2027-01-31');
+    } finally {
+      db.close();
+    }
+  });
 
   test('第 1 版の月ごとの once 項目（pension:F:MM）は止め、新しい monthly と重なっても possible_duplicate を出さない', () => {
     const db = freshDb();
@@ -577,11 +591,13 @@ describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 �
         return [m.month, ps[0].estimate_key, ps[0].amount];
       });
       assert.equal(rows.length, 18);
+      // 各月分を翌月末に納める: 2026 年度分は 2026-05〜2027-04、2027 年度分は 2027-05〜2028-04。期日はすべて月末。
       assert.deepEqual(rows[0], ['2026-11', 'pension:2026:monthly', 17_920]);
-      assert.deepEqual(rows[4], ['2027-03', 'pension:2026:monthly', 17_920]);
-      assert.deepEqual(rows[5], ['2027-04', 'pension:2027:monthly', 18_290]);
-      assert.deepEqual(rows[16], ['2028-03', 'pension:2027:monthly', 18_290]);
-      assert.deepEqual(rows[17], ['2028-04', 'pension:2028:monthly', 18_290]);
+      assert.deepEqual(rows[5], ['2027-04', 'pension:2026:monthly', 17_920]);
+      assert.deepEqual(rows[6], ['2027-05', 'pension:2027:monthly', 18_290]);
+      assert.deepEqual(rows[17], ['2028-04', 'pension:2027:monthly', 18_290]);
+      const dues = f.months.map((m) => m.items.find((i) => i.estimate_key?.startsWith('pension:'))!.due);
+      assert.deepEqual(dues.slice(0, 6), ['2026-11-30', '2026-12-31', '2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']);
     } finally {
       db.close();
     }

@@ -409,9 +409,15 @@ export function latestEstimates(db: Db) {
   };
 }
 
-// GET /api/cashflow の warnings に足すもの。
-export function cashflowTaxWarnings(db: Db): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' })[] {
+// GET /api/cashflow の warnings に足すもの。simplified_class_missing はプロファイルから、special20_expired は最新の再計算の warnings から。
+export function cashflowTaxWarnings(
+  db: Db,
+): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' } | { kind: 'simplified_class_missing' } | { kind: 'special20_expired'; year: number })[] {
   const p = getTaxProfile(db);
   if (!p) return [{ kind: 'tax_profile_missing' }];
-  return p.consumption_mode === 'unset' ? [{ kind: 'consumption_tax_mode_unset' }] : [];
+  if (p.consumption_mode === 'unset') return [{ kind: 'consumption_tax_mode_unset' }];
+  if (p.consumption_mode === 'simplified' && p.simplified_class === null) return [{ kind: 'simplified_class_missing' }];
+  const run = latestTaxEstimateRun(db);
+  if (!run) return [];
+  return (JSON.parse(run.warnings_json) as SyncWarning[]).filter((w): w is { kind: 'special20_expired'; year: number } => w.kind === 'special20_expired');
 }
