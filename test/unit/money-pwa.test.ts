@@ -22,6 +22,7 @@ import {
   dayOfMonth,
   daysBetween,
   draftBody,
+  draftOf,
   draftError,
   emptyDraft,
   failText,
@@ -56,6 +57,7 @@ import {
   periodRange,
   periodText,
   RECURRENCES,
+  runText,
   settlementChoices,
   shortTime,
   signedMan,
@@ -63,6 +65,13 @@ import {
   syncErrorCount,
   syncText,
   tagShares,
+  taxCardLine,
+  taxIncome,
+  taxProfileBody,
+  taxProfileDraft,
+  taxYearBodies,
+  taxYearDrafts,
+  tokyoDate,
   txnIncome,
   txnSummary,
   txnsUrl,
@@ -81,6 +90,8 @@ import {
   type MonthlySummary,
   type Overview,
   type ScheduledItem,
+  type TaxProfileResponse,
+  type TaxYear,
   type Txn,
   type Upcoming,
 } from '../../pwa/src/money/model.ts';
@@ -573,6 +584,83 @@ describe('前からある純関数', () => {
   });
 });
 
+// ---- 税・保険の見積もり ----
+
+const taxYear = (year: number, over: Partial<TaxYear> = {}): TaxYear => ({
+  year,
+  kind: 'estimate',
+  revenue: null,
+  expenses: null,
+  business_income: null,
+  social_insurance_paid: null,
+  income_tax_final: null,
+  consumption_tax_final: null,
+  prepaid_income_tax: null,
+  ...over,
+});
+const taxYears = [
+  taxYear(2025, { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }),
+  taxYear(2026, { revenue: 5000000, expenses: 350000 }),
+];
+const taxData: TaxProfileResponse = {
+  profile: { ...taxProfileDraftBase(), consumption_mode: 'unset' },
+  years: taxYears,
+  presets: [{ id: 'saitama-city-2026', label: 'さいたま市 令和 8 年度' }],
+  missing: ['consumption_mode'],
+};
+function taxProfileDraftBase() {
+  return { blue_return: '65' as const, biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly' as const, pension_addon: false, dependents: 0, spouse: false, other_deductions: 0, payment_account_id: 'A1' };
+}
+
+describe('税・保険の見積もりの純関数', () => {
+  test('所得: 直接の所得 > 売上 − 経費 − 青色控除。無い年は前の年を繰り越す', () => {
+    assert.equal(taxIncome(taxYears, 2026, '65'), 4000000);
+    assert.equal(taxIncome(taxYears, 2026, 'white'), 4650000);
+    assert.equal(taxIncome(taxYears, 2028, '65'), 4000000, '2027・2028 は 2026 を繰り越す');
+    assert.equal(taxIncome(taxYears, 2025, '65'), 3200000);
+    assert.equal(taxIncome([taxYear(2026, { revenue: 100000, expenses: 0 })], 2026, '65'), 0, '負にしない');
+    assert.equal(taxIncome([], 2026, '65'), null);
+    assert.equal(tokyoDate('2026-11-06T15:30:00.000Z'), '2026-11-07');
+    assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 / 最終計算 11/7');
+    assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 / 最終計算 —');
+  });
+  test('プロファイルの本文: 人数の検査、空の口座は null、無ければ既定値', () => {
+    const d = taxProfileDraft(null);
+    assert.equal(d.blue_return, '65');
+    assert.equal(d.nhi_preset, 'saitama-city-2026');
+    assert.deepEqual(taxProfileBody(d), {
+      blue_return: '65', biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly',
+      pension_addon: false, spouse: false, dependents: 0, other_deductions: 0, payment_account_id: null,
+    });
+    assert.equal((taxProfileBody({ ...d, other_deductions: '２７６,０００' }) as Record<string, unknown>).other_deductions, 276000);
+    assert.match(taxProfileBody({ ...d, nhi_members_40_64: '2' }) as string, /加入人数以下/);
+    assert.match(taxProfileBody({ ...d, dependents: 'x' }) as string, /扶養/);
+  });
+  test('年の本文: 変えた年だけ、空欄は null、まだ無い年で全部空欄なら送らない、所得だけ負を許す', () => {
+    const drafts = taxYearDrafts(taxYears, TODAY);
+    assert.deepEqual(drafts.map((d) => [d.year, d.kind]), [[2025, 'actual'], [2026, 'estimate'], [2027, 'estimate'], [2028, 'estimate']]);
+    assert.equal(drafts[0]!.values.income_tax_final, '180000');
+    assert.equal(drafts[2]!.values.revenue, '');
+    assert.deepEqual(taxYearBodies(drafts, taxYears), [], '何も変えなければ送らない');
+    const edited = drafts.map((d) => (d.year === 2026 ? { ...d, values: { ...d.values, expenses: '' } } : d.year === 2027 ? { ...d, values: { ...d.values, business_income: '−100000' } } : d));
+    assert.deepEqual(taxYearBodies(edited, taxYears), [
+      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: null, business_income: null } },
+      { year: 2027, body: { kind: 'estimate', revenue: null, expenses: null, business_income: -100000 } },
+    ]);
+    assert.match(taxYearBodies([{ ...drafts[1]!, values: { revenue: '-5' } }], taxYears) as string, /2026 年の「売上」/);
+  });
+  test('結果の 1 行: 件数は足し、警告は最後の回', () => {
+    const r = (o: object) => ({ run_id: 'R', created: 0, updated: 0, deactivated: 0, skipped_pinned: [], warnings: [], ...o });
+    assert.equal(
+      runText([r({ created: 3 }), r({ created: 20, updated: 1, skipped_pinned: [{}], warnings: [{ kind: 'consumption_tax_mode_unset' }, { kind: 'income_missing', year: 2025 }] })], '保存しました。'),
+      '保存しました。予定は作成 23・更新 1・停止 0 件（手直しの 1 件はそのまま）。消費税は未反映です。2025 年の所得が無い分は作っていません。',
+    );
+    assert.equal(runText([r({ warnings: [{ kind: 'tax_profile_missing' }] })], '再計算しました。'), '再計算しました。予定は作成 0・更新 0・停止 0 件。設定がまだ無いので作っていません。');
+    assert.match(warningText({ kind: 'tax_profile_missing' }, (x) => x), /税・保険の見積もりが未設定/);
+    assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
+  });
+});
+
 // ---- SSR スナップショット ----
 
 const status: BankStatus[] = [
@@ -819,5 +907,56 @@ describe('SSR スナップショット', () => {
     assert.match(out, /見せない<\/button>[\s\S]*合計だけ<\/button>[\s\S]*明細も<\/button>/);
     assert.doesNotMatch(out.split('aria-expanded="true"')[1]!.split('</article>')[0]!, /value="W1"/, '引落元は銀行だけ');
     t.assert.snapshot(lines(`${out}\n${csvOut}`));
+  });
+  test('税・保険の見積もり: カード（未設定 / 設定済み）と設定画面（年は縦に並べる）', async (t) => {
+    const m = await load('/src/money/Tax.tsx');
+    const unset = html(m.TaxCard!, { tax: { profile: null, years: [], presets: taxData.presets, missing: ['profile'], last_run_at: null }, today: TODAY, busy: false, onOpen: noop, onRecalc: noop });
+    const set = html(m.TaxCard!, { tax: { ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, today: TODAY, busy: false, onOpen: noop, onRecalc: noop });
+    assert.match(unset, /税・保険の見積もり[\s\S]*設定する/);
+    assert.doesNotMatch(unset, /再計算/);
+    assert.match(set, /2026 年分 所得 400万円 \/ 最終計算 11\/7/);
+    assert.match(set, /設定を開く[\s\S]*再計算/);
+    const draft = taxProfileDraft(taxData.profile);
+    const form = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [account(), { ...wallet, active: false }], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.match(form, /aria-pressed="true">65 万/);
+    assert.match(form, /消費税の方式<\/dt>\s*<dd>未設定<\/dd>[\s\S]*次の版で対応/);
+    assert.match(form, /<option value="saitama-city-2026">さいたま市 令和 8 年度<\/option>/);
+    assert.match(form, /aria-pressed="true">月払い/);
+    assert.match(form, /<option value="A1">三井住友 普通<\/option>/);
+    assert.doesNotMatch(form, /value="W1"/, '無効な口座は選べない');
+    assert.match(form, /2025 年（確定）[\s\S]*所得税の申告納税額[\s\S]*value="180000"[\s\S]*2026 年（見込み）[\s\S]*2027 年（見込み）[\s\S]*2028 年（見込み）/);
+    assert.doesNotMatch(form, /<table/, '年ごとの表は横のテーブルにしない');
+    assert.match(form, /disabled>やめる/, '変えていなければ「やめる」は押せない');
+    const bad = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: '扶養の人数は 0〜20 で入れてください。', dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.match(bad, /扶養の人数は 0〜20[\s\S]*disabled>保存して再計算/);
+    t.assert.snapshot(lines([unset, set, form].join('\n')));
+  });
+
+  test('税・保険の見積もり: 台帳の「 · 見積」「 · 手直し」、編集の注記と「自動計算に戻す」、見通しの月の「 · 見積」', async (t) => {
+    const m = await load('/src/money/Schedule.tsx');
+    const est = scheduled({ id: 'E1', name: '国民健康保険税 2026 年度 第 6 期（見積）', category: 'insurance', recurrence: 'once', amount: 51500, anchor_date: '2026-12-28', origin: 'estimate', estimate_key: 'nhi:2026:p6', pinned: 0 });
+    const pin = scheduled({ id: 'E2', name: '所得税 2026 年分 確定申告（見積）', category: 'tax', recurrence: 'once', amount: 120000, anchor_date: '2027-03-15', origin: 'estimate', estimate_key: 'income_tax:2026:final', pinned: 1 });
+    const due = nextDueMap([up(est, '2026-12-28'), up(pin, '2027-03-15')]);
+    const out = [
+      html(m.Ledger!, { items: [est, pin, scheduled()], nextDue: due, today: TODAY, filter: '', showInactive: false, onFilter: noop, onShowInactive: noop, onOpen: noop }),
+      html(m.ItemForm!, { draft: draftOf(est), editing: est, busy: false, onChange: noop, onSave: noop, onToggle: noop, onUnpin: noop, onClose: noop }),
+      html(m.ItemForm!, { draft: draftOf(pin), editing: pin, busy: false, onChange: noop, onSave: noop, onToggle: noop, onUnpin: noop, onClose: noop }),
+    ].join('\n');
+    assert.match(out, /1 回 · 見積<\/span>/);
+    assert.match(out, /1 回 · 見積 · 手直し<\/span>/);
+    assert.match(out, /毎年<\/span>/, '手入力の行には印を付けない');
+    const [, f1, f2] = out.split('id="m-item-form"');
+    assert.match(f1!, /金額や日付を直すと、再計算で上書きされなくなります。/);
+    assert.doesNotMatch(f1!, /自動計算に戻す/);
+    assert.match(f2!, /自動計算に戻す/);
+    const c = await load('/src/money/Cashflow.tsx');
+    const info = itemInfoMap([est, scheduled({ id: 'S1', category: 'car' })]);
+    const ms = months36((i) => (i === 1 ? { items: [{ id: 'E1', name: est.name, amount: 51500, direction: 'out' as const, due: '2026-12-28', origin: 'estimate', estimate_key: 'nhi:2026:p6', pinned: 0 as const }, { id: 'S1', name: '自動車税', amount: 39500, direction: 'out' as const, due: '2026-12-31', origin: 'manual' }] } : {}));
+    const cf = html(c.CashflowView!, { cf: { ...forecast, months: ms, first_shortfall_month: null, warnings: [{ kind: 'tax_profile_missing' }], cut_per_month_to_survive: null }, info, accounts: [], openYears: [0], onToggleYear: noop, onJump: noop, onMonthly: noop, onSchedule: noop, onAddIncome: noop });
+    assert.match(cf, /第 6 期（見積） · 見積 51,500/);
+    assert.match(cf, /自動車税 39,500/);
+    assert.match(cf, /税・保険の見積もりが未設定です/);
+    const row = cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!;
+    t.assert.snapshot(lines(`${out}\n${row}`));
   });
 });

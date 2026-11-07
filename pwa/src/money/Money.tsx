@@ -1,7 +1,7 @@
 // 「お金」タブ（docs/mvp-plan-v3.md T111・T304。UI はモック 7 画面に合わせる）。開くとホーム。各画面へは行を押して進み、ヘッダの「戻る」でホームへ。
 // 口座（GET /api/accounts）とカテゴリ（GET /api/categories）はここで読んで各画面に渡す。口座はホームに戻るたびに読み直す（他の画面で直した設定を映すため）。
 // 画面の移動は go(view, intent)。intent は移った先の初期状態（明細の絞り込み・口座の設定・予定の追加フォーム・月次の月・見通しの月）。
-// フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。
+// フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。税・保険の見積もり（tax）は予定から開き、「戻る」で予定に戻る。
 import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
@@ -12,9 +12,10 @@ import { Icon } from './Icons.tsx';
 import type { Account, Categories, Direction, TxnFilter } from './model.ts';
 import { Monthly } from './Monthly.tsx';
 import { Schedule } from './Schedule.tsx';
+import { Tax } from './Tax.tsx';
 import { Txns } from './Txns.tsx';
 
-export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts';
+export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax';
 export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string };
 export type Go = (view: MoneyView, intent?: Intent) => void;
 
@@ -74,8 +75,9 @@ export function Money({ today }: { today: string }) {
       {view === 'monthly' && <Monthly key={key} today={today} cats={cats} initialMonth={intent.month} onBack={home} go={go} />}
       {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} />}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
-      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} />}
+      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} />}
       {view === 'accounts' && <Accounts key={key} today={today} accounts={accounts} focus={intent.account} locked={locked} onChanged={loadAccounts} onLock={setLocked} onBack={home} />}
+      {view === 'tax' && <Tax key={key} today={today} accounts={accounts} locked={locked} onLock={setLocked} onBack={() => go('schedule')} />}
     </section>
   );
 }
