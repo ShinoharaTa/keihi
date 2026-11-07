@@ -119,6 +119,22 @@ export const PENSION_RATES: Readonly<Record<number, PensionRates>> = {
 };
 export const PENSION_ADDON_MONTHLY = 400;
 
+// ---- 消費税（国税 7.8% + 地方消費税 2.2% = 10%） ----
+
+// 簡易課税のみなし仕入率（第 1 種 卸売 90% 〜 第 6 種 不動産 40%）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6509.htm
+export const CTAX_DEEMED_PURCHASE_PCT: Readonly<Record<number, number>> = { 1: 90, 2: 80, 3: 70, 4: 60, 5: 50, 6: 40 };
+
+// 2 割特例（売上税額 × 20%）はインボイス登録で課税事業者になった人の令和 5〜8 年分（2026 年分）まで。
+// 2027 年分以降は作らず special20_expired の警告。
+// https://www.nta.go.jp/publication/pamph/shohi/kaisei/202304/01.htm
+export const CTAX_SPECIAL20_LAST_YEAR = 2026;
+
+// 中間申告。前年の確定消費税額（国税分）が 48 万円超〜400 万円以下なら年 1 回、前年の国税分 × 6/12。
+// 地方消費税の中間分は国税分 × 22/78。期限は中間期間（1〜6 月）の末日の翌日から 2 か月（8/31）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6609.htm
+export const CTAX_INTERIM_THRESHOLD = 480_000;
+
 // year 以前で最も新しい年の値。year がどの年より前なら最も古い年の値。
 export function ratesFor<T>(table: Readonly<Record<number, T>>, year: number): T {
   const years = Object.keys(table).map(Number).sort((a, b) => a - b);

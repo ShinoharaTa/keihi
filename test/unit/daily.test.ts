@@ -15,6 +15,7 @@ import { currentMasters } from '../../src/masters/sync.ts';
 import { createFakeProvider } from '../../src/providers/fake/index.ts';
 import { FreeeAuthError } from '../../src/providers/freee/auth.ts';
 import { isReauthRequired, setReauthRequired } from '../../src/providers/freee/state.ts';
+import { saveAll } from '../../src/cashflow/tax/sync.ts';
 import { createDailyHandler, DAILY_REPORT_KEY, META_WARNINGS_KEY, REMOTE_VERIFY_LAST_KEY, type DailyDeps } from '../../src/worker/handlers/daily.ts';
 
 const T0 = new Date('2026-10-16T18:30:00.000Z'); // JST 2026-10-17 03:30
@@ -172,7 +173,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     assert.equal(jobsOf('reconcile_deals').length, 1);
     r = setting(DAILY_REPORT_KEY);
     assert.deepEqual(r.errors, []);
-    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'detect_recurrences', 'paper_status', 'remote_verify']);
+    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'detect_recurrences', 'tax_recalc', 'paper_status', 'remote_verify']);
 
     // 翌日は全部動く。
     const t2 = new Date(T0.getTime() + 86_400_000);
@@ -267,6 +268,41 @@ describe('daily: 照合・紙原本・証憑の照合', () => {
     await run({ provider: () => createFakeProvider(), refreshToken: null });
     assert.equal((db.prepare('SELECT paper_status FROM documents WHERE id = ?').get(doc) as { paper_status: string }).paper_status, 'keep_required');
     assert.equal(setting(DAILY_REPORT_KEY).paper_status_changed, 1);
+  });
+
+  test('税の見積もりの再計算は毎月 1 日（JST）だけ。プロファイルが無ければ skipped', async () => {
+    const deps: DailyDeps = { provider: () => createFakeProvider(), refreshToken: null };
+    const nov1 = new Date('2026-10-31T18:30:00.000Z'); // JST 2026-11-01 03:30
+    const nov2 = new Date('2026-11-01T18:30:00.000Z'); // JST 2026-11-02 03:30
+    const runs = () => db.prepare('SELECT id, actor FROM tax_estimate_runs ORDER BY created_at, rowid').all() as { id: string; actor: string }[];
+    const daily = async (t: Date) => {
+      db.prepare(`UPDATE jobs SET state = 'done' WHERE kind = 'daily'`).run();
+      enqueueDaily(db, t);
+      await run(deps, t);
+      return setting(DAILY_REPORT_KEY).tax_recalc;
+    };
+
+    // プロファイルが無ければ 1 日でも飛ばす。
+    assert.equal(await daily(nov1), 'skipped');
+    assert.equal(runs().length, 0);
+
+    saveAll(db, { profile: { pension_mode: 'monthly' }, years: [{ year: 2025, kind: 'actual', business_income: 3_000_000 }] }, { by: { actor: 'user' }, today: '2026-10-17', now: T0 });
+    assert.equal(runs().length, 1);
+    db.prepare(`DELETE FROM settings WHERE key = 'daily_last_step_tax_recalc'`).run(); // 同じ日の 2 回目として飛ばさないように
+    const r = await daily(nov1);
+    const all = runs();
+    assert.equal(all.length, 2);
+    assert.deepEqual({ ...all[1] }, { id: r.run_id, actor: 'system' });
+    assert.deepEqual(Object.keys(r).sort(), ['created', 'deactivated', 'run_id', 'updated']);
+    // 2026-10-17 の期間（〜2030-01-17）から 2026-11-01 の期間（〜2030-02-01）に伸びる: 2030-01-31 の住民税 第 4 期が増える。
+    assert.ok(r.created > 0);
+
+    // 同じ日の 2 回目は飛ばす。2 日は not_due。
+    await daily(nov1);
+    assert.ok(setting(DAILY_REPORT_KEY).skipped_steps.includes('tax_recalc'));
+    assert.equal(await daily(nov2), 'not_due');
+    assert.equal(runs().length, 2);
+    assert.ok(verifyAudit(db).ok);
   });
 
   test('証憑の照合は 30 日以上空いたときだけ。remoteVerify が無ければ飛ばす', async () => {
