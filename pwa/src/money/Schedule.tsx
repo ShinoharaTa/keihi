@@ -444,7 +444,7 @@ export function Schedule({
                 today={today}
                 busy={busy}
                 onOpen={onTax}
-                onRecalc={() => void run(postJson('/api/tax/recalculate', {}), (b) => runText([b as RunSummary], '再計算しました。'))}
+                onRecalc={() => void run(postJson('/api/tax/recalculate', {}), (b) => runText(b as RunSummary, '再計算しました。'))}
               />
             )}
             <section class="m-col" aria-labelledby="m-sugg">

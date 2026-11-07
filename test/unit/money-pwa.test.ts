@@ -70,6 +70,7 @@ import {
   taxIncome,
   taxProfileBody,
   taxProfileDraft,
+  taxSaveBody,
   taxYearBodies,
   taxYearDrafts,
   tokyoDate,
@@ -610,7 +611,7 @@ const taxData: TaxProfileResponse = {
   missing: ['consumption_mode'],
 };
 function taxProfileDraftBase() {
-  return { blue_return: '65' as const, biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly' as const, pension_addon: false, dependents: 0, spouse: false, other_deductions: 0, payment_account_id: 'A1' };
+  return { blue_return: '65' as const, simplified_class: null, revenue_includes_tax: true, biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly' as const, pension_addon: false, dependents: 0, spouse: false, other_deductions: 0, payment_account_id: 'A1' };
 }
 
 describe('税・保険の見積もりの純関数', () => {
@@ -622,15 +623,17 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(taxIncome([taxYear(2026, { revenue: 100000, expenses: 0 })], 2026, '65'), 0, '負にしない');
     assert.equal(taxIncome([], 2026, '65'), null);
     assert.equal(tokyoDate('2026-11-06T15:30:00.000Z'), '2026-11-07');
-    assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 / 最終計算 11/7');
-    assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 / 最終計算 —');
+    assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 · 消費税 未設定 / 最終計算 11/7');
+    const s20 = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' as const }, last_run_at: '2026-11-06T15:30:00.000Z' };
+    assert.equal(taxCardLine(s20, TODAY), '2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7');
+    assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 · 消費税 未設定 / 最終計算 —');
   });
   test('プロファイルの本文: 人数の検査、空の口座は null、無ければ既定値', () => {
     const d = taxProfileDraft(null);
     assert.equal(d.blue_return, '65');
     assert.equal(d.nhi_preset, 'saitama-city-2026');
     assert.deepEqual(taxProfileBody(d), {
-      blue_return: '65', biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly',
+      blue_return: '65', consumption_mode: 'unset', simplified_class: null, revenue_includes_tax: true, biz_tax_rate: null, nhi_preset: 'saitama-city-2026', nhi_members: 1, nhi_members_40_64: 0, pension_mode: 'monthly',
       pension_addon: false, spouse: false, dependents: 0, other_deductions: 0, payment_account_id: null,
     });
     assert.equal((taxProfileBody({ ...d, other_deductions: '２７６,０００' }) as Record<string, unknown>).other_deductions, 276000);
@@ -670,18 +673,54 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(parseAmount('－5', true), -5);
     assert.equal(parseAmount('1.5', true), undefined);
   });
-  test('結果の 1 行: 件数は足し、警告は最後の回', () => {
+  test('一括保存（PUT /api/tax）の本文: 変えた列と変えた年だけ。何も変えていなければ送らない', () => {
+    const draft = taxProfileDraft(taxData.profile);
+    const drafts = taxYearDrafts(taxYears, TODAY);
+    assert.equal(taxSaveBody(draft, drafts, taxData), null, '何も変えていなければ null');
+    assert.deepEqual(taxSaveBody({ ...draft, consumption_mode: 'simplified', simplified_class: '5' }, drafts, taxData), {
+      profile: { consumption_mode: 'simplified', simplified_class: 5 },
+    });
+    const edited = drafts.map((d) => (d.year === 2027 ? { ...d, values: { ...d.values, revenue: '6000000' } } : d));
+    assert.deepEqual(taxSaveBody(draft, edited, taxData), { years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null }] });
+    assert.deepEqual(taxSaveBody({ ...draft, revenue_includes_tax: false }, edited, taxData), {
+      profile: { revenue_includes_tax: false },
+      years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null }],
+    });
+    const full = taxSaveBody(taxProfileDraft(null), drafts, { profile: null, years: taxYears });
+    assert.deepEqual(Object.keys((full as { profile: object }).profile).length, 14, 'プロファイルが無ければ全部の列を送る（作る）');
+    assert.match(taxSaveBody({ ...draft, dependents: 'x' }, drafts, taxData) as string, /扶養/);
+    assert.equal(taxSaveBody({ ...draft, consumption_mode: 'simplified', simplified_class: '' }, drafts, taxData), '簡易課税の事業区分を選んでください。', '事業区分が未選択なら止める');
+    const simpData = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'simplified' as const, simplified_class: 3 } };
+    const simpDraft = taxProfileDraft(simpData.profile);
+    assert.equal(taxSaveBody(simpDraft, drafts, simpData), null);
+    assert.deepEqual(taxSaveBody({ ...simpDraft, consumption_mode: 'standard' }, drafts, simpData), { profile: { consumption_mode: 'standard', simplified_class: null } }, '簡易課税から変えたら事業区分は null');
+    const noClass = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'simplified' as const, simplified_class: null } };
+    assert.deepEqual(taxSaveBody({ ...taxProfileDraft(noClass.profile), consumption_mode: 'exempt' }, drafts, noClass), { profile: { consumption_mode: 'exempt', simplified_class: null } }, '差が無くても null を含める');
+    const actual = drafts.map((d) => (d.year === 2025 ? { ...d, values: { ...d.values, income_tax_final: '190000' } } : d));
+    assert.deepEqual(taxSaveBody(draft, actual, taxData), {
+      years: [{ year: 2025, kind: 'actual', business_income: 3200000, income_tax_final: 190000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }],
+    }, '確定の年は kind: actual と確定の欄だけ');
+    assert.equal(taxSaveBody({ ...draft, nhi_members: ' 1 ' }, drafts, taxData), null, '空白を足しただけなら変えていない');
+    assert.match(taxSaveBody(draft, [{ ...drafts[1]!, values: { revenue: '-5' } }], taxData) as string, /2026 年の「売上」/);
+  });
+  test('結果の 1 行: 件数と警告', () => {
     const r = (o: object) => ({ run_id: 'R', created: 0, updated: 0, deactivated: 0, skipped_pinned: [], warnings: [], ...o });
     assert.equal(
-      runText([r({ created: 3 }), r({ created: 20, updated: 1, skipped_pinned: [{}], warnings: [{ kind: 'consumption_tax_mode_unset' }, { kind: 'income_missing', year: 2025 }] })], '保存しました。'),
+      runText(r({ created: 23, updated: 1, skipped_pinned: [{}], warnings: [{ kind: 'consumption_tax_mode_unset' }, { kind: 'income_missing', year: 2025 }] }), '保存しました。'),
       '保存しました。予定は作成 23・更新 1・停止 0 件（手直しの 1 件はそのまま）。消費税は未反映です。2025 年の所得が無い分は作っていません。',
     );
-    assert.equal(runText([r({ warnings: [{ kind: 'tax_profile_missing' }] })], '再計算しました。'), '再計算しました。予定は作成 0・更新 0・停止 0 件。設定がまだ無いので作っていません。');
+    assert.equal(runText(r({ warnings: [{ kind: 'tax_profile_missing' }] }), '再計算しました。'), '再計算しました。予定は作成 0・更新 0・停止 0 件。設定がまだ無いので作っていません。');
+    assert.equal(
+      runText(r({ created: 2, deactivated: 1, warnings: [{ kind: 'special20_expired', year: 2027 }, { kind: 'simplified_class_missing' }] }), '保存しました。'),
+      '保存しました。予定は作成 2・更新 0・停止 1 件。2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。簡易課税の事業区分が未設定なので消費税は見通しに入りません。',
+    );
+    assert.equal(warningText({ kind: 'special20_expired', year: 2027 }, (x) => x), '2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。');
+    assert.equal(warningText({ kind: 'simplified_class_missing' }, (x) => x), '簡易課税の事業区分が未設定なので消費税は見通しに入りません。');
     assert.match(warningText({ kind: 'tax_profile_missing' }, (x) => x), /税・保険の見積もりが未設定/);
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
     assert.equal(warningText({ kind: 'consumption_tax_not_implemented', mode: 'special20' }, (x) => x), '消費税（方式: 2 割特例）はまだ見通しに入りません。');
     assert.equal(
-      runText([r({ warnings: [{ kind: 'consumption_tax_not_implemented', mode: 'simplified' }] })], '保存しました。'),
+      runText(r({ warnings: [{ kind: 'consumption_tax_not_implemented', mode: 'simplified' }] }), '保存しました。'),
       '保存しました。予定は作成 0・更新 0・停止 0 件。消費税（方式: 簡易課税）はまだ見通しに入りません。',
     );
   });
@@ -941,12 +980,27 @@ describe('SSR スナップショット', () => {
     const set = html(m.TaxCard!, { tax: { ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, today: TODAY, busy: false, onOpen: noop, onRecalc: noop });
     assert.match(unset, /税・保険の見積もり[\s\S]*設定する/);
     assert.doesNotMatch(unset, /再計算/);
-    assert.match(set, /2026 年分 所得 400万円 \/ 最終計算 11\/7/);
+    assert.match(set, /2026 年分 所得 400万円 · 消費税 未設定 \/ 最終計算 11\/7/);
+    const set20 = html(m.TaxCard!, { tax: { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' }, last_run_at: '2026-11-06T15:30:00.000Z' }, today: TODAY, busy: false, onOpen: noop, onRecalc: noop });
+    assert.match(set20, /2026 年分 所得 400万円 · 消費税 2 割特例 \/ 最終計算 11\/7/);
     assert.match(set, /設定を開く[\s\S]*再計算/);
     const draft = taxProfileDraft(taxData.profile);
     const form = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [account(), { ...wallet, active: false }], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(form, /aria-pressed="true">65 万/);
-    assert.match(form, /消費税の方式<\/dt>\s*<dd>未設定<\/dd>[\s\S]*次の版で対応/);
+    assert.match(form, /<legend>消費税の方式<\/legend>[\s\S]*>免税<\/button>[\s\S]*>2 割特例<\/button>[\s\S]*>簡易課税<\/button>[\s\S]*>本則<\/button>[\s\S]*<span class="m-sub">未設定<\/span>[\s\S]*2 割特例は 2026 年分まで/);
+    assert.doesNotMatch(form.split('<legend>消費税の方式</legend>')[1]!.split('</fieldset>')[0]!, /aria-pressed="true"/, '未設定ならどれも選ばない');
+    assert.doesNotMatch(form, /事業区分|売上の入力は税込/, '未設定なら事業区分もトグルも出さない');
+    const simp = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'simplified', simplified_class: '' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.match(simp, /aria-pressed="true">簡易課税/);
+    assert.doesNotMatch(simp, /<span class="m-sub">未設定<\/span>/);
+    assert.doesNotMatch(simp, /2 割特例は 2026 年分まで/, '簡易課税なら 2 割特例の注記は出さない');
+    assert.match(simp, /事業区分[\s\S]*<option value="">選んでください<\/option>[\s\S]*第 1 種 卸売 90%[\s\S]*第 6 種 不動産 40%[\s\S]*売上の入力は税込/);
+    const s20 = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'special20' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.doesNotMatch(s20, /事業区分/);
+    assert.match(s20, /売上の入力は税込/);
+    assert.match(s20, /2 割特例は 2026 年分まで/);
+    const ex = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'exempt' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.doesNotMatch(ex, /売上の入力は税込|事業区分|2 割特例は 2026 年分まで/, '免税ならトグルも注記も出さない');
     assert.match(form, /<option value="saitama-city-2026">さいたま市 令和 8 年度<\/option>/);
     assert.match(form, /aria-pressed="true">月払い/);
     assert.match(form, /<option value="A1">三井住友 普通<\/option>/);
@@ -966,21 +1020,25 @@ describe('SSR スナップショット', () => {
     assert.doesNotMatch(form, /独自の料率/);
     assert.match(own, /<option value="W1">PayPay<\/option>/, '今の納税口座は無効でも選択肢に残す');
     assert.match(own, /id="m-tax-2026-business_income" class="m-field" inputMode="numeric" placeholder="見込みの値（売上 − 経費）のまま"/);
-    t.assert.snapshot(lines([unset, set, form].join('\n')));
+    t.assert.snapshot(lines([unset, set, set20, form, simp].join('\n')));
   });
 
   test('税・保険の見積もり: 台帳の「 · 見積」「 · 手直し」、編集の注記と「自動計算に戻す」、見通しの月の「 · 見積」', async (t) => {
     const m = await load('/src/money/Schedule.tsx');
     const est = scheduled({ id: 'E1', name: '国民健康保険税 2026 年度 第 6 期（見積）', category: 'insurance', recurrence: 'once', amount: 51500, anchor_date: '2026-12-28', origin: 'estimate', estimate_key: 'nhi:2026:p6', pinned: 0 });
     const pin = scheduled({ id: 'E2', name: '所得税 2026 年分 確定申告（見積）', category: 'tax', recurrence: 'once', amount: 120000, anchor_date: '2027-03-15', origin: 'estimate', estimate_key: 'income_tax:2026:final', pinned: 1 });
-    const due = nextDueMap([up(est, '2026-12-28'), up(pin, '2027-03-15')]);
+    const pen = scheduled({ id: 'E3', name: '国民年金 2026 年度（見積）', category: 'insurance', recurrence: 'monthly', amount: 17510, anchor_date: '2026-04-30', end_date: '2027-03-31', origin: 'estimate', estimate_key: 'pension:2026', pinned: 0 });
+    const ctax = scheduled({ id: 'E4', name: '消費税 2026 年分 確定申告（見積）', category: 'tax', recurrence: 'once', amount: 200000, anchor_date: '2027-03-31', origin: 'estimate', estimate_key: 'ctax:2026:final', pinned: 0 });
+    const due = nextDueMap([up(est, '2026-12-28'), up(pin, '2027-03-15'), up(pen, '2026-11-30'), up(ctax, '2027-03-31')]);
     const out = [
-      html(m.Ledger!, { items: [est, pin, scheduled()], nextDue: due, today: TODAY, filter: '', showInactive: false, onFilter: noop, onShowInactive: noop, onOpen: noop }),
+      html(m.Ledger!, { items: [est, pin, pen, ctax, scheduled()], nextDue: due, today: TODAY, filter: '', showInactive: false, onFilter: noop, onShowInactive: noop, onOpen: noop }),
       html(m.ItemForm!, { draft: draftOf(est), editing: est, busy: false, onChange: noop, onSave: noop, onToggle: noop, onUnpin: noop, onClose: noop }),
       html(m.ItemForm!, { draft: draftOf(pin), editing: pin, busy: false, onChange: noop, onSave: noop, onToggle: noop, onUnpin: noop, onClose: noop }),
     ].join('\n');
     assert.match(out, /1 回 · 見積<\/span>/);
     assert.match(out, /1 回 · 見積 · 手直し<\/span>/);
+    assert.match(out, /国民年金 2026 年度（見積）[\s\S]*?毎月 · 見積<\/span>/, '月払いの年金は「毎月 · 見積」');
+    assert.match(out, /消費税 2026 年分 確定申告（見積）[\s\S]*?1 回 · 見積<\/span>/);
     assert.match(out, /毎年<\/span>/, '手入力の行には印を付けない');
     const [, f1, f2] = out.split('id="m-item-form"');
     assert.match(f1!, /金額や日付を直すと、再計算で上書きされなくなります。/);

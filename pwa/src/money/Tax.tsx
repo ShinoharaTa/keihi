@@ -1,7 +1,7 @@
 // 税・保険の見積もり（docs/cashflow.md §14、src/web/routes/tax.ts）。予定の先頭のカード（TaxCard）と設定画面（Tax）。
-// カード: プロファイルが無ければ「設定する」だけ。あれば「2026 年分 所得 ○○万円 / 最終計算 11/7」と「設定を開く」「再計算」（POST /api/tax/recalculate）。
-// 設定画面（1 画面・縦スクロール）: 青色の区分・消費税の方式（表示だけ）・国保・個人事業税・国民年金・配偶者と扶養・iDeCo 等・納税口座・年ごとの所得。
-// 保存は変えた年の PUT /api/tax/years/:year → PUT /api/tax/profile の順（どちらも再計算を返す）。結果の件数と警告を画面の上に 1 行で出す。
+// カード: プロファイルが無ければ「設定する」だけ。あれば「2026 年分 所得 ○○万円 · 消費税 2 割特例 / 最終計算 11/7」と「設定を開く」「再計算」（POST /api/tax/recalculate）。
+// 設定画面（1 画面・縦スクロール）: 青色の区分・消費税の方式（簡易課税なら事業区分、方式を選んだら税込のトグル）・国保・個人事業税・国民年金・配偶者と扶養・iDeCo 等・納税口座・年ごとの所得。
+// 保存はプロファイルの変えた列と変えた年を 1 回の PUT /api/tax で送る（再計算を返す）。結果の件数と警告を画面の上に 1 行で出す。
 // 年ごとの所得は年を縦に並べる（スマホで横にはみ出さないように）。入力を変えている間は onLock(true) で「戻る」を止める。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, putJson } from '../api.ts';
@@ -12,15 +12,16 @@ import {
   BLUE_RETURN_LABELS,
   BLUE_RETURNS,
   CONSUMPTION_LABELS,
+  CONSUMPTION_MODES,
   ESTIMATE_FIELDS,
   failText,
   PENSION_LABELS,
   PENSION_MODES,
   runText,
+  SIMPLIFIED_CLASS_LABELS,
   taxCardLine,
-  taxProfileBody,
   taxProfileDraft,
-  taxYearBodies,
+  taxSaveBody,
   taxYearDrafts,
   type Account,
   type RunSummary,
@@ -99,7 +100,6 @@ export function TaxForm({
 }) {
   const set = <K extends keyof TaxProfileDraft>(k: K, v: TaxProfileDraft[K]) => onDraft({ ...draft, [k]: v });
   const setYear = (i: number, k: string, v: string) => onYears(years.map((y, j) => (j === i ? { ...y, values: { ...y.values, [k]: v } } : y)));
-  const mode = data.profile?.consumption_mode ?? 'unset';
   return (
     <>
       <section class="m-card m-form" aria-labelledby="m-tax-basic">
@@ -116,11 +116,36 @@ export function TaxForm({
             ))}
           </div>
         </fieldset>
-        <dl class="m-dl m-dl-sm">
-          <dt>消費税の方式</dt>
-          <dd>{CONSUMPTION_LABELS[mode] ?? mode}</dd>
-        </dl>
-        <p class="m-sub">消費税の計算は次の版で対応します（今は見通しに入りません）。</p>
+        <fieldset class="m-fs m-fs-sm">
+          <legend>消費税の方式</legend>
+          <div class="m-seg m-seg-4">
+            {CONSUMPTION_MODES.map((c) => (
+              <button type="button" key={c} aria-pressed={draft.consumption_mode === c} onClick={() => set('consumption_mode', c)}>
+                {CONSUMPTION_LABELS[c]}
+              </button>
+            ))}
+          </div>
+          {draft.consumption_mode === 'unset' && <span class="m-sub">未設定</span>}
+          {(draft.consumption_mode === 'unset' || draft.consumption_mode === 'special20') && (
+            <span class="m-sub">2 割特例は 2026 年分まで。2027 年分からは簡易課税か本則を選んでください。</span>
+          )}
+        </fieldset>
+        {draft.consumption_mode === 'simplified' && (
+          <label class="m-field-wrap" for="m-tax-class">
+            <span class="m-label">事業区分</span>
+            <select id="m-tax-class" class="m-field" value={draft.simplified_class} onChange={(e) => set('simplified_class', e.currentTarget.value)}>
+              {draft.simplified_class === '' && <option value="">選んでください</option>}
+              {SIMPLIFIED_CLASS_LABELS.map((c) => (
+                <option key={c.v} value={String(c.v)}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {draft.consumption_mode !== 'unset' && draft.consumption_mode !== 'exempt' && (
+          <Switch label="売上の入力は税込" checked={draft.revenue_includes_tax} onChange={(v) => set('revenue_includes_tax', v)} />
+        )}
         <Switch label="配偶者控除" checked={draft.spouse} onChange={(v) => set('spouse', v)} />
         <div class="m-form-2">
           <Num id="m-tax-deps" label="扶養の人数" value={draft.dependents} onInput={(v) => set('dependents', v)} />
@@ -251,34 +276,34 @@ export function Tax({
     void load(true);
   }, [load]);
 
-  const body = taxProfileBody(draft);
-  const yearBodies = data ? taxYearBodies(years, data.years) : [];
-  const error = typeof body === 'string' ? body : typeof yearBodies === 'string' ? yearBodies : null;
+  const body = data ? taxSaveBody(draft, years, data) : null;
+  const error = typeof body === 'string' ? body : null;
+  // 送るものがあれば（入力のまずい所も含めて）変えている。プロファイルがまだ無いときは常に全列を送るので、初期値からの差で見る。
   const dirty =
     data !== null &&
-    (JSON.stringify(draft) !== JSON.stringify(taxProfileDraft(data.profile)) || JSON.stringify(years) !== JSON.stringify(taxYearDrafts(data.years, today)));
+    (data.profile === null
+      ? JSON.stringify(draft) !== JSON.stringify(taxProfileDraft(null)) || JSON.stringify(years) !== JSON.stringify(taxYearDrafts(data.years, today))
+      : body !== null);
   useEffect(() => {
     onLock(dirty);
     return () => onLock(false);
   }, [dirty]);
 
   const save = async () => {
-    if (typeof body === 'string' || typeof yearBodies === 'string') return;
-    setBusy(true);
-    const runs: RunSummary[] = [];
-    // 年を先に、プロファイルを最後に（プロファイルの再計算が最後の入力で台帳を揃える）。
-    const reqs = [...yearBodies.map((y) => ({ url: `/api/tax/years/${y.year}`, body: y.body })), { url: '/api/tax/profile', body }];
-    for (const q of reqs) {
-      const r = await putJson(q.url, q.body);
-      if (r.status !== 200) {
-        setMsg(failText(r.status, r.body));
-        setBusy(false);
-        if (runs.length > 0) await load(false);
-        return;
-      }
-      runs.push((r.body as { run: RunSummary }).run);
+    if (typeof body === 'string') return;
+    if (body === null) {
+      setMsg('変えたところはありません。');
+      return;
     }
-    setMsg(runText(runs, '保存しました。'));
+    setBusy(true);
+    const r = await putJson('/api/tax', body);
+    if (r.status !== 200) {
+      // 下書きはそのまま残す（直してもう一度押せるように）。
+      setMsg(failText(r.status, r.body));
+      setBusy(false);
+      return;
+    }
+    setMsg(runText((r.body as { run: RunSummary }).run, '保存しました。'));
     await load(true);
     setBusy(false);
   };
