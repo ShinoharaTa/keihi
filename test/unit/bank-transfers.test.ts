@@ -318,3 +318,49 @@ describe('範囲・一覧・集計から除く集合', () => {
     assert.equal(matchesSettlementPattern('ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ', null), false);
   });
 });
+
+describe('無効にした口座（active=0）の明細', () => {
+  const addOne = (db: Db, accountId: string, txnDate: string, amount: number, side: 'income' | 'expense', desc = 'ﾌﾘｺﾐ') =>
+    insertBankTxn(db, { accountId, txnDate, amount, side, description: desc, descriptionNorm: desc, now }).id;
+  const mkOld = (db: Db, name: string) => insertAccount(db, { provider: 'fake', name, kind: 'bank', source: 'csv', now }).id;
+
+  test('無効な口座に同じ日付・同額の複製があっても、active な口座同士が 1 対 1 で組になる', () => {
+    const { db, acc } = setup();
+    try {
+      const oldA = mkOld(db, '旧銀行A');
+      const oldB = mkOld(db, '旧銀行B');
+      updateAccountSettings(db, oldA, { active: false }, now);
+      updateAccountSettings(db, oldB, { active: false }, now);
+      addOne(db, oldA, '2026-10-01', 30000, 'expense');
+      addOne(db, oldB, '2026-10-01', 30000, 'income');
+      const [o, i] = addTxns(db, acc, [['A', '2026-10-01', 30000, 'expense'], ['B', '2026-10-01', 30000, 'income']]);
+      const made = detectTransfers(db, { windowDays: 3, now: new Date(now) });
+      assert.deepEqual(made.map((l) => [l.out_txn_id, l.in_txn_id, l.kind]), [[o, i, 'transfer']]);
+      assert.deepEqual(excludedFromCashflow(db), new Set([o, i]));
+    } finally {
+      db.close();
+    }
+  });
+
+  test('無効にした口座の明細と組になったチャージは、active な口座の同額の出金と組み直せる', () => {
+    const { db, acc } = setup();
+    try {
+      const oldA = mkOld(db, '旧銀行A');
+      const oldOut = addOne(db, oldA, '2026-10-01', 5000, 'expense', 'PAYPAY');
+      const [charge] = addTxns(db, acc, [['paypay', '2026-10-01', 5000, 'income', 'チャージ']]);
+      const [first] = detectTransfers(db, { windowDays: 3, now: new Date(now) });
+      assert.deepEqual([first!.out_txn_id, first!.in_txn_id, first!.kind], [oldOut, charge, 'charge']);
+
+      updateAccountSettings(db, oldA, { active: false }, now);
+      // 無効にした口座との組は除外に数えない。
+      assert.deepEqual(excludedFromCashflow(db), new Set());
+      assert.deepEqual(listActiveTransfers(db), []);
+      const [out] = addTxns(db, acc, [['A', '2026-10-01', 5000, 'expense', 'PAYPAY']]);
+      const made = detectTransfers(db, { windowDays: 3, now: new Date(now) });
+      assert.deepEqual(made.map((l) => [l.out_txn_id, l.in_txn_id, l.kind]), [[out, charge, 'charge']]);
+      assert.deepEqual(excludedFromCashflow(db), new Set([out, charge]));
+    } finally {
+      db.close();
+    }
+  });
+});

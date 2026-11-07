@@ -51,12 +51,12 @@ export function getCsvImportAccount(db: Db, csvImportId: string): string | null 
 
 // ---- 振替（T107） ----
 
-// 明細を口座の種別付きで返す。範囲を渡さなければ全件。
+// active な口座の明細を口座の種別付きで返す。範囲を渡さなければ全件。
 export function listTxnsWithAccount(db: Db, range: { from?: string; to?: string } = {}): TxnWithAccount[] {
   return db
     .prepare(
       `SELECT t.rowid AS seq, t.*, a.kind AS account_kind FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
-       WHERE (? IS NULL OR t.txn_date >= ?) AND (? IS NULL OR t.txn_date <= ?)
+       WHERE a.active = 1 AND (? IS NULL OR t.txn_date >= ?) AND (? IS NULL OR t.txn_date <= ?)
        ORDER BY t.txn_date, t.rowid`,
     )
     .all(range.from ?? null, range.from ?? null, range.to ?? null, range.to ?? null) as TxnWithAccount[];
@@ -66,16 +66,21 @@ export function listTxnsWithAccount(db: Db, range: { from?: string; to?: string 
 const LATEST = `SELECT l.* FROM transfer_links l
   WHERE l.seq = (SELECT max(m.seq) FROM transfer_links m WHERE m.out_txn_id = l.out_txn_id AND m.in_txn_id IS l.in_txn_id)`;
 
+// 組の両側（card_settlement は出金側だけ）が active な口座の明細か。x は LATEST の行。
+const BOTH_ACTIVE = `EXISTS (SELECT 1 FROM bank_txns ot JOIN money_accounts oa ON oa.id = ot.account_id WHERE ot.id = x.out_txn_id AND oa.active = 1)
+  AND (x.in_txn_id IS NULL OR EXISTS (SELECT 1 FROM bank_txns it JOIN money_accounts ia ON ia.id = it.account_id WHERE it.id = x.in_txn_id AND ia.active = 1))`;
+
+// 組ごとの最新の行のうち、両側が active な口座の明細のもの。
 export function listLatestTransferLinks(db: Db): TransferLinkRow[] {
-  return db.prepare(`${LATEST} ORDER BY l.seq`).all() as TransferLinkRow[];
+  return db.prepare(`SELECT x.* FROM (${LATEST}) x WHERE ${BOTH_ACTIVE} ORDER BY x.seq`).all() as TransferLinkRow[];
 }
 
-// 有効な組。範囲は出金側の明細の日付で絞る。
+// 有効な組（両側が active な口座の明細のものだけ）。範囲は出金側の明細の日付で絞る。
 export function listActiveTransferLinks(db: Db, range: { from?: string; to?: string } = {}): (TransferLinkRow & { out_date: string; amount: number })[] {
   return db
     .prepare(
       `SELECT x.*, t.txn_date AS out_date, t.amount AS amount FROM (${LATEST}) x JOIN bank_txns t ON t.id = x.out_txn_id
-       WHERE x.state = 'active' AND (? IS NULL OR t.txn_date >= ?) AND (? IS NULL OR t.txn_date <= ?)
+       WHERE x.state = 'active' AND ${BOTH_ACTIVE} AND (? IS NULL OR t.txn_date >= ?) AND (? IS NULL OR t.txn_date <= ?)
        ORDER BY t.txn_date, x.seq`,
     )
     .all(range.from ?? null, range.from ?? null, range.to ?? null, range.to ?? null) as (TransferLinkRow & { out_date: string; amount: number })[];
