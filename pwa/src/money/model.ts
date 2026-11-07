@@ -117,9 +117,9 @@ export type ForecastWarning =
   | { kind: 'short_history'; months_available: number }
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
-  | { kind: 'consumption_tax_not_implemented'; mode: string }
   | { kind: 'special20_expired'; year: number }
-  | { kind: 'simplified_class_missing' };
+  | { kind: 'simplified_class_missing' }
+  | { kind: 'revenue_missing'; year: number };
 export type Forecast = {
   as_of: string;
   opening_balance: number;
@@ -488,9 +488,9 @@ export function warningText(w: ForecastWarning, accountName: (id: string) => str
   if (w.kind === 'stale_balance') return `${accountName(w.account_id)} の残高が ${w.as_of_date} から更新されていません。`;
   if (w.kind === 'tax_profile_missing') return '税・保険の見積もりが未設定です（予定 → 税・保険の見積もり）。';
   if (w.kind === 'consumption_tax_mode_unset') return '消費税は見通しに入っていません（方式が未設定）。';
-  if (w.kind === 'consumption_tax_not_implemented') return consumptionNotImplemented(w.mode);
   if (w.kind === 'special20_expired') return SPECIAL20_EXPIRED;
   if (w.kind === 'simplified_class_missing') return SIMPLIFIED_CLASS_MISSING;
+  if (w.kind === 'revenue_missing') return revenueMissing(w.year);
   return w.months_available === 0
     ? '過去の明細がまだ無いため、予定外支出の目安を 0 円にしています。'
     : `過去の明細が ${w.months_available} か月分しかないため、予定外支出の目安は粗い値です。`;
@@ -917,9 +917,9 @@ export type TaxProfileResponse = { profile: TaxProfile | null; years: TaxYear[];
 export type TaxWarning =
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
-  | { kind: 'consumption_tax_not_implemented'; mode: string }
   | { kind: 'special20_expired'; year: number }
   | { kind: 'simplified_class_missing' }
+  | { kind: 'revenue_missing'; year: number }
   | { kind: 'income_missing'; year: number }
   | { kind: 'pinned_withdrawn'; key: string; item_id: string }
   | { kind: 'possible_duplicate'; key: string; item_ids: [string, string] };
@@ -945,8 +945,8 @@ export const SIMPLIFIED_CLASS_LABELS: readonly { v: number; label: string }[] = 
 ];
 export const SPECIAL20_EXPIRED = '2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。';
 export const SIMPLIFIED_CLASS_MISSING = '簡易課税の事業区分が未設定なので消費税は見通しに入りません。';
-// 第 1 版のサーバーの警告（consumption_tax_not_implemented）。第 2 版では来ない。
-export const consumptionNotImplemented = (mode: string) => `消費税（方式: ${CONSUMPTION_LABELS[mode] ?? mode}）はまだ見通しに入りません。`;
+// 消費税を作る方式なのに、その年分の売上が無い（所得を直接入れた年）。
+export const revenueMissing = (year: number) => `${year} 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。`;
 // 個人事業税の納税通知が来ているときの税率。
 export const BIZ_TAX_RATE = 0.05;
 
@@ -1128,12 +1128,12 @@ export function taxWarningText(w: TaxWarning): string {
       return '設定がまだ無いので作っていません。';
     case 'consumption_tax_mode_unset':
       return '消費税は未反映です。';
-    case 'consumption_tax_not_implemented':
-      return consumptionNotImplemented(w.mode);
     case 'special20_expired':
       return SPECIAL20_EXPIRED;
     case 'simplified_class_missing':
       return SIMPLIFIED_CLASS_MISSING;
+    case 'revenue_missing':
+      return revenueMissing(w.year);
     case 'income_missing':
       return `${w.year} 年の所得が無い分は作っていません。`;
     case 'pinned_withdrawn':
