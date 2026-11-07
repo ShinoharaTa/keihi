@@ -5,7 +5,7 @@
 // - this_month の income / expense: 今月の月次集計（monthlySummary。振替・引き落とし・チャージは除く）のうち、資金繰りに入れる口座の分。
 //   all_income / all_expense は対象外の口座も含めた合計（monthlySummary の total）。
 // - untagged_count: 効くタグが unset の明細の件数（振替・引き落とし・チャージは数えない）。
-//   PWA の一覧（GET /api/bank_txns?tag=unset）と一致させるため全口座（active・include_in_cashflow で絞らない）。
+//   PWA の一覧（GET /api/bank_txns?tag=unset）の既定と一致させるため active = 1 の口座すべて（include_in_cashflow では絞らない）。
 // - cards_without_settlement: 使っているカードのうち、引き落とし口座かパターンが空のもの（二重計上になる。docs/cashflow.md §12）。
 // - open_candidates: open の周期の候補の件数。upcoming_due: 期日の近い予定の件数（upcoming.ts の dueSoonCount）。
 // - sync: 同期の要約（sync.ts の bankSummary の last_ok_at・errors）。
