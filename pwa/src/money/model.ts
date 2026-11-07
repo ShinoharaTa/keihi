@@ -116,7 +116,8 @@ export type ForecastWarning =
   | { kind: 'stale_balance'; account_id: string; as_of_date: string }
   | { kind: 'short_history'; months_available: number }
   | { kind: 'tax_profile_missing' }
-  | { kind: 'consumption_tax_mode_unset' };
+  | { kind: 'consumption_tax_mode_unset' }
+  | { kind: 'consumption_tax_not_implemented'; mode: string };
 export type Forecast = {
   as_of: string;
   opening_balance: number;
@@ -485,6 +486,7 @@ export function warningText(w: ForecastWarning, accountName: (id: string) => str
   if (w.kind === 'stale_balance') return `${accountName(w.account_id)} の残高が ${w.as_of_date} から更新されていません。`;
   if (w.kind === 'tax_profile_missing') return '税・保険の見積もりが未設定です（予定 → 税・保険の見積もり）。';
   if (w.kind === 'consumption_tax_mode_unset') return '消費税は見通しに入っていません（方式が未設定）。';
+  if (w.kind === 'consumption_tax_not_implemented') return consumptionNotImplemented(w.mode);
   return w.months_available === 0
     ? '過去の明細がまだ無いため、予定外支出の目安を 0 円にしています。'
     : `過去の明細が ${w.months_available} か月分しかないため、予定外支出の目安は粗い値です。`;
@@ -907,6 +909,7 @@ export type TaxProfileResponse = { profile: TaxProfile | null; years: TaxYear[];
 export type TaxWarning =
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
+  | { kind: 'consumption_tax_not_implemented'; mode: string }
   | { kind: 'income_missing'; year: number }
   | { kind: 'pinned_withdrawn'; key: string; item_id: string }
   | { kind: 'possible_duplicate'; key: string; item_ids: [string, string] };
@@ -920,6 +923,8 @@ const BLUE_DEDUCTION: Record<BlueReturn, number> = { '65': 650000, '55': 550000,
 export const PENSION_LABELS: Record<Exclude<PensionMode, 'none'>, string> = { monthly: '月払い', prepay6: '6 か月', prepay12: '1 年', prepay24: '2 年' };
 export const PENSION_MODES: readonly Exclude<PensionMode, 'none'>[] = ['monthly', 'prepay6', 'prepay12', 'prepay24'];
 export const CONSUMPTION_LABELS: Record<string, string> = { unset: '未設定', exempt: '免税', special20: '2 割特例', simplified: '簡易課税', standard: '本則' };
+// 方式は設定済みだが PR1 は消費税を作らない（consumption_tax_not_implemented）。
+export const consumptionNotImplemented = (mode: string) => `消費税（方式: ${CONSUMPTION_LABELS[mode] ?? mode}）はまだ見通しに入りません。`;
 // 個人事業税の納税通知が来ているときの税率。
 export const BIZ_TAX_RATE = 0.05;
 
@@ -1041,7 +1046,9 @@ export const ESTIMATE_FIELDS: readonly { k: TaxYearField; label: string }[] = [
   { k: 'expenses', label: '経費' },
   { k: 'business_income', label: '所得を直接（入れたら優先）' },
 ];
-export type TaxYearDraft = { year: number; kind: TaxYearKind; values: Partial<Record<TaxYearField, string>> };
+// placeholders: 確定の年に見込みの行（売上・経費だけ）が残っているときの所得欄の注記。
+export type TaxYearDraft = { year: number; kind: TaxYearKind; values: Partial<Record<TaxYearField, string>>; placeholders?: Partial<Record<TaxYearField, string>> };
+export const ESTIMATE_KEPT = '見込みの値（売上 − 経費）のまま';
 const fieldsOf = (kind: TaxYearKind) => (kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS);
 
 // 今年の前年は確定、今年から 3 年は見込み。
@@ -1050,17 +1057,20 @@ export function taxYearDrafts(years: TaxYear[], today: string): TaxYearDraft[] {
   return [y - 1, y, y + 1, y + 2].map((year) => {
     const kind: TaxYearKind = year < y ? 'actual' : 'estimate';
     const row = years.find((r) => r.year === year);
-    return { year, kind, values: Object.fromEntries(fieldsOf(kind).map((f) => [f.k, row?.[f.k] == null ? '' : String(row[f.k])])) };
+    const values = Object.fromEntries(fieldsOf(kind).map((f) => [f.k, row?.[f.k] == null ? '' : String(row[f.k])]));
+    const kept = kind === 'actual' && row && row.business_income === null && row.revenue !== null && row.expenses !== null;
+    return kept ? { year, kind, values, placeholders: { business_income: ESTIMATE_KEPT } } : { year, kind, values };
   });
 }
 
 // 変えた年の PUT /api/tax/years/:year の本文。だめな値があれば理由の文。まだ無い年で全部空欄なら送らない（前の年を繰り越す）。
+// 年が替わって見込みの行が確定の年に来ても、確定の欄に値を入れるまでは kind を変えない（何もしなければ送らない）。
 export function taxYearBodies(drafts: TaxYearDraft[], years: TaxYear[]): { year: number; body: Record<string, unknown> }[] | string {
   const out: { year: number; body: Record<string, unknown> }[] = [];
   for (const d of drafts) {
     const row = years.find((r) => r.year === d.year);
-    const body: Record<string, unknown> = { kind: d.kind };
-    let changed = row !== undefined && row.kind !== d.kind;
+    const body: Record<string, unknown> = {};
+    let changed = false;
     let any = false;
     for (const f of fieldsOf(d.kind)) {
       const v = parseAmount(d.values[f.k] ?? '', f.k === 'business_income');
@@ -1070,7 +1080,7 @@ export function taxYearBodies(drafts: TaxYearDraft[], years: TaxYear[]): { year:
       if ((row?.[f.k] ?? null) !== v) changed = true;
     }
     if (!row && !any) continue;
-    if (changed) out.push({ year: d.year, body });
+    if (changed) out.push({ year: d.year, body: { kind: !row || any ? d.kind : row.kind, ...body } });
   }
   return out;
 }
@@ -1081,6 +1091,8 @@ export function taxWarningText(w: TaxWarning): string {
       return '設定がまだ無いので作っていません。';
     case 'consumption_tax_mode_unset':
       return '消費税は未反映です。';
+    case 'consumption_tax_not_implemented':
+      return consumptionNotImplemented(w.mode);
     case 'income_missing':
       return `${w.year} 年の所得が無い分は作っていません。`;
     case 'pinned_withdrawn':

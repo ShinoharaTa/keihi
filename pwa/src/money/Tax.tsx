@@ -62,11 +62,11 @@ export function TaxCard({ tax, today, busy, onOpen, onRecalc }: { tax: TaxSummar
   );
 }
 
-function Num({ id, label, value, onInput }: { id: string; label: string; value: string; onInput: (v: string) => void }) {
+function Num({ id, label, value, placeholder, onInput }: { id: string; label: string; value: string; placeholder?: string; onInput: (v: string) => void }) {
   return (
     <label class="m-field-wrap" for={id}>
       <span class="m-label">{label}</span>
-      <input id={id} class="m-field" inputMode="numeric" value={value} onInput={(e) => onInput(e.currentTarget.value)} />
+      <input id={id} class="m-field" inputMode="numeric" placeholder={placeholder} value={value} onInput={(e) => onInput(e.currentTarget.value)} />
     </label>
   );
 }
@@ -135,6 +135,7 @@ export function TaxForm({
         <label class="m-field-wrap" for="m-tax-nhi">
           <span class="m-label">国民健康保険の料率</span>
           <select id="m-tax-nhi" class="m-field" value={draft.nhi_preset} onChange={(e) => set('nhi_preset', e.currentTarget.value)}>
+            {data.profile && data.profile.nhi_preset === null && <option value="">（独自の料率）</option>}
             {data.presets.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.label}
@@ -169,7 +170,7 @@ export function TaxForm({
           <select id="m-tax-acct" class="m-field" value={draft.payment_account_id} onChange={(e) => set('payment_account_id', e.currentTarget.value)}>
             <option value="">決めない</option>
             {accounts
-              .filter((a) => a.active)
+              .filter((a) => a.active || a.id === draft.payment_account_id)
               .map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
@@ -191,7 +192,7 @@ export function TaxForm({
             </legend>
             <div class="m-form-2">
               {(y.kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS).map((f) => (
-                <Num key={f.k} id={`m-tax-${y.year}-${f.k}`} label={f.label} value={y.values[f.k] ?? ''} onInput={(v) => setYear(i, f.k, v)} />
+                <Num key={f.k} id={`m-tax-${y.year}-${f.k}`} label={f.label} value={y.values[f.k] ?? ''} placeholder={y.placeholders?.[f.k]} onInput={(v) => setYear(i, f.k, v)} />
               ))}
             </div>
           </fieldset>
@@ -230,19 +231,24 @@ export function Tax({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
 
-  const load = useCallback(async () => {
-    const r = await getJson<TaxProfileResponse>('/api/tax/profile');
-    if (!r.ok) {
-      setMsg(failText(r.status, r.body));
-      return;
-    }
-    setData(r.data);
-    setDraft(taxProfileDraft(r.data.profile));
-    setYears(taxYearDrafts(r.data.years, today));
-  }, [today]);
+  // 読み直す。reset なら下書きもサーバーの値に戻す（保存の途中で失敗したときは下書きを残す）。
+  const load = useCallback(
+    async (reset: boolean) => {
+      const r = await getJson<TaxProfileResponse>('/api/tax/profile');
+      if (!r.ok) {
+        setMsg(failText(r.status, r.body));
+        return;
+      }
+      setData(r.data);
+      if (!reset) return;
+      setDraft(taxProfileDraft(r.data.profile));
+      setYears(taxYearDrafts(r.data.years, today));
+    },
+    [today],
+  );
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, [load]);
 
   const body = taxProfileBody(draft);
@@ -267,19 +273,19 @@ export function Tax({
       if (r.status !== 200) {
         setMsg(failText(r.status, r.body));
         setBusy(false);
-        if (runs.length > 0) await load();
+        if (runs.length > 0) await load(false);
         return;
       }
       runs.push((r.body as { run: RunSummary }).run);
     }
     setMsg(runText(runs, '保存しました。'));
-    await load();
+    await load(true);
     setBusy(false);
   };
 
   return (
     <>
-      <ScreenHead title="税・保険の見積もり" sub="概算（±1〜2 割）" locked={locked} onBack={onBack} />
+      <ScreenHead title="税・保険の見積もり" sub="概算（±1〜2 割）" backLabel="予定に戻る" locked={locked} onBack={onBack} />
       <div class="m-main">
         {msg && (
           <p class="m-msg" role="status">

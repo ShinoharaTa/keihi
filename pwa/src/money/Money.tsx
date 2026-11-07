@@ -20,10 +20,27 @@ export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Dire
 export type Go = (view: MoneyView, intent?: Intent) => void;
 
 // 各画面の上の帯: 「戻る」・題・右端（任意）。
-export function ScreenHead({ title, sub, locked, flat, onBack, children }: { title: string; sub?: string; locked?: boolean; flat?: boolean; onBack: () => void; children?: ComponentChildren }) {
+export function ScreenHead({
+  title,
+  sub,
+  backLabel = 'お金に戻る',
+  locked,
+  flat,
+  onBack,
+  children,
+}: {
+  title: string;
+  sub?: string;
+  // 「戻る」の読み上げ（既定はお金に戻る）。
+  backLabel?: string;
+  locked?: boolean;
+  flat?: boolean;
+  onBack: () => void;
+  children?: ComponentChildren;
+}) {
   return (
     <header class={flat ? 'm-head m-head-flat' : 'm-head'}>
-      <button type="button" class="m-icon" aria-label="お金に戻る" disabled={locked} onClick={onBack}>
+      <button type="button" class="m-icon" aria-label={backLabel} disabled={locked} onClick={onBack}>
         <Icon name="back" size={22} />
       </button>
       {sub ? (

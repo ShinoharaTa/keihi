@@ -52,6 +52,7 @@ import {
   occurrenceCount,
   overviewFallback,
   pageCount,
+  parseAmount,
   parseYen,
   peakMonths,
   periodRange,
@@ -649,6 +650,26 @@ describe('税・保険の見積もりの純関数', () => {
     ]);
     assert.match(taxYearBodies([{ ...drafts[1]!, values: { revenue: '-5' } }], taxYears) as string, /2026 年の「売上」/);
   });
+  test('年が替わっても、見込みの行は確定の欄に値を入れるまで送らない（kind を書き換えない）', () => {
+    const next = taxYearDrafts(taxYears, '2027-01-05');
+    assert.deepEqual(next.map((d) => [d.year, d.kind]), [[2026, 'actual'], [2027, 'estimate'], [2028, 'estimate'], [2029, 'estimate']]);
+    assert.equal(next[0]!.values.business_income, '');
+    assert.equal(next[0]!.placeholders?.business_income, '見込みの値（売上 − 経費）のまま');
+    assert.deepEqual(taxYearBodies(next, taxYears), [], '何も編集していなければ空');
+    const filled = next.map((d) => (d.year === 2026 ? { ...d, values: { ...d.values, income_tax_final: '150000' } } : d));
+    assert.deepEqual(taxYearBodies(filled, taxYears), [
+      { year: 2026, body: { kind: 'actual', business_income: null, income_tax_final: 150000, prepaid_income_tax: null, consumption_tax_final: null, social_insurance_paid: null } },
+    ]);
+    assert.equal(taxYearDrafts(taxYears, TODAY)[0]!.placeholders, undefined, '確定の行には出さない');
+  });
+  test('金額の入力: 小数・指数・+ は弾く。負（全角マイナスも）は所得だけ', () => {
+    assert.equal(parseAmount(''), null);
+    assert.equal(parseAmount('１,２００円'), 1200);
+    for (const x of ['1.5', '1e3', '+5', '-5', '−5']) assert.equal(parseAmount(x), undefined, x);
+    assert.equal(parseAmount('−100000', true), -100000);
+    assert.equal(parseAmount('－5', true), -5);
+    assert.equal(parseAmount('1.5', true), undefined);
+  });
   test('結果の 1 行: 件数は足し、警告は最後の回', () => {
     const r = (o: object) => ({ run_id: 'R', created: 0, updated: 0, deactivated: 0, skipped_pinned: [], warnings: [], ...o });
     assert.equal(
@@ -658,6 +679,11 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(runText([r({ warnings: [{ kind: 'tax_profile_missing' }] })], '再計算しました。'), '再計算しました。予定は作成 0・更新 0・停止 0 件。設定がまだ無いので作っていません。');
     assert.match(warningText({ kind: 'tax_profile_missing' }, (x) => x), /税・保険の見積もりが未設定/);
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
+    assert.equal(warningText({ kind: 'consumption_tax_not_implemented', mode: 'special20' }, (x) => x), '消費税（方式: 2 割特例）はまだ見通しに入りません。');
+    assert.equal(
+      runText([r({ warnings: [{ kind: 'consumption_tax_not_implemented', mode: 'simplified' }] })], '保存しました。'),
+      '保存しました。予定は作成 0・更新 0・停止 0 件。消費税（方式: 簡易課税）はまだ見通しに入りません。',
+    );
   });
 });
 
@@ -744,6 +770,7 @@ describe('SSR スナップショット', () => {
     const m = await load('/src/money/Money.tsx');
     const out = [html(m.ScreenHead!, { title: '見通し', sub: '36 か月 · 2026-11〜2029-10', onBack: noop }), html(m.ScreenHead!, { title: '予定', locked: true, flat: true, onBack: noop })].join('\n');
     assert.match(out, /aria-label="お金に戻る" disabled/);
+    assert.match(html(m.ScreenHead!, { title: '税・保険の見積もり', backLabel: '予定に戻る', onBack: noop }), /aria-label="予定に戻る"/);
     t.assert.snapshot(lines(out));
   });
 
@@ -929,6 +956,16 @@ describe('SSR スナップショット', () => {
     assert.match(form, /disabled>やめる/, '変えていなければ「やめる」は押せない');
     const bad = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: '扶養の人数は 0〜20 で入れてください。', dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(bad, /扶養の人数は 0〜20[\s\S]*disabled>保存して再計算/);
+    const own = html(m.TaxForm!, {
+      data: { ...taxData, profile: { ...taxData.profile!, nhi_preset: null, payment_account_id: 'W1' } },
+      draft: { ...draft, nhi_preset: '', payment_account_id: 'W1' },
+      years: taxYearDrafts([taxYear(2026, { revenue: 5000000, expenses: 350000 })], '2027-01-05'),
+      accounts: [account(), { ...wallet, active: false }], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop,
+    });
+    assert.match(own, /<option value="">（独自の料率）<\/option>/);
+    assert.doesNotMatch(form, /独自の料率/);
+    assert.match(own, /<option value="W1">PayPay<\/option>/, '今の納税口座は無効でも選択肢に残す');
+    assert.match(own, /id="m-tax-2026-business_income" class="m-field" inputMode="numeric" placeholder="見込みの値（売上 − 経費）のまま"/);
     t.assert.snapshot(lines([unset, set, form].join('\n')));
   });
 
