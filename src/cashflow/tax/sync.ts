@@ -1,12 +1,12 @@
 // 税金・保険料の見積もりの入力の保存と、予定台帳への同期（docs/cashflow.md §14.2）。
 // 再計算: engine.ts の結果を scheduled_items（origin = estimate、recurrence = once）に estimate_key で突き合わせる。
-//   key が無い → 作る / 同じ → 何もしない / 違う・pinned = 0 → その行を書き換える（id は変えない）/ pinned = 1 → 触らない（skipped_pinned）。
+//   key が無い → 作る / 同じ → 何もしない / 額・期日・名前・口座が違う・pinned = 0 → その行を書き換える（id は変えない）/ pinned = 1 → 触らない（skipped_pinned）。
 //   今回出なくなった key（期日が対象の期間にあるもの）: pinned = 0 → 止める / pinned = 1 → 触らず警告。
 //   同じ category で ±45 日・±10% の manual / detected の有効な項目があれば possible_duplicate を出す（消さない）。
 // 対象の期間: 今年の 1/1 〜 今日 + 39 か月（36 か月 + 3 か月）。過去の期日も作る（forecast が履歴から予定分を引く）。
 // 台帳への書き込みは actor = system（監査の payload に run_id と reason）。1 回の再計算を tax_estimate_runs に 1 行残す。
 // tax_profile・tax_years の更新は同じトランザクションで再計算する。監査は tax_profile.updated / tax_year.updated（変わった列の前後）。
-import { appendAudit } from '../../audit.ts';
+import { appendAudit, canonicalJson } from '../../audit.ts';
 import { addDays, addMonths } from '../../calendar/businessDays.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { ulid } from '../../db/ids.ts';
@@ -138,8 +138,9 @@ export function recalculate(db: Db, opts: { today: string; now: Date; actor: str
         created++;
       } else {
         id = cur.id;
-        if (cur.amount !== it.amount || cur.anchor_date !== it.due) {
-          updateItem(db, cur.id, { amount: it.amount, anchorDate: it.due }, system({ reason: 'tax_recalc' }), opts.now);
+        const account = profile!.payment_account_id;
+        if (cur.amount !== it.amount || cur.anchor_date !== it.due || cur.name !== it.name || cur.account_id !== account) {
+          updateItem(db, cur.id, { amount: it.amount, anchorDate: it.due, name: it.name, accountId: account }, system({ reason: 'tax_recalc' }), opts.now);
           updated++;
         }
       }
@@ -199,7 +200,7 @@ function checkNhiRates(v: unknown): string | null {
       if (!ok) throw new TaxError('invalid_nhi_rates_json');
     }
   }
-  return JSON.stringify(o);
+  return canonicalJson(o); // キーを並べて保存する（キーの順だけの違いを変更とみなさない）
 }
 
 // PUT /api/tax/profile の body を base に重ねて検査する。知らないキーは 400。
@@ -250,7 +251,8 @@ export function parseProfileBody(body: Record<string, unknown>, base: TaxProfile
   }
   const p = out as TaxProfileValues;
   if (p.nhi_members_40_64 > p.nhi_members) throw new TaxError('invalid_nhi_members_40_64');
-  if (p.nhi_preset === null && p.nhi_rates_json !== null && nhiRatesOf(p) === null) throw new TaxError('invalid_nhi_rates_json');
+  // プリセットが無ければ 4 区分すべての rate・per_capita・cap が要る。
+  if (p.nhi_rates_json !== null && nhiRatesOf(p) === null) throw new TaxError('invalid_nhi_rates_json');
   return p;
 }
 
@@ -371,8 +373,11 @@ export function latestEstimates(db: Db) {
 }
 
 // GET /api/cashflow の warnings に足すもの。
-export function cashflowTaxWarnings(db: Db): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' })[] {
+export function cashflowTaxWarnings(
+  db: Db,
+): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' } | { kind: 'consumption_tax_not_implemented'; mode: string })[] {
   const p = getTaxProfile(db);
   if (!p) return [{ kind: 'tax_profile_missing' }];
-  return p.consumption_mode === 'unset' ? [{ kind: 'consumption_tax_mode_unset' }] : [];
+  if (p.consumption_mode === 'unset') return [{ kind: 'consumption_tax_mode_unset' }];
+  return p.consumption_mode === 'exempt' ? [] : [{ kind: 'consumption_tax_not_implemented', mode: p.consumption_mode }];
 }

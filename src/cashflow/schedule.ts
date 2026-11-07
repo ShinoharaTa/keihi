@@ -2,7 +2,7 @@
 // 項目は削除しない（active = 0 にする）。変更はすべて監査ログに残す（同じトランザクションで）。
 // 期日は anchor_date から周期の分だけ月を足して出す。応当日が無い月は月末（31 日起点 → 4/30・2/28、2/29 起点の毎年 → 平年は 2/28）。
 // 毎回 anchor_date から数えるので、月末に寄せた後も 31 日の月には 31 日に戻る。
-// 見積もりの項目（origin = estimate。src/cashflow/tax/sync.ts が作る）を system 以外が name・amount・anchor_date を変えるか止めると pinned = 1 にする
+// 見積もりの項目（origin = estimate。src/cashflow/tax/sync.ts が作る）を system 以外が name・amount・anchor_date を変えるか止める・戻すと pinned = 1 にする
 // （再計算で上書きしない）。pinned は見積もりの項目にだけ付けられる。
 import { appendAudit } from '../audit.ts';
 import { addDays, addMonths } from '../calendar/businessDays.ts';
@@ -243,8 +243,15 @@ export function activateItem(db: Db, id: string, by: By, now: Date = new Date())
     const cur = getScheduledItem(db, id);
     if (!cur) throw new ScheduleError('not_found', 404);
     if (cur.active === 1) return cur;
-    const row = updateScheduledItem(db, id, { active: 1 }, now.toISOString())!;
-    appendAudit(db, { actor: by.actor, action: 'scheduled_item.reactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null } }, now);
+    // 見積もりの項目は、同じ key の有効な行が既にあれば戻せない（再計算が作り直した後など）。
+    if (cur.estimate_key != null && db.prepare('SELECT 1 FROM scheduled_items WHERE estimate_key = ? AND active = 1').get(cur.estimate_key)) {
+      throw new ScheduleError('estimate_key_active');
+    }
+    // system 以外が戻した見積もりの項目は pinned = 1（次の再計算で止め直さない）。
+    const pin = cur.origin === 'estimate' && by.actor !== SYSTEM_ACTOR && cur.pinned === 0;
+    const row = updateScheduledItem(db, id, pin ? { active: 1, pinned: 1 } : { active: 1 }, now.toISOString())!;
+    const extra = pin ? { pinned: { from: 0, to: 1 } } : {};
+    appendAudit(db, { actor: by.actor, action: 'scheduled_item.reactivated', entity: 'scheduled_item', entityId: id, payload: { user: by.user ?? null, ...extra, ...by.payload } }, now);
     return row;
   });
 }

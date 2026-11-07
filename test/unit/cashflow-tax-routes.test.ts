@@ -122,6 +122,7 @@ describe('税の見積もりの API', () => {
       ['PUT', '/api/tax/profile', { nope: 1 }, 'invalid_field'],
       ['PUT', '/api/tax/profile', { pension_mode: 'weekly' }, 'invalid_pension_mode'],
       ['PUT', '/api/tax/profile', 'nope', 'invalid_json'],
+      ['PUT', '/api/tax/profile', { nhi_preset: null, nhi_rates_json: { medical: { rate: 0.07 } } }, 'invalid_nhi_rates_json'],
       ['PUT', '/api/tax/years/26', { kind: 'actual' }, 'invalid_year'],
       ['PUT', '/api/tax/years/2026', { kind: 'actual', nope: 1 }, 'invalid_field'],
       ['PUT', '/api/tax/years/2026', { revenue: 1 }, 'missing_kind'],

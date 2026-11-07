@@ -26,6 +26,7 @@ import {
   RESIDENT_RATES,
   ratesFor,
   type NhiRates,
+  type NhiSegment,
   type Step,
 } from './rates.ts';
 import type { TaxProfileValues, TaxYearValues } from './repo.ts';
@@ -56,7 +57,10 @@ export type Breakdown = {
   carried_from?: number; // 所得をこの年から繰り越した
 };
 
-export type EstimateWarning = { kind: 'consumption_tax_mode_unset' } | { kind: 'income_missing'; year: number };
+export type EstimateWarning =
+  | { kind: 'consumption_tax_mode_unset' }
+  | { kind: 'consumption_tax_not_implemented'; mode: string } // 方式は設定済みだが PR1 は消費税を作らない
+  | { kind: 'income_missing'; year: number };
 
 export type EstimateWindow = { from: string; to: string }; // 両端を含む
 
@@ -95,17 +99,24 @@ export function baseIncomeTax(taxable: number): number {
   return Math.max(0, mulFloor(taxable, b.rate) - b.minus);
 }
 
-// 国保の区分の料率（プリセットに nhi_rates_json を区分ごとに重ねる）。どちらも無ければ null。
+const isNonNegInt = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
+
+// 国保の区分の料率（プリセットに nhi_rates_json を区分ごとに重ねる）。どちらも無いか、重ねた結果で 4 区分の
+// rate・per_capita・cap が揃わなければ null（プリセットが無いときは nhi_rates_json に 4 区分すべてが要る）。
 export function nhiRatesOf(p: Pick<TaxProfileValues, 'nhi_preset' | 'nhi_rates_json'>): NhiRates | null {
   const preset = p.nhi_preset !== null ? NHI_PRESETS[p.nhi_preset]?.rates ?? null : null;
-  const over = p.nhi_rates_json !== null ? (JSON.parse(p.nhi_rates_json) as Partial<NhiRates>) : null;
+  const over = p.nhi_rates_json !== null ? (JSON.parse(p.nhi_rates_json) as Partial<Record<string, Partial<NhiSegment>>> & { basic_deduction?: number }) : null;
   if (!preset && !over) return null;
-  const out = { ...(preset ?? {}), ...(over ?? {}) } as Partial<NhiRates>;
+  const out: Record<string, unknown> = { basic_deduction: over?.basic_deduction ?? preset?.basic_deduction ?? 430_000 };
   for (const s of NHI_SEGMENTS) {
-    if (preset && over?.[s]) out[s] = { ...preset[s], ...over[s] };
-    if (!out[s]) return null;
+    const seg = { per_household: null, ...(preset?.[s] ?? {}), ...(over?.[s] ?? {}) } as Partial<NhiSegment>;
+    const ok =
+      typeof seg.rate === 'number' && Number.isFinite(seg.rate) && seg.rate >= 0 && seg.rate < 1 &&
+      isNonNegInt(seg.per_capita) && isNonNegInt(seg.cap) && (seg.per_household === null || isNonNegInt(seg.per_household));
+    if (!ok) return null;
+    out[s] = seg;
   }
-  out.basic_deduction ??= 430_000;
+  if (!isNonNegInt(out.basic_deduction)) return null;
   return out as NhiRates;
 }
 
@@ -362,7 +373,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   const items: EstimateItem[] = [];
   const breakdown: Breakdown[] = [];
   const add = (kind: EstimateKind, year: number, g: { dues: Due[]; b: Breakdown | null }) => {
-    const inWindow = g.dues.filter((d) => d.due >= window.from && d.due <= window.to);
+    // 0 円以下の期（上限 0 の上書きなど）は作らない。
+    const inWindow = g.dues.filter((d) => d.amount > 0 && d.due >= window.from && d.due <= window.to);
     if (!inWindow.length || !g.b) return;
     const category = kind === 'nhi' || kind === 'pension' ? 'insurance' : 'tax';
     for (const d of inWindow) items.push({ key: d.key, kind, year, name: d.name, amount: d.amount, due: d.due, category, group: g.b.group });
@@ -378,6 +390,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   items.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.key < b.key ? -1 : 1));
 
   if (profile.consumption_mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
+  else if (profile.consumption_mode !== 'exempt') warnings.push({ kind: 'consumption_tax_not_implemented', mode: profile.consumption_mode });
   for (const year of [...missing].sort((a, b) => a - b)) warnings.push({ kind: 'income_missing', year });
   return { items, warnings, breakdown };
 }

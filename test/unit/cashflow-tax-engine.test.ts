@@ -2,7 +2,7 @@
 // 期待値は rates.ts の数値から手で計算したもの（表駆動）。
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimate, nextBusinessDay, splitInstallments, type EstimateYear } from '../../src/cashflow/tax/engine.ts';
+import { estimate, nextBusinessDay, nhiRatesOf, splitInstallments, type EstimateYear } from '../../src/cashflow/tax/engine.ts';
 import type { TaxProfileValues } from '../../src/cashflow/tax/repo.ts';
 import { ratesFor, PENSION_RATES } from '../../src/cashflow/tax/rates.ts';
 
@@ -257,5 +257,56 @@ describe('入力が無いとき', () => {
     const r = run({}, [yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0 })], { from: '2026-07-01', to: '2026-07-31' });
     assert.ok(r.items.length > 0);
     assert.ok(r.items.every((i) => i.due >= '2026-07-01' && i.due <= '2026-07-31'));
+  });
+});
+
+describe('レビュー対応', () => {
+  // 社会保険料 0（確定値）、年金・国保なしで基礎控除の行を見る。
+  const basic = (year: number, income: number) => {
+    const r = run({ pension_mode: 'none', nhi_preset: null }, [yr(year, 'actual', { business_income: income, social_insurance_paid: 0, prepaid_income_tax: 0 })], { from: '2025-01-01', to: '2030-12-31' });
+    return r.breakdown.find((b) => b.group === `income_tax:${year}`)!.lines.find((l) => l.label === '基礎控除')!.amount;
+  };
+  for (const [year, income, want] of [
+    [2026, 1_320_000, 950_000], [2026, 1_320_001, 880_000],
+    [2026, 3_360_000, 880_000], [2026, 3_360_001, 680_000],
+    [2026, 4_890_000, 680_000], [2026, 4_890_001, 630_000],
+    [2026, 6_550_000, 630_000], [2026, 6_550_001, 580_000],
+    [2025, 3_000_000, 880_000], [2027, 1_320_000, 950_000], [2027, 1_320_001, 580_000], [2027, 3_000_000, 580_000],
+  ] as const) {
+    test(`基礎控除の境界: ${year} 年分・所得 ${income} → ${want}`, () => assert.equal(basic(year, income), want));
+  }
+
+  test('国保の期数と始まりの月: 6 月から 10 期、11 月から 4 期（年またぎ）', () => {
+    const ys = [yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0 })];
+    const ten = pick(run({ nhi_installments: 10, nhi_first_month: 6 }, ys), 'nhi:2026:').map(([k, d]) => [k, d]);
+    assert.equal(ten.length, 10);
+    assert.deepEqual(ten[0], ['nhi:2026:p1', '2026-06-30']);
+    assert.deepEqual(ten.slice(6), [['nhi:2026:p7', '2026-12-31'], ['nhi:2026:p8', '2027-02-01'], ['nhi:2026:p9', '2027-03-01'], ['nhi:2026:p10', '2027-03-31']]);
+    const r4 = run({ nhi_installments: 4, nhi_first_month: 11, nhi_members_40_64: 1 }, ys);
+    assert.deepEqual(pick(r4, 'nhi:2026:'), [
+      ['nhi:2026:p1', '2026-11-30', 102_700], ['nhi:2026:p2', '2026-12-31', 102_400], ['nhi:2026:p3', '2027-02-01', 102_400], ['nhi:2026:p4', '2027-03-01', 102_400],
+    ]);
+  });
+
+  test('0 円以下の期は作らない（上限 0 の上書き）', () => {
+    const over = JSON.stringify({ medical: { cap: 0 }, support: { cap: 0 }, care: { cap: 0 }, children: { cap: 0 } });
+    const r = run({ nhi_rates_json: over }, [yr(2025, 'actual', { business_income: 3_000_000 })]);
+    assert.deepEqual(pick(r, 'nhi:'), []);
+    assert.ok(r.items.every((i) => i.amount > 0));
+  });
+
+  test('プリセットが無いとき、nhi_rates_json の区分が欠けていれば国保の料率は無し（null）', () => {
+    assert.equal(nhiRatesOf({ nhi_preset: null, nhi_rates_json: JSON.stringify({ medical: { rate: 0.07 } }) }), null);
+    const seg = { rate: 0.05, per_capita: 10_000, cap: 500_000 };
+    const full = nhiRatesOf({ nhi_preset: null, nhi_rates_json: JSON.stringify({ medical: seg, support: seg, care: seg, children: seg }) });
+    assert.deepEqual(full?.medical, { ...seg, per_household: null });
+    assert.equal(full?.basic_deduction, 430_000);
+  });
+
+  test('消費税の方式が設定済み（exempt 以外）なら consumption_tax_not_implemented', () => {
+    const ys = [yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0 })];
+    for (const mode of ['special20', 'simplified', 'standard'] as const) {
+      assert.deepEqual(run({ consumption_mode: mode }, ys).warnings, [{ kind: 'consumption_tax_not_implemented', mode }]);
+    }
   });
 });

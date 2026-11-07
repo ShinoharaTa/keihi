@@ -5,6 +5,7 @@
 //   PATCH /api/scheduled_items/:id             body は上の部分（origin は変えられない）→ 200 ScheduledItem / 400 / 404
 //   POST /api/scheduled_items/:id/deactivate   → 200 ScheduledItem（active = 0。既に止めてあればそのまま）/ 404
 //   POST /api/scheduled_items/:id/activate     → 200 ScheduledItem（active = 1 に戻す。既に有効ならそのまま）/ 404
+//        / 400 estimate_key_active（見積もりの項目で、同じ estimate_key の有効な行が既にある）
 //   GET  /api/scheduled_items/upcoming?days=30 → 200 {from, to, items: [ScheduledItem & {due_date}]}
 //        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
 // 周期の検出の候補（T302。src/cashflow/detect.ts）:
@@ -15,7 +16,8 @@
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 //   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。
-//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）を足す。
+//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）・
+//        consumption_tax_not_implemented（方式は設定済みだが PR1 は消費税を作らない）を足す。
 //   PATCH /api/scheduled_items/:id は pinned（真偽値。origin = estimate の項目だけ。それ以外は 400 invalid_pinned）も受ける。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';

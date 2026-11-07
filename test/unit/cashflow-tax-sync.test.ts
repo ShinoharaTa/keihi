@@ -7,7 +7,7 @@ import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import { insertAccount } from '../../src/bank/repo.ts';
 import { getScheduledItem, listScheduledItems } from '../../src/cashflow/repo.ts';
-import { ScheduleError, createItem, deactivateItem, parseBody, updateItem, type ItemInput } from '../../src/cashflow/schedule.ts';
+import { ScheduleError, activateItem, createItem, deactivateItem, parseBody, updateItem, type ItemInput } from '../../src/cashflow/schedule.ts';
 import { insertTaxEstimateRun, listTaxYears } from '../../src/cashflow/tax/repo.ts';
 import { DEFAULT_PROFILE, TaxError, estimateWindow, recalculate, saveProfile, saveYear } from '../../src/cashflow/tax/sync.ts';
 import { integrityCheck, openDb, type Db } from '../../src/db/index.ts';
@@ -395,6 +395,96 @@ describe('入力の保存', () => {
       for (const [body, code] of [[{ source: 'annualized' }, 'invalid_field'], [{ revenue: -1 }, 'invalid_revenue'], [{ kind: 'guess' }, 'invalid_kind'], [{ revenue: 1.5 }, 'invalid_revenue']] as [Record<string, unknown>, string][]) {
         assert.throws(() => saveYear(db, 2026, body, o), (e: unknown) => e instanceof TaxError && e.code === code, JSON.stringify(body));
       }
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('レビュー対応', () => {
+  test('見積もりの項目を戻す: 同じ key の有効な行があれば estimate_key_active、人が戻すと pinned = 1', () => {
+    const db = freshDb();
+    try {
+      const a = createItem(db, estimateInput('k'), { actor: 'system' }, T0);
+      deactivateItem(db, a.id, { actor: 'system' }, T0);
+      createItem(db, estimateInput('k'), { actor: 'system' }, T1);
+      assert.throws(() => activateItem(db, a.id, user, T2), (e: unknown) => e instanceof ScheduleError && e.code === 'estimate_key_active' && e.status === 400);
+      assert.equal(getScheduledItem(db, a.id)!.active, 0);
+
+      const j = createItem(db, estimateInput('j'), { actor: 'system' }, T0);
+      deactivateItem(db, j.id, { actor: 'system' }, T0);
+      const back = activateItem(db, j.id, user, T1);
+      assert.deepEqual([back.active, back.pinned], [1, 1]);
+      const sys = createItem(db, estimateInput('s'), { actor: 'system' }, T0);
+      deactivateItem(db, sys.id, { actor: 'system' }, T0);
+      assert.equal(activateItem(db, sys.id, { actor: 'system' }, T1).pinned, 0);
+      assert.ok(verifyAudit(db).ok);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('人が戻した見積もりは、出なくなっても再計算で止めない', () => {
+    const db = freshDb();
+    try {
+      setup(db);
+      const p1 = byKey(db).get('income_tax:2026:prepay1')!;
+      saveYear(db, 2025, { income_tax_final: 149_900 }, { by: user, today: TODAY, now: T1 });
+      assert.equal(getScheduledItem(db, p1.id)!.active, 0);
+      activateItem(db, p1.id, user, T2);
+      const r = recalculate(db, { today: TODAY, now: new Date('2026-11-10T00:00:00Z'), actor: 'user' });
+      assert.equal(getScheduledItem(db, p1.id)!.active, 1);
+      assert.ok(r.warnings.some((w) => w.kind === 'pinned_withdrawn' && w.item_id === p1.id));
+    } finally {
+      db.close();
+    }
+  });
+
+  test('納税口座を後から入れると、pinned でない既存の項目の口座も揃う', () => {
+    const db = freshDb();
+    try {
+      const { acc } = setup(db, { payment_account_id: null });
+      assert.ok(estimates(db).every((i) => i.account_id === null));
+      const pinned = byKey(db).get('resident:2026:q1')!;
+      updateItem(db, pinned.id, { amount: 1 }, user, T1);
+      const { run } = saveProfile(db, { payment_account_id: acc }, { by: user, today: TODAY, now: T2 });
+      assert.equal(run.updated, byKey(db).size - 1);
+      for (const i of byKey(db).values()) assert.equal(i.account_id, i.id === pinned.id ? null : acc);
+      const a = auditsFor(db, byKey(db).get('resident:2026:q2')!.id).at(-1)!;
+      assert.deepEqual(a.payload.changes, { account_id: { from: null, to: acc } });
+    } finally {
+      db.close();
+    }
+  });
+
+  test('nhi_rates_json: プリセットが無いと 4 区分の rate・per_capita・cap が要る。キーの順だけの違いは変更にしない', () => {
+    const db = freshDb();
+    try {
+      const o = { by: user, today: TODAY, now: T0 };
+      for (const body of [
+        { nhi_preset: null, nhi_rates_json: { medical: { rate: 0.07 } } },
+        { nhi_preset: null, nhi_rates_json: { medical: { rate: 0.07, per_capita: 1, cap: 1 }, support: { rate: 0.01, per_capita: 1, cap: 1 }, care: { rate: 0.01, per_capita: 1 }, children: { rate: 0.01, per_capita: 1, cap: 1 } } },
+      ]) {
+        assert.throws(() => saveProfile(db, body, o), (e: unknown) => e instanceof TaxError && e.code === 'invalid_nhi_rates_json', JSON.stringify(body));
+      }
+      assert.equal((db.prepare('SELECT count(*) n FROM tax_profile').get() as { n: number }).n, 0);
+      saveProfile(db, { nhi_rates_json: { care: { cap: 0, rate: 0.02 }, medical: { rate: 0.07 } } }, o);
+      const count = () => (db.prepare(`SELECT count(*) n FROM audit_log WHERE action = 'tax_profile.updated'`).get() as { n: number }).n;
+      const before = count();
+      saveProfile(db, { nhi_rates_json: { medical: { rate: 0.07 }, care: { rate: 0.02, cap: 0 } } }, o);
+      assert.equal(count(), before);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('detected の毎年の項目とも possible_duplicate を出す', () => {
+    const db = freshDb();
+    try {
+      const det = createItem(db, { ...manual, name: '予定納税（明細から）', amount: 50_000, recurrence: 'yearly', anchorDate: '2025-07-25', origin: 'detected' }, user, T0);
+      const { run } = setup(db);
+      const est = byKey(db).get('income_tax:2026:prepay1')!;
+      assert.deepEqual(run.warnings.filter((w) => w.kind === 'possible_duplicate' && w.key === 'income_tax:2026:prepay1'), [{ kind: 'possible_duplicate', key: 'income_tax:2026:prepay1', item_ids: [est.id, det.id] }]);
     } finally {
       db.close();
     }
