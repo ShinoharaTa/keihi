@@ -73,9 +73,10 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 
 - card の出金はチャージの相手としてだけ組む。card の入金（返金）は組まない。
 - 有効な組に入っている明細は候補にしない。最新が rejected の組は作らない。候補数は rejected の組も含めて数える（外しても別の相手を自動で選ばない）。
-- 候補は `active = 1` の口座の明細だけ。有効な組・rejected の組も、両側（card_settlement は出金側）が `active = 1` の口座の明細のものだけを数える（無効にした口座に残る同じ明細の複製や、それとの組で新しい口座の明細が組めなくならないように）。
+- 候補は `active = 1` の口座の明細だけ。検出で見る有効な組・rejected の組も、両側（card_settlement は出金側）が `active = 1` の口座の明細のものだけを数える（無効にした口座に残る同じ明細の複製や、それとの組で新しい口座の明細が組めなくならないように）。
+- 除外のほうは、少なくとも片側が `active = 1` の口座の明細の組を残す。無効な口座との本物の振替（口座を閉じるときの最後の資金移動など）が、active な側で収入・支出に化けないように。同じ明細が旧・新の 2 組に入っても、除外は明細の集合なので二重には数えない。
 - 組を外す関数 `rejectTransfer`（state=rejected を追記、監査 `transfer.rejected`）はあるが、**HTTP API はまだ無い**。
-- **除外**の定義: 有効な組（最新が active、両側が `active = 1` の口座の明細）の出金側と入金側の明細（`excludedFromCashflow`）。月次集計と周期検出から除く。資金繰りの予定外の目安では、対象口座どうしの組だけを除く（§8）。
+- **除外**の定義: 有効な組（最新が active、少なくとも片側が `active = 1` の口座の明細）の出金側と入金側の明細（`excludedFromCashflow`）。月次集計と周期検出から除く。資金繰りの予定外の目安では、対象口座どうしの組だけを除く（§8）。
 
 ## 5. タグとカテゴリ（`src/bank/tags.ts`、T108・V5・V10）
 効くタグの決定順（読むたびに計算）:
@@ -93,7 +94,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 予定台帳の category（tax / insurance / car / other / income）はこれとは別の一覧。
 
 ## 6. 月次集計（`src/bank/summary.ts`、T110）
-- その月の、使っている口座（active=1）の明細から、§4 の除外（active な口座同士の有効な組の両側）を除いて合計する。`include_in_cashflow` では絞らない。active=0 の口座は by_account にも出さない。
+- その月の、使っている口座（active=1）の明細から、§4 の除外を除いて合計する。`include_in_cashflow` では絞らない。active=0 の口座は by_account にも出さないので、`by_account[].active` は常に true（互換のため残している）。
 - 出すもの: by_account（income・expense・net と include_in_cashflow・active）、by_category（固定順、未分類は最後）、by_tag、total。
 - `excluded`: kind ごとに「その月に除いた明細」の行数・入金・出金。月をまたぐ組でも、各月で「除く前の合計 = total + excluded」が成り立つ。
 - カードは利用分（カード口座の出金）を数え、銀行の引き落としを除く。**引き落とし口座とパターンを設定しないと両方が支出に入る（二重計上）。**

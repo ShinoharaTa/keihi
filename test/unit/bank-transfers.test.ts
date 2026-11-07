@@ -15,6 +15,8 @@ import {
   matchesSettlementPattern,
   rejectTransfer,
 } from '../../src/bank/transfers.ts';
+import { listLatestTransferLinks } from '../../src/bank/transferRepo.ts';
+import { monthlySummary } from '../../src/bank/summary.ts';
 
 const now = '2026-11-06T00:00:00.000Z';
 let root: string;
@@ -324,6 +326,41 @@ describe('無効にした口座（active=0）の明細', () => {
     insertBankTxn(db, { accountId, txnDate, amount, side, description: desc, descriptionNorm: desc, now }).id;
   const mkOld = (db: Db, name: string) => insertAccount(db, { provider: 'fake', name, kind: 'bank', source: 'csv', now }).id;
 
+  test('出金側が無効な口座の引き落としは、検出の linked にも除外にも入らない', () => {
+    const { db, acc } = setup();
+    try {
+      const oldA = mkOld(db, '旧銀行A');
+      updateAccountSettings(db, acc.card, { cardSettlementAccountId: oldA, cardSettlementPattern: 'ﾐﾂｲｽﾐﾄﾓ' }, now);
+      const settle = addOne(db, oldA, '2026-10-27', 48210, 'expense', 'ｶ-ﾄﾞ ﾐﾂｲｽﾐﾄﾓ');
+      const [l] = detectTransfers(db, { windowDays: 3, now: new Date(now) });
+      assert.deepEqual([l!.out_txn_id, l!.in_txn_id, l!.kind], [settle, null, 'card_settlement']);
+      updateAccountSettings(db, oldA, { active: false }, now);
+      assert.deepEqual(listLatestTransferLinks(db), []);
+      assert.deepEqual(excludedFromCashflow(db), new Set());
+    } finally {
+      db.close();
+    }
+  });
+
+  test('入金側だけ無効な組は、検出の linked には入らないが除外には残る', () => {
+    const { db, acc } = setup();
+    try {
+      const oldB = mkOld(db, '旧銀行B');
+      const [o] = addTxns(db, acc, [['A', '2026-10-01', 30000, 'expense']]);
+      const i = addOne(db, oldB, '2026-10-01', 30000, 'income');
+      assert.equal(detectTransfers(db, { windowDays: 3, now: new Date(now) }).length, 1);
+      updateAccountSettings(db, oldB, { active: false }, now);
+      assert.deepEqual(listLatestTransferLinks(db), []);
+      assert.deepEqual(excludedFromCashflow(db), new Set([o, i]));
+      assert.equal(listActiveTransfers(db).length, 1);
+      // linked に入らないので、active な口座の同額の入金と組める。
+      const [c] = addTxns(db, acc, [['C', '2026-10-01', 30000, 'income']]);
+      assert.deepEqual(detectTransfers(db, { windowDays: 3, now: new Date(now) }).map((l) => [l.out_txn_id, l.in_txn_id]), [[o, c]]);
+    } finally {
+      db.close();
+    }
+  });
+
   test('無効な口座に同じ日付・同額の複製があっても、active な口座同士が 1 対 1 で組になる', () => {
     const { db, acc } = setup();
     try {
@@ -352,13 +389,17 @@ describe('無効にした口座（active=0）の明細', () => {
       assert.deepEqual([first!.out_txn_id, first!.in_txn_id, first!.kind], [oldOut, charge, 'charge']);
 
       updateAccountSettings(db, oldA, { active: false }, now);
-      // 無効にした口座との組は除外に数えない。
-      assert.deepEqual(excludedFromCashflow(db), new Set());
-      assert.deepEqual(listActiveTransfers(db), []);
+      // 検出では数えない（片側が無効）が、除外には残る（片側が active）。
+      assert.deepEqual(listLatestTransferLinks(db), []);
+      assert.deepEqual(excludedFromCashflow(db), new Set([oldOut, charge]));
       const [out] = addTxns(db, acc, [['A', '2026-10-01', 5000, 'expense', 'PAYPAY']]);
       const made = detectTransfers(db, { windowDays: 3, now: new Date(now) });
       assert.deepEqual(made.map((l) => [l.out_txn_id, l.in_txn_id, l.kind]), [[out, charge, 'charge']]);
-      assert.deepEqual(excludedFromCashflow(db), new Set([out, charge]));
+      assert.deepEqual(excludedFromCashflow(db), new Set([oldOut, out, charge]));
+      // 同じチャージが 2 つの active な組に入っても、月次の excluded は二重にならない（無効な口座の出金は集計に入らない）。
+      const m = monthlySummary(db, '2026-10');
+      assert.deepEqual(m.excluded.find((e) => e.kind === 'charge'), { kind: 'charge', count: 2, income: 5000, expense: 5000 });
+      assert.deepEqual(m.total, { income: 0, expense: 0, net: 0 });
     } finally {
       db.close();
     }

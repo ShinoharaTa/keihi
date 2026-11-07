@@ -9,6 +9,7 @@
 //   摘要がパターンを含むもの → kind=card_settlement（in_txn_id は NULL。カード側に引き落としの明細は無い）
 // 同じ組で最新の行が rejected なら作らない。active な組に入っている明細は候補にしない（作り直さない）。
 // 候補・active な組・rejected な組は、active な口座の明細だけで数える（無効にした口座の複製や、それとの組を数えない）。
+// 集計から除くほう（excludedFromCashflow）は、少なくとも片側が active な口座の明細の組を残す。
 import { tx, type Db } from '../db/index.ts';
 import { appendAudit } from '../audit.ts';
 import { normalizeVendor } from '../vendors/normalize.ts';
@@ -155,7 +156,7 @@ export function listActiveTransfers(db: Db, range: { from?: string; to?: string 
   return listActiveTransferLinks(db, range);
 }
 
-// 集計から除く明細の ID（有効な組の出金側と入金側。両側が active な口座の明細の組だけ）。月をまたぐ組の入金側も落とさないよう、範囲では絞らない。
+// 集計から除く明細の ID（有効な組の出金側と入金側。少なくとも片側が active な口座の明細の組）。月をまたぐ組の入金側も落とさないよう、範囲では絞らない。
 export function excludedFromCashflow(db: Db): Set<string> {
   const s = new Set<string>();
   for (const l of listActiveTransferLinks(db)) {
