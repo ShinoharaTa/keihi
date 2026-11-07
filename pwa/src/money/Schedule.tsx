@@ -3,11 +3,14 @@
 // 次に この先 12 か月の山（GET /api/scheduled_items/upcoming の期日から、毎月の分を除いて分類別に積む）。
 // 下に台帳（GET /api/scheduled_items?all=1。分類で絞り、次の期日順。停止中は「停止中の n 件も表示」で出す）。
 // ヘッダの「追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」。
+// 先頭に税・保険の見積もりのカード（GET /api/tax/profile・/api/tax/estimates。読めなければ出さない）。見積もりの行（origin = estimate）に「 · 見積」、
+// 手直しした行（pinned）に「 · 手直し」。手直しした行のフォームに「自動計算に戻す」（PATCH pinned: false）。
 // フォームを開いている間は onLock(true) で「戻る」を止める。周期の「3 か月ごと」は追加中の API（古いサーバーは invalid_recurrence で断る）。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, patchJson, postJson } from '../api.ts';
 import { PeakStrip } from './Charts.tsx';
 import { Icon } from './Icons.tsx';
+import { TaxCard } from './Tax.tsx';
 import {
   candidateName,
   candidateNext,
@@ -29,6 +32,7 @@ import {
   NOTIFY_MAX,
   occurrenceCount,
   peakMonths,
+  runText,
   RECURRENCE_LABELS,
   RECURRENCES,
   SCHEDULE_CATEGORIES,
@@ -42,8 +46,11 @@ import {
   type ItemDraft,
   type LedgerFilter,
   type PeakMonth,
+  type RunSummary,
   type ScheduleCategory,
   type ScheduledItem,
+  type TaxProfileResponse,
+  type TaxSummary,
   type Upcoming,
 } from './model.ts';
 import { ScreenHead } from './Money.tsx';
@@ -179,6 +186,8 @@ export function Ledger({
                       <span class={`m-badge b-${it.category}`}>{SCHEDULE_CATEGORY_LABELS[it.category]}</span>
                       {PER[it.recurrence] ?? RECURRENCE_LABELS[it.recurrence]}
                       {it.origin === 'detected' ? ' · 明細から' : ''}
+                      {it.origin === 'estimate' ? ' · 見積' : ''}
+                      {it.pinned ? ' · 手直し' : ''}
                     </span>
                   </span>
                   <span class={it.direction === 'in' ? 'm-lrow-amt m-amt-in' : 'm-lrow-amt'}>
@@ -207,6 +216,7 @@ export function ItemForm({
   onChange,
   onSave,
   onToggle,
+  onUnpin,
   onClose,
 }: {
   draft: ItemDraft;
@@ -215,6 +225,8 @@ export function ItemForm({
   onChange: (d: ItemDraft) => void;
   onSave: () => void;
   onToggle: () => void;
+  // 手直しした見積もりの行を自動計算に戻す。
+  onUnpin?: () => void;
   onClose: () => void;
 }) {
   const set = <K extends keyof ItemDraft>(k: K, v: ItemDraft[K]) => onChange({ ...draft, [k]: v });
@@ -224,6 +236,7 @@ export function ItemForm({
       <h2 id="m-item-form" class="m-h2">
         {editing ? `「${editing.name}」を編集` : '予定を追加'}
       </h2>
+      {editing?.origin === 'estimate' && <p class="m-sub13">金額や日付を直すと、再計算で上書きされなくなります。</p>}
       <div class="m-seg m-seg-3" role="group" aria-label="向き">
         <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
           支出
@@ -292,6 +305,11 @@ export function ItemForm({
           {editing.active ? '停止する' : '再開する'}
         </button>
       )}
+      {editing?.origin === 'estimate' && editing.pinned === 1 && (
+        <button type="button" class="m-btn" disabled={busy} onClick={onUnpin}>
+          自動計算に戻す
+        </button>
+      )}
     </section>
   );
 }
@@ -303,6 +321,7 @@ export function Schedule({
   locked,
   onLock,
   onBack,
+  onTax,
 }: {
   today: string;
   accounts: Account[];
@@ -311,7 +330,10 @@ export function Schedule({
   locked: boolean;
   onLock: (locked: boolean) => void;
   onBack: () => void;
+  // 税・保険の見積もりの設定画面へ。
+  onTax: () => void;
 }) {
+  const [tax, setTax] = useState<TaxSummary | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
   const [items, setItems] = useState<ScheduledItem[] | null>(null);
   const [upcoming, setUpcoming] = useState<Upcoming[]>([]);
@@ -331,11 +353,14 @@ export function Schedule({
 
   // 読み直す。失敗したときだけ msg を書く（書き込みの結果の文を消さない）。
   const load = useCallback(async () => {
-    const [c, s, u] = await Promise.all([
+    const [c, s, u, tp, te] = await Promise.all([
       getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open'),
       getJson<{ items: ScheduledItem[] }>('/api/scheduled_items?all=1'),
       getJson<{ items: Upcoming[] }>(`/api/scheduled_items/upcoming?days=${UPCOMING_DAYS}`),
+      getJson<TaxProfileResponse>('/api/tax/profile'),
+      getJson<{ created_at: string | null }>('/api/tax/estimates'),
     ]);
+    setTax(tp.ok ? { ...tp.data, last_run_at: te.ok ? te.data.created_at : null } : null);
     const failed = [c, s, u].find((r) => !r.ok);
     if (failed && !failed.ok) setMsg(failText(failed.status, failed.body));
     setCands(c.ok ? c.data.candidates : []);
@@ -404,10 +429,24 @@ export function Schedule({
             onChange={(draft) => setForm({ ...form, draft })}
             onSave={() => void save()}
             onToggle={() => form.editing && void setActive(form.editing, !form.editing.active)}
+            onUnpin={() => {
+              const it = form.editing;
+              if (!it) return;
+              void run(patchJson(`/api/scheduled_items/${encodeURIComponent(it.id)}`, { pinned: false }), () => `「${it.name}」を自動計算に戻しました（次の再計算で計算値になります）。`).then((ok) => ok && setForm(null));
+            }}
             onClose={() => setForm(null)}
           />
         ) : (
           <>
+            {tax && (
+              <TaxCard
+                tax={tax}
+                today={today}
+                busy={busy}
+                onOpen={onTax}
+                onRecalc={() => void run(postJson('/api/tax/recalculate', {}), (b) => runText([b as RunSummary], '再計算しました。'))}
+              />
+            )}
             <section class="m-col" aria-labelledby="m-sugg">
               <h2 id="m-sugg" class="m-h2 m-px4">
                 明細から見つけた定期の支払い（{cands.length}）

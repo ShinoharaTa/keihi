@@ -138,7 +138,7 @@ export function CsvAccountForm({
   );
 }
 
-function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
+export function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <label class="m-switchrow">
       <span>

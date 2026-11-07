@@ -1,6 +1,6 @@
 // 見通し（モック Forecast。GET /api/cashflow?months=36、src/cashflow/forecast.ts）。台帳（GET /api/scheduled_items?all=1）で予定の分類を引く。
 // 上から 結論（不足する月 / 足りる。cut_per_month_to_survive があれば「月 n 円減らせば足りる」）→ 警告 → 36 か月の折れ線（残す額の帯・足りない期間・
-// 税金・保険・車の印。押すとその月の行へ）→ 計算の前提 → 月ごとの行（年ごとに折りたたむ。1 年目だけ開く）。
+// 税金・保険・車の印。押すとその月の行へ）→ 計算の前提 → 月ごとの行（年ごとに折りたたむ。1 年目だけ開く。税・保険の見積もりの項目に「 · 見積」）。
 import { useEffect, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
 import { ForecastChart } from './Charts.tsx';
@@ -53,7 +53,8 @@ function YearBlock({ g, marks, flat, open, onToggle }: { g: YearGroup; marks: Mo
                   {mk?.names.map((n) => (
                     <span key={`${n.category}-${n.name}`} class="m-mk">
                       <span class={`mk mk-${n.category}`} />
-                      {n.name} {yen(n.amount)}
+                      {n.name}
+                      {n.estimate ? ' · 見積' : ''} {yen(n.amount)}
                     </span>
                   ))}
                   <span class={m.balance_end < 0 ? 'm-frow-bal m-warn-text' : 'm-frow-bal'}>{yen(m.balance_end)}</span>

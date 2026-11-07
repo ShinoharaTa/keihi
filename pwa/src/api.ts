@@ -25,7 +25,7 @@ export async function getJson<T>(url: string): Promise<{ ok: true; data: T } | {
   }
 }
 
-export async function postJson(url: string, body: unknown, method: 'POST' | 'PATCH' = 'POST'): Promise<{ status: number; body: unknown }> {
+export async function postJson(url: string, body: unknown, method: 'POST' | 'PATCH' | 'PUT' = 'POST'): Promise<{ status: number; body: unknown }> {
   try {
     const res = await fetch(url, {
       method,
@@ -41,6 +41,7 @@ export async function postJson(url: string, body: unknown, method: 'POST' | 'PAT
 }
 
 export const patchJson = (url: string, body: unknown) => postJson(url, body, 'PATCH');
+export const putJson = (url: string, body: unknown) => postJson(url, body, 'PUT');
 
 // multipart で送る（CSV の取り込み）。Content-Type は境界ごとブラウザに付けさせる。
 export async function postForm(url: string, body: FormData): Promise<{ status: number; body: unknown }> {
