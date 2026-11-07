@@ -9,6 +9,8 @@
 // 4'. 明細の同期: sync_bank ジョブを積む（同じく積み増さない。src/bank/sync.ts、T104）。
 // 4''. 周期の検出（src/cashflow/detect.ts、T302）: 予定支出の候補を作る・更新する。sync_bank は後でジョブとして走るので、
 //    ここではその時点（前回の同期まで）の明細で検出する（1 日遅れでよい）。失敗しても daily は失敗にせず、report に {error} を残す。
+// 4'''. 税・保険の見積もりの再計算（src/cashflow/tax/sync.ts、T308）: 毎月 1 日（JST）だけ。tax_profile が無ければ skipped、
+//    1 日でなければ not_due。期間（今日 + 39 か月）が時間とともに伸びるように、POST /api/tax/recalculate と同じ処理を actor = system で。
 // 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
 // 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
@@ -23,6 +25,8 @@ import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import { verifyRemoteReceipts, type RemoteVerifyResult } from '../../backup/verifyRemote.ts';
 import type { RemoteVerifyMode } from '../../config.ts';
 import { detectRecurrences } from '../../cashflow/detect.ts';
+import { getTaxProfile } from '../../cashflow/tax/repo.ts';
+import { recalculate } from '../../cashflow/tax/sync.ts';
 import { refreshPaperStatuses } from '../../deals/paper.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { enqueue } from '../../jobs/queue.ts';
@@ -61,6 +65,7 @@ export type DailyReport = {
   reconcile: { job_id: number; created: boolean } | null;
   sync_bank: { job_id: number; created: boolean } | null;
   detect_recurrences: { created: number; updated: number } | { error: string } | null;
+  tax_recalc: { run_id: string; created: number; updated: number; deactivated: number } | 'skipped' | 'not_due' | null;
   paper_status_changed: number | null;
   remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
@@ -122,6 +127,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       reconcile: null,
       sync_bank: null,
       detect_recurrences: null,
+      tax_recalc: null,
       paper_status_changed: null,
       remote_verify: null,
       needs_attention: 0,
@@ -186,6 +192,15 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       }
     });
 
+    await step('tax_recalc', () => {
+      if (!today.endsWith('-01')) report.tax_recalc = 'not_due';
+      else if (!getTaxProfile(db)) report.tax_recalc = 'skipped';
+      else {
+        const r = recalculate(db, { today, now, actor: 'system' });
+        report.tax_recalc = { run_id: r.run_id, created: r.created, updated: r.updated, deactivated: r.deactivated };
+      }
+    });
+
     await step('paper_status', () => {
       report.paper_status_changed = refreshPaperStatuses(db, now);
     });
@@ -221,6 +236,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             reconcile: report.reconcile,
             sync_bank: report.sync_bank,
             detect_recurrences: report.detect_recurrences,
+            tax_recalc: report.tax_recalc,
             paper_status_changed: report.paper_status_changed,
             remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,

@@ -239,7 +239,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 - 概算で切り捨てるもの: 生命保険料・医療費・寄附金の控除、国保の低所得軽減、住民税の調整控除の厳密計算・非課税限度、事業税の専従者控除・損失繰越、源泉徴収の精算、配偶者控除の所得制限。
 
 ### 14.2 再計算と台帳の同期ルール
-契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year`・`PUT /api/tax` の直後（同じトランザクション。`PUT /api/tax` は保存をすべて終えてから 1 回）。daily では走らせない（rates.ts を更新したリリースの後に 1 回手で叩く）。
+契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year`・`PUT /api/tax` の直後（同じトランザクション。`PUT /api/tax` は保存をすべて終えてから 1 回）。daily ジョブの `tax_recalc` 段が毎月 1 日（JST）に 1 回、tax_profile があれば actor=system で走らせる（無ければ skipped、1 日以外は not_due。report に `{run_id, created, updated, deactivated}`）。時間が進んでも 36 か月先までの項目が切れないようにするため。rates.ts を更新したリリースの後は 1 回手で叩く。
 対象の期間: 今年の 1/1 〜 今日 + 39 か月（36 か月 + 3 か月）。過去の期日も作る（forecast が履歴から予定分を引くので、過去の納付が予定外の中央値に混ざらない）。1 回ごとに tax_estimate_runs に 1 行（inputs_json = profile + years、results_json = 項目・内訳・skipped_pinned）。
 
 | 状況 | 動き | 監査 |
