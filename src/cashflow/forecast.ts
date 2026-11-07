@@ -26,6 +26,7 @@ import {
   txnAccounts,
   type CashflowAccountRow,
   type Direction,
+  type Origin,
   type ScheduledItemRow,
 } from './repo.ts';
 import { nextDueDates } from './schedule.ts';
@@ -35,7 +36,16 @@ export const FORECAST_MAX_MONTHS = 60;
 // 最新残高の as_of_date がこの日数より古い（today − 7 日より前）口座は stale_balance。
 export const STALE_BALANCE_DAYS = 7;
 
-export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string };
+export type ForecastItem = {
+  id: string;
+  name: string;
+  amount: number;
+  direction: Direction;
+  due: string;
+  origin: Origin;
+  estimate_key: string | null;
+  pinned: 0 | 1;
+};
 
 export type ForecastMonth = {
   month: string; // YYYY-MM
@@ -90,7 +100,9 @@ export function median(xs: number[]): number {
 function dueItems(items: ScheduledItemRow[], from: string, to: string): ForecastItem[] {
   const out: ForecastItem[] = [];
   for (const it of items) {
-    for (const due of nextDueDates(it, from, to)) out.push({ id: it.id, name: it.name, amount: it.amount, direction: it.direction, due });
+    for (const due of nextDueDates(it, from, to)) {
+      out.push({ id: it.id, name: it.name, amount: it.amount, direction: it.direction, due, origin: it.origin, estimate_key: it.estimate_key, pinned: it.pinned });
+    }
   }
   out.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
   return out;
