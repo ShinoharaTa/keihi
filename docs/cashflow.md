@@ -199,6 +199,78 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | 振替の組を外す API（rejectTransfer は実装済み） | API なし | T111 の明細画面と一緒に |
 | T109 freee 側のルール（私用を処理済みに） | 未着手 | T003（F17）、V9・V12 |
 | T111 PWA「お金」タブ・T304 資金繰り表の画面 | 進行中（本ブランチには無い） | ― |
-| T306 税額の概算 | 未着手 | 税理士 #7・#9、V15 |
+| T306 税額の概算 | 実装済み（PR1: 所得税・住民税・国保・事業税・国民年金。§14）。PWA の画面（T307e）・消費税・振替納税の日付・明細からの年換算は未実装 | PR2 |
 | P2 MCP（get_cashflow・list_upcoming・list_bank_txns 等） | 未着手 | K1〜K3・V2 |
 | 月次・資金繰りのグラフ | P4 | ― |
+
+## 14. 税・保険の見積もり（`src/cashflow/tax/`、T306・T307 PR1）
+年ごとの所得（前年の確定値 + 今年〜の見込み、手入力）と税プロファイルから、所得税・住民税・国民健康保険税・個人事業税・国民年金の**期日と額を概算**し、予定台帳に `origin = estimate` の項目として入れる。入力が変われば差し替える。目的は「いつ・いくら口座から出るか」を ±1〜2 割で先に知ること（税額の正確さではない）。消費税は PR2（`consumption_mode = 'unset'` なら作らず警告だけ）。自動車税・車検は対象外（周期検出・手入力のまま）。
+
+| ファイル | 中身 |
+|---|---|
+| `src/db/migrations/0008_tax.sql` | tax_profile（id='default' の 1 行）・tax_years（UNIQUE(year)）・tax_estimate_runs（追記専用）。scheduled_items に `estimate_key`（origin=estimate のときだけ、不変）と `pinned`（0/1、origin=estimate のときだけ）、部分 UNIQUE INDEX `(estimate_key) WHERE active = 1 AND estimate_key IS NOT NULL` |
+| `src/cashflow/tax/rates.ts` | 年度別の法定の数値（§14.3）。定義の無い年は前の年の値 |
+| `src/cashflow/tax/engine.ts` | 純関数 `estimate(profile, years, window) → {items, warnings, breakdown}` |
+| `src/cashflow/tax/sync.ts` | 入力の検査・保存（監査 `tax_profile.updated` / `tax_year.updated`）と、台帳への同期（§14.2） |
+| `src/web/routes/tax.ts` | API（§14.4） |
+
+### 14.1 計算
+所得 = 事業所得（青色申告特別控除の後）。tax_years の `business_income` があればそれ、無ければ `revenue − expenses − 青色控除`（負なら 0）。丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨て、端数は 1 期目。期日は名目の日が休日なら翌営業日（`holidays.json` の祝日 + 土日。祝日データの無い年は土日だけ）。
+
+| key（estimate_key） | 決まる入力 | 式 | 期日 | category |
+|---|---|---|---|---|
+| `income_tax:Y:final` | Y の所得・社会保険料（Y が actual で social_insurance_paid があればそれ、無ければ年金 + 国保の見積もりのうち名目の期日が Y 年のもの）+ other_deductions・基礎控除・配偶者/扶養 38 万 × 人数 | 課税所得 → 速算表 → + 復興 2.1% = 申告納税額。Y が actual で income_tax_final があればそれ。− Y の予定納税（actual の prepaid_income_tax があればそれ、無ければ見積もり）。0 以下なら作らない | Y+1 の 3/15 | tax |
+| `income_tax:Y:prepay1`・`prepay2` | Y−1 年分の申告納税額（予定納税基準額） | 15 万以上なら各 1/3 | Y の 7/31・11/30 | tax |
+| `resident:Y:q1`〜`q4` | Y−1 の所得・社会保険料 | (所得 − 社保 − other − 43 万 − 33 万 × 人数) × 10% − 調整控除 2,500 + 均等割 5,000 | 6/30・8/31・10/31・Y+1 の 1/31 | tax |
+| `nhi:Y:p1`〜 | Y−1 の所得・加入人数・40〜64 歳の人数・プリセット | 課税標準 = 所得 − 43 万。区分ごとに 所得割 + 均等割 × 人数（+ 平等割）を 100 円未満切り捨て、上限で抑える。介護分は 40〜64 歳の人数だけ | nhi_first_month（7）から nhi_installments（8）期、毎月末 | insurance |
+| `biz_tax:Y:1`・`2` | Y−1 の青色控除前の所得 | (所得 − 290 万) × biz_tax_rate。biz_tax_rate が NULL か、(所得 − 290 万) が 0 以下なら作らない。1 万円以下は 8 月に一括 | 8/31・11/30 | tax |
+| `pension:F:MM` | pension_mode・pension_addon | monthly: 月額（+ 付加 400）を毎月末。prepay6: 4 月末・10 月末。prepay12: 4 月末。prepay24: 偶数の年度の 4 月末 | 月末 | insurance |
+
+- 入力が無い年: 直近の前の年の所得を繰り越す（内訳に `carried_from`）。住民税・国保・事業税で Y−1 がどこにも無ければ Y の所得で代える（`assumed_prev_year`）。予定納税は前年の申告納税額が要るので代えない。所得が出せない年は警告 `income_missing`。
+- 項目名は「所得税 2026 年分 確定申告（見積）」「住民税 2026 年度 第 1 期（見積）」「国民健康保険税 2026 年度 第 1 期（見積）」「国民年金 2026 年度 4 月分（見積）」の形。
+- 概算で切り捨てるもの: 生命保険料・医療費・寄附金の控除、国保の低所得軽減、住民税の調整控除の厳密計算・非課税限度、事業税の専従者控除・損失繰越、源泉徴収の精算、配偶者控除の所得制限。
+
+### 14.2 再計算と台帳の同期ルール
+契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year` の直後（同じトランザクション）。daily では走らせない（rates.ts を更新したリリースの後に 1 回手で叩く）。
+対象の期間: 今年の 1/1 〜 今日 + 39 か月（36 か月 + 3 か月）。過去の期日も作る（forecast が履歴から予定分を引くので、過去の納付が予定外の中央値に混ざらない）。1 回ごとに tax_estimate_runs に 1 行（inputs_json = profile + years、results_json = 項目・内訳・skipped_pinned）。
+
+| 状況 | 動き | 監査 |
+|---|---|---|
+| key が無い（有効な行が無く、最新の停止した行も pinned でない） | create（origin=estimate、recurrence=once、category は §14.1、account_id = payment_account_id、notify_days_before = 30） | scheduled_item.created actor=system payload.run_id・estimate_key |
+| key があり amount・anchor_date が同じ | 何もしない | — |
+| key があり差がある、pinned=0 | その行を in-place 更新（id は変えない） | scheduled_item.updated actor=system payload.reason='tax_recalc'・run_id |
+| key があり pinned=1 | 触らない。run の `skipped_pinned` に key と「計算値 vs 現在値」 | — |
+| 今回の計算で key が出なくなった（期日が対象の期間にあるもの）、pinned=0 | deactivate | scheduled_item.deactivated actor=system payload.reason='estimate_withdrawn'・run_id |
+| 同上で pinned=1 | 触らない。warnings に `pinned_withdrawn` | — |
+| 人（actor が system 以外）が estimate 項目の name・amount・anchor_date を変える or 止める | 自動で pinned=1（`src/cashflow/schedule.ts` の updateItem / deactivateItem） | 既存の updated / deactivated（changes に pinned） |
+| 人が PATCH `pinned: false` | 次の再計算で上書き対象に戻る | scheduled_item.updated |
+| 同じ category で ±45 日・±10% の manual / detected の有効な項目がある | 作るが warnings に `possible_duplicate`（`item_ids`: [見積もり, 相手]）。自動で消さない | — |
+
+origin は不変なので estimate ↔ manual の変換はしない。手で作った項目を見積もりに置き換えたいときは、manual を止めて再計算する。
+
+### 14.3 法定の数値（2026 年時点）と出典
+| 項目 | 値 | 出典 |
+|---|---|---|
+| 所得税 速算表 | 〜194.9 万 5% / 〜329.9 万 10% −97,500 / 〜694.9 万 20% −427,500 / 〜899.9 万 23% −636,000 / 〜1,799.9 万 33% −1,536,000 / 〜3,999.9 万 40% −2,796,000 / 4,000 万〜 45% −4,796,000 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm |
+| 復興特別所得税 | 基準所得税額 × 2.1%（令和 9 年以後は防衛特別所得税と組み替え。合計率は不変） | 同上 |
+| 基礎控除（所得税） | 令和 7・8 年分: 合計所得 ≤132 万 95 万 / 〜336 万 88 万 / 〜489 万 68 万 / 〜655 万 63 万 / 〜2,350 万 58 万。令和 9 年分〜: ≤132 万 95 万 / 〜2,350 万 58 万。2,350 万超は 48 / 32 / 16 / 0 万 | https://www.nta.go.jp/users/gensen/2025kiso/index.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm |
+| 配偶者・扶養控除（一般） | 所得税 38 万、住民税 33 万 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1180.htm |
+| 青色申告特別控除 | 65 万 / 55 万 / 10 万 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2072.htm |
+| 予定納税 | 基準額 15 万円以上。7 月・11 月に各 1/3 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2040.htm |
+| 住民税（さいたま市） | 所得割 市 8% + 県 2%。均等割 市 3,000 + 県 1,000 + 森林環境税 1,000 = 5,000。基礎控除 43 万。調整控除 2,500（単身で仮置き）。普通徴収 6 月末・8 月末・10 月末・翌 1 月末（令和 8 年度: 6/30・8/31・11/2・2027-02-01） | https://www.city.saitama.lg.jp/001/153/004/002/001/001/p013654.html / https://www.city.saitama.lg.jp/faq/001/001/003/p110417.html / https://www.city.saitama.lg.jp/001/153/004/003/p013060_d/fil/8nennouki.pdf / https://www.pref.tochigi.lg.jp/b07/life/zeikin/zeikin/documents/09r7zeiseikaiseinogaiyou.pdf |
+| 国保（さいたま市 令和 8 年度、プリセット `saitama-city-2026`） | 医療 7.64% + 43,300 上限 67 万 / 支援 2.73% + 14,900 上限 26 万 / 介護（40〜64 歳）2.37% + 16,100 上限 17 万 / 子ども・子育て 0.26% + 1,700 上限 3 万。平等割なし。基礎控除 43 万。8 期 = 7 月末〜翌 2 月末。計算例: 42 歳・所得 300 万 → 409,900 円 | https://www.city.saitama.lg.jp/001/153/002/004/p010020.html / https://www.city.saitama.lg.jp/faq/001/001/003/p110417.html |
+| 個人事業税（埼玉県） | 事業主控除 290 万。第 1 種・第 3 種 5%。8 月・11 月（1 万円以下は 8 月一括） | https://www.pref.saitama.lg.jp/a0209/z-kurashiindex/z-2-4.html |
+| 国民年金 | 2026 年度 17,920 円/月、2027 年度 18,290 円/月。付加 400 円/月。口座振替前納（2026 年度）: 6 か月 106,300 / 1 年 210,530 / 2 年 417,150（2027 年度の前納額は未公表のため 2026 年度の値を使う） | https://www.nenkin.go.jp/service/kokunen/hokenryo/zenno.html / https://www.city.saitama.lg.jp/001/153/003/005/p082987.html |
+
+### 14.4 API（すべて認証の後。書き込みは監査に残す）
+| メソッド・パス | 引数 | 応答の要点 |
+|---|---|---|
+| GET /api/tax/profile | ― | `{profile（無ければ null。revenue_includes_tax・pension_addon・spouse は boolean、nhi_rates_json はオブジェクト）, years, presets: [{id, label}], missing}`。missing は `profile`・`actual:<前年>`・`estimate:<今年>`・`consumption_mode` |
+| PUT /api/tax/profile | プロファイルの列（知らないキーは 400。無いキーは今の値、プロファイルが無ければ PR1 の既定値） | `{profile, run}`。同じトランザクションで再計算 |
+| PUT /api/tax/years/:year | kind（新しい年は必須）・revenue・expenses・business_income・social_insurance_paid・income_tax_final・consumption_tax_final・prepaid_income_tax | `{year, run}`。同上 |
+| POST /api/tax/recalculate | ― | `{run_id, created, updated, deactivated, skipped_pinned[], warnings[]}` |
+| GET /api/tax/estimates | ― | 最新の run の `{run_id, created_at, window, items（kind・year・key・amount・due・lines・income_year・assumed_prev_year・carried_from）, breakdown, skipped_pinned, warnings}`。まだ無ければ run_id: null |
+| PATCH /api/scheduled_items/:id | `pinned`（boolean。estimate 以外は 400 invalid_pinned） | GET /api/scheduled_items の items に estimate_key・pinned が増えた |
+| GET /api/cashflow | ― | months[].items に origin・estimate_key・pinned が増えた。warnings に `tax_profile_missing` / `consumption_tax_mode_unset` |
+
+PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'、revenue_includes_tax=1、biz_tax_rate=NULL、resident_pay_mode='ordinary4'、nhi_preset='saitama-city-2026'、nhi_members=1、nhi_members_40_64=0、nhi_installments=8、nhi_first_month=7、pension_mode='monthly'、pension_addon=0、spouse=0、dependents=0、other_deductions=0、payment_account_id=NULL。

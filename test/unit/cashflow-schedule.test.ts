@@ -113,10 +113,13 @@ describe('0007_recurrence_quarterly のマイグレーション', () => {
     'trigger:scheduled_items_no_delete:scheduled_items',
   ];
 
+  // 0008_tax が scheduled_items に列と索引を足すので、ここでは 0007 まで上げて見る（0008 は cashflow-tax-sync.test.ts）。
+  const upTo7 = () => listMigrations().filter((m) => m.version <= 7);
+
   test('空の DB から上がり、quarterly を入れられる', () => {
     const db = openDb(path.join(root, `${n++}.db`));
     try {
-      assert.ok(migrate(db).includes('0007_recurrence_quarterly.sql'));
+      assert.ok(migrate(db, upTo7()).includes('0007_recurrence_quarterly.sql'));
       assert.deepEqual(integrityCheck(db), []);
       assert.deepEqual(schema(db), WANT_SCHEMA);
       const acc = insertAccount(db, { provider: 'freee', name: '普通預金', kind: 'bank', source: 'csv', now });
@@ -144,7 +147,7 @@ describe('0007_recurrence_quarterly のマイグレーション', () => {
       const beforeCands = db.prepare('SELECT * FROM recurrence_candidates ORDER BY id').all();
       assert.throws(() => createItem(db, { ...base, recurrence: 'quarterly' }, by, T0), /CHECK/);
 
-      assert.deepEqual(migrate(db, ms), ms.filter((m) => m.version > 6).map((m) => m.name));
+      assert.deepEqual(migrate(db, upTo7()), ['0007_recurrence_quarterly.sql']);
       assert.deepEqual(integrityCheck(db), []);
       assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
       assert.deepEqual(schema(db), WANT_SCHEMA);

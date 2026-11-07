@@ -15,6 +15,8 @@
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 //   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。
+//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）を足す。
+//   PATCH /api/scheduled_items/:id は pinned（真偽値。origin = estimate の項目だけ。それ以外は 400 invalid_pinned）も受ける。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
@@ -23,6 +25,7 @@ import { DEFAULT_FORECAST_MONTHS, FORECAST_MAX_MONTHS, buildForecast } from '../
 import type { Config } from '../../config.ts';
 import { acceptCandidate, detectRecurrences, dismissCandidate, type AcceptOverrides } from '../../cashflow/detect.ts';
 import { CANDIDATE_STATES, listRecurrenceCandidateViews, type CandidateState } from '../../cashflow/repo.ts';
+import { cashflowTaxWarnings } from '../../cashflow/tax/sync.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -138,15 +141,14 @@ export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
     const months = q === undefined ? DEFAULT_FORECAST_MONTHS : /^\d+$/.test(q) ? Number(q) : NaN;
     if (!Number.isSafeInteger(months) || months < 1 || months > FORECAST_MAX_MONTHS) return c.json({ error: 'invalid_months' }, 400);
     const cf = deps.config.cashflow;
-    return c.json(
-      buildForecast(deps.db, {
-        today: todayInTokyo(now()),
-        months,
-        unplannedLookbackMonths: cf.unplannedLookbackMonths,
-        reserveMonths: cf.reserveMonths,
-        includeUnplannedIncome: cf.includeUnplannedIncome,
-      }),
-    );
+    const f = buildForecast(deps.db, {
+      today: todayInTokyo(now()),
+      months,
+      unplannedLookbackMonths: cf.unplannedLookbackMonths,
+      reserveMonths: cf.reserveMonths,
+      includeUnplannedIncome: cf.includeUnplannedIncome,
+    });
+    return c.json({ ...f, warnings: [...f.warnings, ...cashflowTaxWarnings(deps.db)] });
   });
 
   return r;
