@@ -689,6 +689,18 @@ describe('税・保険の見積もりの純関数', () => {
     const full = taxSaveBody(taxProfileDraft(null), drafts, { profile: null, years: taxYears });
     assert.deepEqual(Object.keys((full as { profile: object }).profile).length, 14, 'プロファイルが無ければ全部の列を送る（作る）');
     assert.match(taxSaveBody({ ...draft, dependents: 'x' }, drafts, taxData) as string, /扶養/);
+    assert.equal(taxSaveBody({ ...draft, consumption_mode: 'simplified', simplified_class: '' }, drafts, taxData), '簡易課税の事業区分を選んでください。', '事業区分が未選択なら止める');
+    const simpData = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'simplified' as const, simplified_class: 3 } };
+    const simpDraft = taxProfileDraft(simpData.profile);
+    assert.equal(taxSaveBody(simpDraft, drafts, simpData), null);
+    assert.deepEqual(taxSaveBody({ ...simpDraft, consumption_mode: 'standard' }, drafts, simpData), { profile: { consumption_mode: 'standard', simplified_class: null } }, '簡易課税から変えたら事業区分は null');
+    const noClass = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'simplified' as const, simplified_class: null } };
+    assert.deepEqual(taxSaveBody({ ...taxProfileDraft(noClass.profile), consumption_mode: 'exempt' }, drafts, noClass), { profile: { consumption_mode: 'exempt', simplified_class: null } }, '差が無くても null を含める');
+    const actual = drafts.map((d) => (d.year === 2025 ? { ...d, values: { ...d.values, income_tax_final: '190000' } } : d));
+    assert.deepEqual(taxSaveBody(draft, actual, taxData), {
+      years: [{ year: 2025, kind: 'actual', business_income: 3200000, income_tax_final: 190000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }],
+    }, '確定の年は kind: actual と確定の欄だけ');
+    assert.equal(taxSaveBody({ ...draft, nhi_members: ' 1 ' }, drafts, taxData), null, '空白を足しただけなら変えていない');
     assert.match(taxSaveBody(draft, [{ ...drafts[1]!, values: { revenue: '-5' } }], taxData) as string, /2026 年の「売上」/);
   });
   test('結果の 1 行: 件数と警告', () => {
@@ -981,10 +993,14 @@ describe('SSR スナップショット', () => {
     const simp = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'simplified', simplified_class: '' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(simp, /aria-pressed="true">簡易課税/);
     assert.doesNotMatch(simp, /<span class="m-sub">未設定<\/span>/);
+    assert.doesNotMatch(simp, /2 割特例は 2026 年分まで/, '簡易課税なら 2 割特例の注記は出さない');
     assert.match(simp, /事業区分[\s\S]*<option value="">選んでください<\/option>[\s\S]*第 1 種 卸売 90%[\s\S]*第 6 種 不動産 40%[\s\S]*売上の入力は税込/);
     const s20 = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'special20' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.doesNotMatch(s20, /事業区分/);
     assert.match(s20, /売上の入力は税込/);
+    assert.match(s20, /2 割特例は 2026 年分まで/);
+    const ex = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'exempt' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.doesNotMatch(ex, /売上の入力は税込|事業区分|2 割特例は 2026 年分まで/, '免税ならトグルも注記も出さない');
     assert.match(form, /<option value="saitama-city-2026">さいたま市 令和 8 年度<\/option>/);
     assert.match(form, /aria-pressed="true">月払い/);
     assert.match(form, /<option value="A1">三井住友 普通<\/option>/);

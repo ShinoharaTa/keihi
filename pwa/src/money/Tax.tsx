@@ -126,7 +126,9 @@ export function TaxForm({
             ))}
           </div>
           {draft.consumption_mode === 'unset' && <span class="m-sub">未設定</span>}
-          <span class="m-sub">2 割特例は 2026 年分まで。2027 年分からは簡易課税か本則を選んでください。</span>
+          {(draft.consumption_mode === 'unset' || draft.consumption_mode === 'special20') && (
+            <span class="m-sub">2 割特例は 2026 年分まで。2027 年分からは簡易課税か本則を選んでください。</span>
+          )}
         </fieldset>
         {draft.consumption_mode === 'simplified' && (
           <label class="m-field-wrap" for="m-tax-class">
@@ -141,7 +143,7 @@ export function TaxForm({
             </select>
           </label>
         )}
-        {draft.consumption_mode !== 'unset' && (
+        {draft.consumption_mode !== 'unset' && draft.consumption_mode !== 'exempt' && (
           <Switch label="売上の入力は税込" checked={draft.revenue_includes_tax} onChange={(v) => set('revenue_includes_tax', v)} />
         )}
         <Switch label="配偶者控除" checked={draft.spouse} onChange={(v) => set('spouse', v)} />
@@ -276,9 +278,12 @@ export function Tax({
 
   const body = data ? taxSaveBody(draft, years, data) : null;
   const error = typeof body === 'string' ? body : null;
+  // 送るものがあれば（入力のまずい所も含めて）変えている。プロファイルがまだ無いときは常に全列を送るので、初期値からの差で見る。
   const dirty =
     data !== null &&
-    (JSON.stringify(draft) !== JSON.stringify(taxProfileDraft(data.profile)) || JSON.stringify(years) !== JSON.stringify(taxYearDrafts(data.years, today)));
+    (data.profile === null
+      ? JSON.stringify(draft) !== JSON.stringify(taxProfileDraft(null)) || JSON.stringify(years) !== JSON.stringify(taxYearDrafts(data.years, today))
+      : body !== null);
   useEffect(() => {
     onLock(dirty);
     return () => onLock(false);

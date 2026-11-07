@@ -444,7 +444,7 @@ exports[`SSR スナップショット > 税・保険の見積もり: カード�
   "<button type=\\"button\\" aria-pressed=\\"true\\">簡易課税</button>",
   "<button type=\\"button\\" aria-pressed=\\"false\\">本則</button>",
   "</div>",
-  "<span class=\\"m-sub\\">2 割特例は 2026 年分まで。2027 年分からは簡易課税か本則を選んでください。</span></fieldset><label class=\\"m-field-wrap\\" for=\\"m-tax-class\\"><span class=\\"m-label\\">事業区分</span><select id=\\"m-tax-class\\" class=\\"m-field\\" value=\\"\\"><option value=\\"\\">選んでください</option><option value=\\"1\\">第 1 種 卸売 90%</option><option value=\\"2\\">第 2 種 小売 80%</option><option value=\\"3\\">第 3 種 製造 70%</option><option value=\\"4\\">第 4 種 その他 60%</option><option value=\\"5\\">第 5 種 サービス 50%</option><option value=\\"6\\">第 6 種 不動産 40%</option></select>",
+  "</fieldset><label class=\\"m-field-wrap\\" for=\\"m-tax-class\\"><span class=\\"m-label\\">事業区分</span><select id=\\"m-tax-class\\" class=\\"m-field\\" value=\\"\\"><option value=\\"\\">選んでください</option><option value=\\"1\\">第 1 種 卸売 90%</option><option value=\\"2\\">第 2 種 小売 80%</option><option value=\\"3\\">第 3 種 製造 70%</option><option value=\\"4\\">第 4 種 その他 60%</option><option value=\\"5\\">第 5 種 サービス 50%</option><option value=\\"6\\">第 6 種 不動産 40%</option></select>",
   "</label>",
   "<label class=\\"m-switchrow\\"><span><b class=\\"m-fs14\\">売上の入力は税込</b></span><input type=\\"checkbox\\" role=\\"switch\\" checked><span class=\\"m-knob\\" aria-hidden=\\"true\\"></span></label>",
   "<label class=\\"m-switchrow\\"><span><b class=\\"m-fs14\\">配偶者控除</b></span><input type=\\"checkbox\\" role=\\"switch\\"><span class=\\"m-knob\\" aria-hidden=\\"true\\"></span></label>",

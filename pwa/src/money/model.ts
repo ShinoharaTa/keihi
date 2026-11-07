@@ -1049,10 +1049,12 @@ export function taxProfileBody(d: TaxProfileDraft): Record<string, unknown> | st
   if (typeof m4064 !== 'number' || m4064 > members) return '40〜64 歳の人数は加入人数以下で入れてください。';
   if (typeof deps !== 'number' || deps > 20) return '扶養の人数は 0〜20 で入れてください。';
   if (other === undefined) return 'iDeCo 等の年額は 0 以上の整数で入れてください。';
+  if (d.consumption_mode === 'simplified' && d.simplified_class === '') return '簡易課税の事業区分を選んでください。';
   return {
     blue_return: d.blue_return,
     consumption_mode: d.consumption_mode,
-    simplified_class: d.simplified_class === '' ? null : Number(d.simplified_class),
+    // 簡易課税のときだけ事業区分を送る（他の方式では null）。
+    simplified_class: d.consumption_mode === 'simplified' ? Number(d.simplified_class) : null,
     revenue_includes_tax: d.revenue_includes_tax,
     biz_tax_rate: d.biz_tax_rate,
     nhi_preset: d.nhi_preset || null,
@@ -1155,6 +1157,8 @@ export function taxSaveBody(
   const cur = data.profile as Record<string, unknown> | null;
   const profile = cur ? Object.fromEntries(Object.entries(body).filter(([k, v]) => JSON.stringify(cur[k] ?? null) !== JSON.stringify(v))) : body;
   const out: { profile?: Record<string, unknown>; years?: Record<string, unknown>[] } = {};
+  // 方式を簡易課税から変えたら、事業区分の null も必ず送る。
+  if ('consumption_mode' in profile && body.consumption_mode !== 'simplified') profile.simplified_class = null;
   if (Object.keys(profile).length > 0) out.profile = profile;
   if (ys.length > 0) out.years = ys.map((y) => ({ year: y.year, ...y.body }));
   return out.profile || out.years ? out : null;
