@@ -122,7 +122,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 
 - 作らない（同じ口座・摘要・周期の候補は状態を問わず数える。ただし system が置き換えで dismissed にしたもの〈dismissed_by = system〉は数えない）:
   - 定額: amount_kind = fixed で金額 ±5% の候補が既にある。同じ口座の active な予定に、同じ名前か「同じ周期で ±5%」のものがある。
-  - 不定額: amount_kind = variable の候補が既にある（金額は問わない。代表値が毎月変わっても作り直さない）。同じ口座の active な予定に、同じ名前か「同じ周期で金額が occurrences の最小〜最大に入る」ものがある。
+  - 不定額: amount_kind = variable の候補が既にある（金額は問わない。代表値が毎月変わっても作り直さない）。同じ口座の active な予定に、同じ名前か「同じ周期で金額が代表値 ±5%」のもの（税の見積もり〈origin = estimate〉は除く）がある。
 - 置き換え: 新しい候補を作ったとき、次の open の候補を dismissed にする（actor=system、dismissed_by=system、`reason: superseded`、`by` = 新しい候補）。人が dismissed にしたもの・accepted のものには触らない。
   - 同じ口座・摘要・周期で、今回のどの列とも合わないもの（値上げ前など）。定額は金額 ±5% で合わせ、不定額は今回も不定額の列があれば合うとみなす。
   - 周期・amount_kind によらず、occurrences の明細（bank_txn_id）が新しい候補と 1 件でも重なるもの（例: 毎月の不定額が採った明細を含む「毎年」の open）。

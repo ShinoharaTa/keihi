@@ -474,6 +474,10 @@ describe('予定の純関数', () => {
     assert.ok(!categoriesFor('out').includes('income'));
     assert.ok(!categoriesFor('in').includes('savings'));
     assert.ok(categoriesFor('in').includes('income'));
+    const d = { ...emptyDraft(TODAY), name: 'テスト積立A', amount: '20000' };
+    assert.equal(draftError({ ...d, direction: 'out', category: 'savings' }), null);
+    assert.equal(draftError({ ...d, direction: 'in', category: 'savings' }), 'この分類はこの向きの予定には使えません。');
+    assert.equal(draftError({ ...d, direction: 'out', category: 'income' }), 'この分類はこの向きの予定には使えません。');
     const sav = scheduled({ id: 'V1', name: 'テスト積立A', category: 'savings', recurrence: 'yearly', amount: 20000 });
     const peaks = peakMonths([up(sav, '2026-12-27')], TODAY);
     assert.deepEqual([peaks[1]!.other, peaks[1]!.total], [20000, 20000]);

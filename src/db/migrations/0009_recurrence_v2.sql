@@ -79,7 +79,7 @@ CREATE TRIGGER recurrence_candidates_immutable BEFORE UPDATE ON recurrence_candi
 WHEN NEW.id IS NOT OLD.id OR NEW.account_id IS NOT OLD.account_id OR NEW.description_norm IS NOT OLD.description_norm
   OR NEW.amount IS NOT OLD.amount OR NEW.interval IS NOT OLD.interval OR NEW.occurrences_json IS NOT OLD.occurrences_json
   OR NEW.created_at IS NOT OLD.created_at OR NEW.amount_kind IS NOT OLD.amount_kind
-BEGIN SELECT RAISE(ABORT, 'recurrence_candidates は state・scheduled_item_id 以外を更新できない'); END;
+BEGIN SELECT RAISE(ABORT, 'recurrence_candidates は state・scheduled_item_id・dismissed_by 以外を更新できない'); END;
 
 CREATE TRIGGER recurrence_candidates_no_delete BEFORE DELETE ON recurrence_candidates
 BEGIN SELECT RAISE(ABORT, 'recurrence_candidates は削除できない'); END;

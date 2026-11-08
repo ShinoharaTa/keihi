@@ -662,26 +662,37 @@ describe('不定額の候補（第 2 版）', () => {
     db.close();
   });
 
-  test('同じ口座の active な予定に、同じ周期で額が明細の最小〜最大に入るものがあれば作らない（止めた項目なら作る）', () => {
-    const mk = (db: Db, A: string, amount: number) =>
-      createItem(
-        db,
-        { name: '電気代', amount, direction: 'out', category: 'other', accountId: A, recurrence: 'monthly', anchorDate: '2026-11-10', endDate: null, notifyDaysBefore: 14, origin: 'manual' },
-        by,
-        T0,
-      );
+  // 代表値は (10000 + 12000) / 2 = 11000。
+  const mkItem = (db: Db, A: string, over: { name?: string; amount?: number; origin?: 'manual' | 'estimate' } = {}) =>
+    createItem(
+      db,
+      { name: '電気代', amount: 11000, direction: 'out', category: 'other', accountId: A, recurrence: 'monthly', anchorDate: '2026-11-10', endDate: null, notifyDaysBefore: 14, origin: 'manual', ...over },
+      by,
+      T0,
+    );
+
+  test('同じ口座の active な予定に同じ名前か、同じ周期で代表値 ±5% のものがあれば作らない（止めた項目なら作る）', () => {
     const { db, A } = fresh();
     variable(db, A, [10000, 13000, 8000, 12000]);
-    mk(db, A, 13001); // 最大を超える
+    const same = mkItem(db, A, { name: 'テストでんき', amount: 50000 });
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
+    deactivateItem(db, same.id, by, T0);
+    const near = mkItem(db, A, { amount: 11550 }); // 代表値の 105%
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
+    deactivateItem(db, near.id, by, T0);
     assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 1);
     db.close();
-    const f = fresh();
-    variable(f.db, f.A, [10000, 13000, 8000, 12000]);
-    const it = mk(f.db, f.A, 8000);
-    assert.equal(detectRecurrences(f.db, { today: TODAY, now: T0 }).created, 0);
-    deactivateItem(f.db, it.id, by, T0);
-    assert.equal(detectRecurrences(f.db, { today: TODAY, now: T0 }).created, 1);
-    f.db.close();
+  });
+
+  test('同じ口座に別の毎月の予定（金額が明細の範囲内）や、代表値 ±5% の税の見積もりがあっても不定額の候補は作る', () => {
+    const { db, A } = fresh();
+    variable(db, A, [10000, 13000, 8000, 12000]);
+    mkItem(db, A, { name: 'テスト回線', amount: 8000 });
+    mkItem(db, A, { name: 'テスト住民税', amount: 12000 });
+    mkItem(db, A, { name: '国民健康保険税（見積）', amount: 11000, origin: 'estimate' });
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
+    assert.deepEqual(listRecurrenceCandidates(db).map((c) => [c.amount_kind, c.amount]), [['variable', 11000]]);
+    db.close();
   });
 
   test('明細が重なる open の毎年の定額は、不定額で置き換える（dismissed_by = system、監査 1 件）', () => {
@@ -887,7 +898,7 @@ describe('0009_recurrence_v2 のマイグレーション', () => {
       assert.throws(() => db.prepare(`UPDATE scheduled_items SET amount_kind = 'rough' WHERE id = ?`).run(manual.id), /CHECK/);
       assert.throws(() => db.prepare('DELETE FROM scheduled_items WHERE id = ?').run(manual.id), /削除できない/);
       assert.throws(() => db.prepare('DELETE FROM recurrence_candidates WHERE id = ?').run(open.id), /削除できない/);
-      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET amount_kind = 'variable' WHERE id = ?`).run(open.id), /state・scheduled_item_id 以外/);
+      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET amount_kind = 'variable' WHERE id = ?`).run(open.id), /state・scheduled_item_id・dismissed_by 以外/);
       assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET dismissed_by = 'agent' WHERE id = ?`).run(human.id), /CHECK/);
       assert.throws(() => db.prepare('UPDATE recurrence_candidates SET scheduled_item_id = ? WHERE id = ?').run('NOPE', accepted.id), /FOREIGN KEY/);
       const objects = db

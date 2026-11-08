@@ -228,24 +228,19 @@ export function listExpenseTxnsForDetect(db: Db, from: string, to: string): Dete
 }
 
 // active な予定項目に、同じ口座で「同じ名前」か「同じ周期で金額の差が tolerancePct% 以内（大きい方が小さい方の 100 + tolerancePct % 以下）」のものがあるか。
+// excludeOrigin を渡すと、金額で合わせる方からその origin の項目を除く（同じ名前の方は除かない）。
 export function hasActiveScheduledItemLike(
   db: Db,
-  a: { accountId: string; name: string; recurrence: Recurrence; amount: number; tolerancePct: number },
+  a: { accountId: string; name: string; recurrence: Recurrence; amount: number; tolerancePct: number; excludeOrigin?: Origin },
 ): boolean {
   const k = 100 + a.tolerancePct;
+  const ex = a.excludeOrigin !== undefined ? ' AND origin <> ?' : '';
   return !!db
     .prepare(
       `SELECT 1 FROM scheduled_items WHERE active = 1 AND account_id = ?
-         AND (name = ? OR (recurrence = ? AND amount * 100 <= ? * ? AND ? * 100 <= amount * ?)) LIMIT 1`,
+         AND (name = ? OR (recurrence = ? AND amount * 100 <= ? * ? AND ? * 100 <= amount * ?${ex})) LIMIT 1`,
     )
-    .get(a.accountId, a.name, a.recurrence, a.amount, k, a.amount, k);
-}
-
-// active な予定項目に、同じ口座で「同じ名前」か「同じ周期で金額が min〜max（両端を含む）」のものがあるか（不定額の候補の重複判定）。
-export function hasActiveScheduledItemWithin(db: Db, a: { accountId: string; name: string; recurrence: Recurrence; min: number; max: number }): boolean {
-  return !!db
-    .prepare('SELECT 1 FROM scheduled_items WHERE active = 1 AND account_id = ? AND (name = ? OR (recurrence = ? AND amount BETWEEN ? AND ?)) LIMIT 1')
-    .get(a.accountId, a.name, a.recurrence, a.min, a.max);
+    .get(a.accountId, a.name, a.recurrence, a.amount, k, a.amount, k, ...(a.excludeOrigin !== undefined ? [a.excludeOrigin] : []));
 }
 
 // 状態を変える（accepted なら台帳の項目を結ぶ）。dismissed にするときは dismissedBy に却下した主体を渡す。候補が無ければ null。

@@ -233,10 +233,10 @@ describe('0006_cashflow の制約', () => {
       ['created_at', 'x'],
       ['id', 'Z'],
     ] as [string, string | number][]) {
-      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET ${col} = ? WHERE id = ?`).run(v, c.id), /state・scheduled_item_id 以外/, col);
+      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET ${col} = ? WHERE id = ?`).run(v, c.id), /state・scheduled_item_id・dismissed_by 以外/, col);
     }
     const acc2 = insertAccount(db, { provider: 'freee', name: 'カード', kind: 'card', source: 'csv', now }).id;
-    assert.throws(() => db.prepare('UPDATE recurrence_candidates SET account_id = ? WHERE id = ?').run(acc2, c.id), /state・scheduled_item_id 以外/);
+    assert.throws(() => db.prepare('UPDATE recurrence_candidates SET account_id = ? WHERE id = ?').run(acc2, c.id), /state・scheduled_item_id・dismissed_by 以外/);
     assert.throws(() => db.prepare('DELETE FROM recurrence_candidates WHERE id = ?').run(c.id), /削除できない/);
 
     const item = createItem(db, base, by, T0);

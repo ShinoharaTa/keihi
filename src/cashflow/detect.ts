@@ -16,7 +16,6 @@ import { tx, type Db } from '../db/index.ts';
 import {
   getRecurrenceCandidate,
   hasActiveScheduledItemLike,
-  hasActiveScheduledItemWithin,
   insertRecurrenceCandidate,
   listExpenseTxnsForDetect,
   listRecurrenceCandidates,
@@ -259,7 +258,7 @@ const SUPERSEDE_ACTOR = 'system';
 // 作らないもの（同じ口座・摘要・周期の候補は状態を問わず数える。ただし system が置き換えで dismissed にしたもの〈dismissed_by = system〉は数えない）:
 //   - 定額: amount_kind = fixed で金額が ±5% 以内の候補がある。同じ口座の active な予定項目に、同じ名前（= 正規化摘要）か、同じ周期で金額が ±5% 以内のものがある。
 //   - 不定額: amount_kind = variable の候補がある（代表値が変わっても作り直さない）。同じ口座の active な予定項目に、同じ名前か、
-//     同じ周期で金額が occurrences の最小〜最大に入るものがある。
+//     同じ周期で金額が代表値 ±5% 以内のもの（origin = estimate は除く）がある。
 // 新しい候補を作ったとき、次の open の候補を dismissed にする（actor = system、dismissed_by = system、payload {reason: 'superseded', by}）。updated はその件数。
 //   - 同じ口座・摘要・周期で、今回の検出のどの列とも合わないもの（値上げ前など）。定額は金額 ±5% で、不定額は今回も不定額の列があれば合うとみなす
 //   - 周期・金額の種類によらず、occurrences の明細（bank_txn_id）が新しい候補と 1 件でも重なるもの
@@ -279,9 +278,9 @@ export function detectRecurrences(db: Db, opts: { today: string; lookbackMonths?
       const counted = existing.filter((c) => c.dismissed_by !== SUPERSEDE_ACTOR && c.amount_kind === d.amountKind);
       if (d.amountKind === 'variable') {
         if (counted.length > 0) continue;
-        const amounts = d.occurrences.map((o) => o.amount);
-        const range = { min: Math.min(...amounts), max: Math.max(...amounts) };
-        if (hasActiveScheduledItemWithin(db, { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, ...range })) continue;
+        // 代表値 ±5% で合わせる。税の見積もり（origin = estimate）は額が近くても別物なので数えない。
+        const like = { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT };
+        if (hasActiveScheduledItemLike(db, { ...like, excludeOrigin: 'estimate' })) continue;
       } else {
         if (counted.some((c) => sameAmount(c.amount, d.amount))) continue;
         if (hasActiveScheduledItemLike(db, { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT })) {

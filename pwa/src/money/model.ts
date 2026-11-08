@@ -213,7 +213,7 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_end_date: '終わりの日が正しくありません。',
   invalid_notify_days_before: '知らせる日数は 0〜365 で入れてください。',
   end_before_anchor: '終わりの日は最初の支払日より後にしてください。',
-  invalid_category_for_direction: '支出の予定に「収入」の分類は付けられません。',
+  invalid_category_for_direction: 'この分類はこの向きの予定には使えません。',
   invalid_recurrence: '周期が正しくありません（「3 か月ごと」はサーバーの更新後に使えます）。',
   invalid_pattern: '摘要の文字が正しくありません。',
   invalid_card_settlement_account_id: '引落元の口座が正しくありません。',
@@ -465,6 +465,7 @@ export function draftError(d: ItemDraft): string | null {
   const n = notifyOf(d.notify_days_before);
   if (n === null || n > NOTIFY_MAX) return ERROR_TEXT.invalid_notify_days_before!;
   if (d.direction === 'out' && d.category === 'income') return ERROR_TEXT.invalid_category_for_direction!;
+  if (d.direction === 'in' && d.category === 'savings') return ERROR_TEXT.invalid_category_for_direction!;
   return null;
 }
 

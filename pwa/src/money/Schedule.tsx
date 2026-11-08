@@ -251,7 +251,7 @@ export function ItemForm({
         <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
           支出
         </button>
-        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' ? 'income' : draft.category })}>
+        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' || draft.category === 'savings' ? 'income' : draft.category })}>
           収入
         </button>
       </div>
