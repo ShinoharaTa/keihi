@@ -2,12 +2,20 @@
 // 上に 期間 と「未設定だけ（n）」の 1 タップ絞り込み、口座・タグ・カテゴリ・検索は折りたたむ。絞り込みを変えたら cursor を捨てて読み直す。応答は連番で古いものを捨てる。
 // 行の右端のタグを押すと 事業 ⇄ 私用（未設定は事業）をその場で保存（POST /api/bank_txns/:id/tag。押した行だけ busy）。行を押すとタグ付けシート（暗幕つき）。
 // シート: 事業/私用/未設定・カテゴリ 12 種・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
-// 「保存して閉じる」「保存して次の未設定へ」。描画だけの部品（TxnFilters・TxnList・TagSheet）は SSR のスナップショットで試す。
+// 「保存して閉じる」「保存して次の未設定へ」。
+// 照合（docs/cashflow.md §15）: 行の右に証憑の印（receiptMark）。シートを開いたら GET /api/bank_txns/:id/matches を読み、支出なら「証憑」の段
+// （紐付いた証憑と「外す」・候補（押すと紐付け）・撮影タブへ）。紐付け/解除の後は読み直して行の印も差し替える（applyMatches）。
+// 経費の一覧から来た絞り込み（side・excluded・vendor_key・receipt）は上に 1 つのピルで出し、押すと外す。描画だけの部品（TxnFilters・TxnList・TagSheet）は SSR のスナップショットで試す。
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { getJson, postJson } from '../api.ts';
 import { Icon } from './Icons.tsx';
 import {
+  applyMatches,
   applyRuleLocally,
+  docLine,
+  expenseFilterText,
+  linkedText,
+  receiptMark,
   countLabel,
   applyTag,
   categoryLabel,
@@ -26,6 +34,7 @@ import {
   TAG_LABELS,
   TAG_ORDER,
   TEXT_MAX,
+  toggleUnset,
   txnIncome,
   txnsUrl,
   txnSummary,
@@ -35,6 +44,7 @@ import {
   yen,
   type Account,
   type Categories,
+  type Matches,
   type Tag,
   type TagResult,
   type Txn,
@@ -74,7 +84,8 @@ export function TxnFilters({
   onExpand: (v: boolean) => void;
 }) {
   const more = [f.accountId, f.tag && f.tag !== 'unset' ? f.tag : '', f.category, f.q.trim()].filter((x) => x !== '').length;
-  const month = f.period === 'month' && f.month;
+  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : undefined;
+  const exp = expenseFilterText(f);
   return (
     <div class="m-filters">
       <div class={month ? 'm-seg m-seg-5' : 'm-seg m-seg-4'} role="group" aria-label="期間">
@@ -85,12 +96,18 @@ export function TxnFilters({
         ))}
         {month && (
           <button type="button" aria-pressed="true">
-            {f.month}
+            {month}
           </button>
         )}
       </div>
       <div class="m-pills">
-        <button type="button" class="m-pill m-pill-dashed" aria-pressed={f.tag === 'unset'} onClick={() => onChange({ ...f, tag: f.tag === 'unset' ? '' : 'unset' })}>
+        {exp && (
+          <button type="button" class="m-pill" aria-pressed="true" aria-label={`${exp}。押すと外す`} onClick={() => onChange({ ...f, side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined })}>
+            {exp}
+            <Icon name="close" size={16} />
+          </button>
+        )}
+        <button type="button" class="m-pill m-pill-dashed" aria-pressed={f.tag === 'unset'} onClick={() => onChange(toggleUnset(f))}>
           未設定だけ{unsetCount ? `（${unsetCount}）` : ''}
         </button>
         <button type="button" class="m-pill" aria-expanded={expanded} aria-controls="m-txn-more" onClick={() => onExpand(!expanded)}>
@@ -146,6 +163,7 @@ export function TxnFilters({
 const TAG_NEXT_LABEL = (t: Tag) => `タグ: ${TAG_LABELS[t]}。押すと${TAG_LABELS[nextTag(t)]}に切り替え`;
 
 function TxnRow({ t, cats, busy, onOpen, onToggle }: { t: Txn; cats: Categories | null; busy: boolean; onOpen: (t: Txn) => void; onToggle: (t: Txn) => void }) {
+  const mark = receiptMark(t);
   return (
     <li class={t.excluded ? 'm-txn m-txn-ex' : 'm-txn'}>
       <button type="button" class="m-txn-main" onClick={() => onOpen(t)}>
@@ -165,6 +183,7 @@ function TxnRow({ t, cats, busy, onOpen, onToggle }: { t: Txn; cats: Categories 
             <span class="m-cat">{categoryLabel(cats, t.category)}</span>
           )}
           {t.tag_source === 'rule' && <span>ルール</span>}
+          {mark && <span class={`m-rc m-rc-${mark.kind}`}>{mark.label}</span>}
         </span>
       </button>
       {t.excluded ? (
@@ -240,6 +259,62 @@ export function TxnList({
   );
 }
 
+function DocRow({ d }: { d: Matches['links'][number]['document'] }) {
+  return (
+    <span class="m-doc-main">
+      {d.thumbnail_url ? <img class="m-doc-thumb" src={d.thumbnail_url} alt="" loading="lazy" /> : <span class="m-doc-thumb">PDF</span>}
+      <span>{docLine(d)}</span>
+    </span>
+  );
+}
+
+// シートの「証憑」の段。紐付いた証憑（外す）→ 候補（押すと紐付け）→ 撮影タブへ。
+function ReceiptSection({
+  matches,
+  busy,
+  onLink,
+  onUnlink,
+  onCapture,
+}: {
+  matches: Matches | 'error' | null;
+  busy: boolean;
+  onLink?: (documentId: string) => void;
+  onUnlink?: (documentId: string) => void;
+  onCapture?: () => void;
+}) {
+  const m = matches && matches !== 'error' ? matches : null;
+  return (
+    <fieldset class="m-fs">
+      <legend>証憑</legend>
+      {matches === null && <p class="m-sub13">読み込み中…</p>}
+      {matches === 'error' && <p class="m-sub13">証憑を読めませんでした。</p>}
+      {m &&
+        m.links.map((l) => (
+          <div key={l.document_id} class="m-doc">
+            <DocRow d={l.document} />
+            <button type="button" class="m-btn" disabled={busy} onClick={() => onUnlink?.(l.document_id)}>
+              外す
+            </button>
+          </div>
+        ))}
+      {m && m.candidates.length > 0 && <span class="m-sub13">候補（押すと紐付けます）</span>}
+      {m &&
+        m.candidates.map((c) => (
+          <button type="button" key={c.document_id} class="m-doc m-doc-cand" disabled={busy} onClick={() => onLink?.(c.document_id)}>
+            <DocRow d={c.document} />
+            <Icon name="plus" size={18} />
+          </button>
+        ))}
+      {m && m.links.length === 0 && m.candidates.length === 0 && <p class="m-sub13">紐付いた証憑も候補もありません。</p>}
+      {onCapture && (
+        <button type="button" class="m-btn m-btn-start" onClick={onCapture}>
+          領収書を撮る・共有で入れる
+        </button>
+      )}
+    </fieldset>
+  );
+}
+
 export type SheetDraft = { tag: Tag; category: string | null; rule: boolean };
 
 export function TagSheet({
@@ -249,9 +324,14 @@ export function TagSheet({
   cats,
   saving,
   error,
+  matches,
+  matchBusy,
   onDraft,
   onSave,
   onClose,
+  onLink,
+  onUnlink,
+  onCapture,
 }: {
   txn: Txn;
   draft: SheetDraft;
@@ -259,9 +339,15 @@ export function TagSheet({
   cats: Categories | null;
   saving: boolean;
   error: string;
+  // 照合（undefined なら「証憑」の段を出さない。null は読み込み中）。
+  matches?: Matches | 'error' | null;
+  matchBusy?: boolean;
   onDraft: (d: SheetDraft) => void;
   onSave: (next: boolean) => void;
   onClose: () => void;
+  onLink?: (documentId: string) => void;
+  onUnlink?: (documentId: string) => void;
+  onCapture?: () => void;
 }) {
   const canRule = draft.tag !== 'unset';
   const what = `${TAG_LABELS[draft.tag]}${draft.category ? ` · ${categoryLabel(cats, draft.category)}` : ''}`;
@@ -331,6 +417,9 @@ export function TagSheet({
             <input type="checkbox" role="switch" checked={draft.rule} disabled={!canRule} onChange={(e) => onDraft({ ...draft, rule: e.currentTarget.checked })} />
             <span class="m-knob" aria-hidden="true" />
           </label>
+          {matches !== undefined && (
+            <ReceiptSection matches={matches} busy={matchBusy === true} onLink={onLink} onUnlink={onUnlink} onCapture={onCapture} />
+          )}
           {error && <p class="m-msg">{error}</p>}
         </div>
         <div class="m-sheet-foot">
@@ -349,7 +438,21 @@ export function TagSheet({
 
 const draftOfTxn = (t: Txn): SheetDraft => ({ tag: t.tag, category: t.category, rule: false });
 
-export function Txns({ today, accounts, cats, initial, onBack }: { today: string; accounts: Account[]; cats: Categories | null; initial?: Partial<TxnFilter>; onBack: () => void }) {
+export function Txns({
+  today,
+  accounts,
+  cats,
+  initial,
+  onBack,
+  onCapture,
+}: {
+  today: string;
+  accounts: Account[];
+  cats: Categories | null;
+  initial?: Partial<TxnFilter>;
+  onBack: () => void;
+  onCapture?: () => void;
+}) {
   const [filter, setFilter] = useState<TxnFilter>(() => ({ ...emptyFilter(), ...initial }));
   const [q, setQ] = useState(filter.q);
   const [expanded, setExpanded] = useState(() => filterCount({ ...filter, tag: filter.tag === 'unset' ? '' : filter.tag }) > 0);
@@ -363,8 +466,11 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
   const [hint, setHint] = useState(() => !seenHint());
   const [sheetErr, setSheetErr] = useState('');
   const [msg, setMsg] = useState('');
+  const [matches, setMatches] = useState<Matches | 'error' | null>(null);
+  const [matchBusy, setMatchBusy] = useState(false);
   const seq = useRef(0);
   const countSeq = useRef(0);
+  const matchSeq = useRef(0);
 
   const load = useCallback(
     async (f: TxnFilter, after: string | null) => {
@@ -398,15 +504,44 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
   useEffect(() => {
     const n = ++countSeq.current;
     void (async () => {
-      const r = await getJson<TxnPage>(txnsUrl({ ...filter, tag: 'unset' }, today, null, 100));
+      const r = await getJson<TxnPage>(txnsUrl({ ...filter, tag: 'unset', receipt: undefined }, today, null, 100));
       if (n !== countSeq.current) return;
       setUnsetCount(r.ok ? countLabel(pageCount(r.data, 100)) : '');
     })();
-  }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, today]);
+  }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, filter.side, filter.excluded, filter.vendorKey, today]);
+
+  // 開いた明細の照合を読む（支出だけ）。読み終える前に別の明細を開いたら古い応答を捨てる。
+  const loadMatches = async (t: Txn): Promise<Matches | null> => {
+    const n = ++matchSeq.current;
+    const r = await getJson<Matches>(`/api/bank_txns/${encodeURIComponent(t.id)}/matches`);
+    if (n !== matchSeq.current) return null;
+    setMatches(r.ok ? r.data : 'error');
+    return r.ok ? r.data : null;
+  };
 
   const openTxn = (t: Txn | null) => {
     setSheetErr('');
     setOpen(t ? { txn: t, draft: draftOfTxn(t) } : null);
+    matchSeq.current++;
+    setMatches(null);
+    if (t && t.side === 'expense') void loadMatches(t);
+  };
+
+  // 紐付け（documentId と linked = true）・解除（false）。終わったら照合を読み直し、行の印を差し替える。
+  const changeMatch = async (documentId: string, linked: boolean) => {
+    if (!open || matchBusy) return;
+    const { txn } = open;
+    const base = `/api/bank_txns/${encodeURIComponent(txn.id)}/matches`;
+    setMatchBusy(true);
+    const r = linked ? await postJson(base, { document_id: documentId }) : await postJson(`${base}/${encodeURIComponent(documentId)}/unlink`, {});
+    setMatchBusy(false);
+    if (r.status !== (linked ? 201 : 200)) {
+      setSheetErr(failText(r.status, r.body));
+      return;
+    }
+    setSheetErr(linked ? linkedText((r.body as { warnings?: string[] }).warnings ?? []) : '');
+    const m = await loadMatches(txn);
+    if (m) setItems((cur) => (cur ? cur.map((t) => (t.id === txn.id ? applyMatches(t, m) : t)) : cur));
   };
 
   const toggle = async (t: Txn) => {
@@ -498,9 +633,14 @@ export function Txns({ today, accounts, cats, initial, onBack }: { today: string
           cats={cats}
           saving={saving}
           error={sheetErr}
+          matches={open.txn.side === 'expense' ? matches : undefined}
+          matchBusy={matchBusy}
           onDraft={(draft) => setOpen({ ...open, draft })}
           onSave={(n) => void save(n)}
           onClose={() => openTxn(null)}
+          onLink={(id) => void changeMatch(id, true)}
+          onUnlink={(id) => void changeMatch(id, false)}
+          onCapture={onCapture}
         />
       )}
     </>

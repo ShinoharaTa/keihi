@@ -23,6 +23,7 @@ import {
   syncErrorCount,
   syncText,
   verdict,
+  waitingText,
   yen,
   type Account,
   type BalanceHistory,
@@ -126,6 +127,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
     .join('・');
   const untagged = o?.untagged_count ?? 0;
   const untaggedText = `${untagged}${o?.untagged_more ? '+' : ''}`;
+  const waiting = o?.receipt_waiting_count ?? 0;
   const trend = d.history ? balanceSeries(d.history.months) : [];
   return (
     <>
@@ -254,6 +256,13 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
           sub={untagged > 0 ? `事業/私用が未設定 ${untaggedText} 件` : '未設定はありません'}
           count={untagged > 0 ? untaggedText : undefined}
           onClick={() => go('txns', untagged > 0 ? { filter: { period: 'all', tag: 'unset' } } : {})}
+        />
+        <NavRow
+          title="経費"
+          sub={waiting > 0 ? waitingText(waiting) : '事業の支出を相手ごとに'}
+          warn={waiting > 0}
+          count={waiting > 0 ? String(waiting) : undefined}
+          onClick={() => go('expenses', waiting > 0 ? { receipt: 'waiting' } : {})}
         />
         <NavRow title="見通し" sub={cf && v ? (cf.first_shortfall_month ? `${cf.first_shortfall_month} に残す額を下回る見込み` : v.title) : '36 か月の残高の見通し'} warn={v?.short} onClick={() => go('forecast')} />
         <NavRow title="予定" sub={next ? `次: ${md(next.due_date)} ${next.name} ${yen(next.amount)}` : '税金・保険などの予定'} onClick={() => go('schedule')} />
