@@ -315,6 +315,19 @@ PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'�
 
 Link は `{bank_txn_id, document_id, state, actor, score, created_at, document: DocBrief, txn: TxnBrief}`、Candidate は `{document_id, score, date_diff, vendor_match, document: DocBrief}`。DocBrief は `{id, status, kind, source, txn_date, amount, vendor, thumbnail_url}`（PDF は thumbnail_url = null）、TxnBrief は `{id, account_name, txn_date, amount, description}`。
 
+### 15.1 経費の一覧（`src/expenses/summary.ts`、GET /api/expenses）
+期間の経費の明細（上の定義。receipt が null でない明細）を月ごと・相手（`description_norm`）ごとに集計する。行の表示と絞り込みは `GET /api/bank_txns?tag=business&side=expense&excluded=0&vendor_key=…` に任せ、ここは合計だけ返す。
+
+| 引数 | 応答 |
+|---|---|
+| `month=YYYY-MM`、または `from=YYYY-MM&to=YYYY-MM`（両端を含む、最大 12 か月） | `{from, to, total: {amount, count, waiting_count, waiting_amount}, months: [{month, amount, count, waiting_count}], vendors: [{vendor_key, label, count, amount, waiting_count, category}]}` |
+
+- months は古い順で、0 件の月も出す。waiting_count は receipt = waiting（領収書待ち）の件数。
+- vendors は amount の多い順（同額は件数の多い順、さらに vendor_key 順）に上位 50 件。残りがあれば最後に「その他」1 行（vendor_key = null・category = null）。
+- label はその相手の最新の明細（txn_date, id が最大）の description（正規化前）。category は期間内で最も多いカテゴリ（同数なら新しい明細のもの、全部未分類なら null）。
+- 400: `month_required`（month も from/to も無い、または from/to の片方だけ）/ `invalid_month`（形式不正）/ `invalid_range`（from > to）/ `range_too_long`（13 か月以上）/ `month_and_range`（month と from/to の両方）。
+- 合計は `bank_txns?tag=business&side=expense&excluded=0` の同じ期間の合計と一致する（active でない口座の明細を除く。bank_txns は口座の active で絞らない）。
+
 ## 16. メールの取り込み（`src/mail/`、0010_mail）
 Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `keihi`）の付いたメールを取り込む。設定の手順は [ops/gmail.md](ops/gmail.md)。
 どのメールを対象にするかは Gmail のフィルタで決める（keihi は送信元の一覧も件名の判定も持たない）。アカウントは `[[mail.accounts]]` で複数。
