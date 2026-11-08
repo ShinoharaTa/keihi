@@ -4,19 +4,23 @@
 // - Provider は config.toml の [provider] kind（既定 freee）と [freee] target（既定 poc）から、最初に要るジョブで 1 回だけ作る
 //   （設定が無くても Provider を使わないジョブは動く）。freee の予算の日の区切りは [freee] day_boundary。
 // - Gemini（[gemini]）も同じく、最初に要るジョブで 1 回だけ作る（no_ai の抽出では作らない）。
+// - Gmail（fetch_mail）はアカウントごとに、最初に要るジョブで 1 回だけ作る（secrets.env の GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET）。
 //
 //   node src/worker/main.ts [--db /path/to.db]
 import { parseArgs } from 'node:util';
 import { createGeminiFromConfig, type Gemini } from '../ai/gemini/client.ts';
 import { matchWindowsOf } from '../bank/match.ts';
-import { loadConfig, requireFreee, type Config } from '../config.ts';
+import { loadConfig, requireFreee, requireGmail, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers, type RunOptions } from '../jobs/worker.ts';
+import { createGmailTokenProvider, gmailTokenPaths, type GmailToken } from '../mail/gmail/auth.ts';
+import { createGmailClient, type GmailClient } from '../mail/gmail/client.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
 import { refreshIfExpiringSoon, TOKEN_URL, TokenStore } from '../providers/freee/auth.ts';
 import { budgetedFetch, createBudget, resetHourJstFor } from '../providers/freee/budget.ts';
 import { createFreeeProvider, freeeTokenPaths, type FreeeProvider } from '../providers/freee/provider.ts';
 import { createDailyHandler } from './handlers/daily.ts';
+import { createFetchMailHandler } from './handlers/fetchMail.ts';
 import { createExtractHandler } from './handlers/extract.ts';
 import { createReconcileHandler } from './handlers/reconcile.ts';
 import { createSendDealHandler } from './handlers/send.ts';
@@ -29,7 +33,17 @@ export type WorkerRuntime = {
   db: Db;
   provider(): FreeeProvider;
   gemini(): Gemini;
+  // アカウントごとの Gmail のクライアント（最初に要るジョブで 1 回だけ作る）。
+  gmail(accountId: string): GmailClient;
 };
+
+// アカウントの Gmail のクライアント。トークンは <data_dir>/gmail-token-<id>.json（client_id / secret は全アカウントで 1 組）。
+export function buildGmailClient(cfg: Config, accountId: string, opts: { fetch?: typeof fetch } = {}): GmailClient {
+  const creds = requireGmail(cfg);
+  const { tokenPath, lockPath } = gmailTokenPaths(cfg.dataDir, accountId);
+  const tokens = createGmailTokenProvider({ store: new TokenStore<GmailToken>(tokenPath, lockPath), creds, fetch: opts.fetch });
+  return createGmailClient({ tokens, fetch: opts.fetch });
+}
 
 // 設定から Provider を組み立てる。fake は開発用（freee を呼ばない。状態はこのプロセスの中だけ）。
 export function buildProvider(cfg: Config, db: Db, opts: { fetch?: typeof fetch } = {}): FreeeProvider {
@@ -65,11 +79,17 @@ export function buildTokenRefresher(cfg: Config, db: Db, opts: { fetch?: typeof 
 export function createRuntime(cfg: Config, db: Db, opts: { fetch?: typeof fetch } = {}): WorkerRuntime {
   let provider: FreeeProvider | null = null;
   let gemini: Gemini | null = null;
+  const gmail = new Map<string, GmailClient>();
   return {
     cfg,
     db,
     provider: () => (provider ??= buildProvider(cfg, db, opts)),
     gemini: () => (gemini ??= createGeminiFromConfig(cfg, { fetch: opts.fetch })),
+    gmail: (id) => {
+      let c = gmail.get(id);
+      if (!c) gmail.set(id, (c = buildGmailClient(cfg, id, opts)));
+      return c;
+    },
   };
 }
 
@@ -111,12 +131,17 @@ export const HANDLERS: Handlers = {
       matchWindows: matchWindowsOf(rt.cfg.bank),
     };
   }),
+  fetch_mail: createFetchMailHandler(() => {
+    const rt = runtime();
+    return { mail: rt.cfg.mail, config: rt.cfg, objectsDir: rt.cfg.objectsDir, client: rt.gmail };
+  }),
   daily: createDailyHandler(() => {
     const rt = runtime();
     return {
       provider: rt.provider,
       providerKind: rt.cfg.provider.kind,
       matchWindows: matchWindowsOf(rt.cfg.bank),
+      mailAccounts: rt.cfg.mail.enabled ? rt.cfg.mail.accounts.map((a) => a.id) : null,
       refreshToken: buildTokenRefresher(rt.cfg, rt.db),
       // 月 1 回の証憑の照合は予算の用途 sync で数える（既定の user ではない）。
       remoteVerify: {

@@ -194,6 +194,7 @@ describe('runBackup（T5-2）', () => {
     for (const e of EXCLUDES) assert.ok(args.join(' ').includes(`--exclude ${e}`), e);
     assert.ok(args.includes('freee-token.json'));
     assert.ok(args.includes('secrets.env'));
+    assert.ok(args.includes('gmail-token-*.json'));
     const targets = args.slice(args.lastIndexOf(EXCLUDES.at(-1)!) + 1);
     assert.deepEqual(targets, [
       path.join(dataDir, 'snapshots', 'keihi-20261017T183000Z.db'),

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { ConfigError, DEFAULT_MAX_UPLOAD_BYTES, dumpConfig, loadConfig, requireFreee, requireGemini } from '../../src/config.ts';
+import { ConfigError, DEFAULT_MAX_UPLOAD_BYTES, dumpConfig, loadConfig, requireFreee, requireGemini, requireGmail } from '../../src/config.ts';
 
 const GEMINI_KEY = 'AIzaTEST-not-a-real-key-0123456789';
 const CLIENT_ID = 'client-id-TEST-123456';
@@ -149,7 +149,7 @@ test('dumpConfig はシークレットを *** にする', async () => {
   const s = dumpConfig(cfg);
   for (const v of [GEMINI_KEY, CLIENT_ID, CLIENT_SECRET]) assert.ok(!s.includes(v));
   const o = JSON.parse(s);
-  assert.deepEqual(o.secrets, { geminiApiKey: '***', freeeClientId: '***', freeeClientSecret: '***' });
+  assert.deepEqual(o.secrets, { geminiApiKey: '***', freeeClientId: '***', freeeClientSecret: '***', gmailClientId: null, gmailClientSecret: null });
   assert.equal(o.freee.pocCompanyId, 123);
 });
 
@@ -244,5 +244,61 @@ describe('[backup] / [retention]', () => {
     ]) {
       assert.throws(() => loadConfig({ configDir: dir2(bad) }), ConfigError, bad);
     }
+  });
+});
+
+describe('[mail]', () => {
+  const load = (toml: string) => loadConfig({ configDir: dir2(toml) });
+  test('既定: 無効、gmail_api、100 通、手がかりあり、アカウント 0 件', () => {
+    assert.deepEqual(load('').mail, { enabled: false, provider: 'gmail_api', maxMessagesPerRun: 100, extractHints: true, accounts: [] });
+  });
+  test('[[mail.accounts]] を 2 件（label の既定は keihi、query の既定は空、since は無ければ null）', () => {
+    const cfg = load(
+      [
+        '[mail]', 'enabled = true', 'max_messages_per_run = 500', 'extract_hints = false',
+        '[[mail.accounts]]', 'id = "personal"',
+        '[[mail.accounts]]', 'id = "work-1"', 'label = "経費"', 'query = "has:attachment"', 'since = "2026-10-01"',
+      ].join('\n'),
+    );
+    assert.deepEqual(cfg.mail, {
+      enabled: true, provider: 'gmail_api', maxMessagesPerRun: 500, extractHints: false,
+      accounts: [
+        { id: 'personal', label: 'keihi', query: '', since: null },
+        { id: 'work-1', label: '経費', query: 'has:attachment', since: '2026-10-01' },
+      ],
+    });
+  });
+  test('provider = "imap" は起動時エラー（mail_provider_not_implemented）', () => {
+    assert.throws(() => load('[mail]\nprovider = "imap"\n'), (e: unknown) => e instanceof ConfigError && /mail_provider_not_implemented/.test(e.message));
+    assert.throws(() => load('[mail]\nprovider = "pop3"\n'), ConfigError);
+  });
+  test('範囲外・不正な値・知らないキーはエラー', () => {
+    for (const t of [
+      '[mail]\nmax_messages_per_run = 0\n',
+      '[mail]\nmax_messages_per_run = 501\n',
+      '[mail]\nenabled = "yes"\n',
+      '[mail]\nlabel = "keihi"\n', // label はアカウントごと
+      '[mail]\nnope = 1\n',
+      '[mail]\naccounts = "x"\n',
+      '[[mail.accounts]]\nlabel = "keihi"\n', // id が無い
+      '[[mail.accounts]]\nid = "a b"\n',
+      `[[mail.accounts]]\nid = "${'a'.repeat(33)}"\n`,
+      '[[mail.accounts]]\nid = "a"\n[[mail.accounts]]\nid = "a"\n',
+      `[[mail.accounts]]\nid = "a"\nlabel = "${'x'.repeat(101)}"\n`,
+      '[[mail.accounts]]\nid = "a"\nlabel = ""\n',
+      `[[mail.accounts]]\nid = "a"\nquery = "${'x'.repeat(501)}"\n`,
+      '[[mail.accounts]]\nid = "a"\nsince = "2026-02-30"\n',
+      '[[mail.accounts]]\nid = "a"\nenabled = true\n',
+    ]) {
+      assert.throws(() => load(t), ConfigError, t);
+    }
+  });
+  test('GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET（dumpConfig では ***）', async () => {
+    const cfg = loadConfig({ configDir: await dir('', 'GMAIL_CLIENT_ID=gid-TEST\nGMAIL_CLIENT_SECRET=gsecret-TEST\n') });
+    assert.deepEqual(requireGmail(cfg), { clientId: 'gid-TEST', clientSecret: 'gsecret-TEST' });
+    const s = dumpConfig(cfg);
+    assert.ok(!s.includes('gsecret-TEST') && !s.includes('gid-TEST'));
+    const none = loadConfig({ configDir: await dir('', '') });
+    assert.throws(() => requireGmail(none), /GMAIL_CLIENT_ID/);
   });
 });

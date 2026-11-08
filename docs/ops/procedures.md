@@ -29,6 +29,8 @@
 |---|---|
 | アップロードの期限が近い / 失敗 | 通信・freee の状態を確かめ、再送。期限を過ぎたら紙原本を保管 |
 | freee の再認可が必要 | `node src/cli/keihi.ts freee auth` |
+| Gmail の再認可が必要（`/api/mail/status` の reauth_required） | `node src/cli/keihi.ts gmail auth <id>`（[gmail.md](gmail.md) §6） |
+| 取り込めなかったメール（`/api/mail/messages?state=attention`） | zip・上限超え・本文だけのメールは、証憑を共有シートで手で入れる |
 | freee 側の取引が変わった・証憑が外れた | freee で内容を確かめ、正しい方に合わせる（keihi は自動で直さない） |
 | 証憑の照合で不一致（remote_sha256_mismatch 等） | freee のファイルボックスで該当の証憑を開き、内容と履歴を確かめる。経緯を §8 の記録に残す |
 
