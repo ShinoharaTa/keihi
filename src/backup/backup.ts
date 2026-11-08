@@ -2,7 +2,7 @@
 // スナップショット → restic backup（最新のスナップショットと manifest、objects/）→ 前回の成功から check_interval_days 以上
 // 経っていれば restic check → 古いローカルのスナップショットを消す（keep_snapshots 個残す）→ 結果を audit に記録。
 // - restic の古いスナップショットは消さない（追記のみ。restic.ts の許可リスト）。
-// - freee-token.json と secrets.env は対象に含めない（パスで確かめた上で、--exclude も付ける）。
+// - freee-token.json・gmail-token-<id>.json と secrets.env は対象に含めない（パスで確かめた上で、--exclude も付ける）。
 // - 失敗しても例外にせず、結果（ok=false）を返して audit に残す。終了コードは呼び出し側が決める。
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
@@ -13,7 +13,7 @@ import type { BackupSettings } from './settings.ts';
 import { pruneSnapshots, takeSnapshot } from './snapshot.ts';
 
 export const RESTIC_TAG = 'keihi';
-export const EXCLUDES = ['freee-token.json', 'secrets.env', '*.env', '.tmp-*'];
+export const EXCLUDES = ['freee-token.json', 'gmail-token-*.json', 'secrets.env', '*.env', '.tmp-*'];
 const DAY_MS = 86_400_000;
 
 export type CheckResult = 'ok' | 'failed' | 'skipped';

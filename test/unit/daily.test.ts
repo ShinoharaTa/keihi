@@ -172,7 +172,7 @@ describe('daily: 対象の絞り込み・部分失敗・再認可', () => {
     assert.equal(jobsOf('reconcile_deals').length, 1);
     r = setting(DAILY_REPORT_KEY);
     assert.deepEqual(r.errors, []);
-    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'detect_recurrences', 'match', 'paper_status', 'remote_verify']);
+    assert.deepEqual(r.skipped_steps, ['token', 'reauth_wake', 'meta_deadline', 'reconcile', 'sync_bank', 'mail', 'detect_recurrences', 'match', 'paper_status', 'remote_verify']);
 
     // 翌日は全部動く。
     const t2 = new Date(T0.getTime() + 86_400_000);
