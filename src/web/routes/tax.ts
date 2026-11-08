@@ -9,6 +9,8 @@
 //   POST /api/tax/recalculate      → 200 RunSummary {run_id, created, updated, deactivated, skipped_pinned[], warnings[]}
 //   GET  /api/tax/estimates        → 200 最新の再計算の結果 {run_id, created_at, window, items（内訳の行つき）, breakdown, skipped_pinned, warnings}
 //        （まだ無ければ run_id: null・items: []）
+//   POST /api/tax/simulate         body {year?, revenue?, expenses?, business_income?, taxable_purchases?, ideco?, kyosai?, marginal_delta?, profile?}
+//        → 200 SimResult（1 年分の税・社保・手取り、限界負担、消費税の方式の比較。保存しない・監査なし。src/cashflow/tax/simulate.ts）/ 400 {error}
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login。台帳への書き込みは actor = system）。今日は Asia/Tokyo の暦日。
 import { Hono, type Context } from 'hono';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
@@ -26,6 +28,7 @@ import {
   saveProfile,
   saveYear,
 } from '../../cashflow/tax/sync.ts';
+import { parseSimBody, simulate } from '../../cashflow/tax/simulate.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -99,6 +102,25 @@ export function taxRoutes(deps: TaxRouteDeps): Hono {
 
   r.get('/tax/estimates', (c) => {
     return c.json(latestEstimates(deps.db) ?? { run_id: null, created_at: null, items: [], breakdown: [], skipped_pinned: [], warnings: [] });
+  });
+
+  // 何も書かない。body が JSON オブジェクトでなければ 400 invalid_body。
+  r.post('/tax/simulate', async (c) => {
+    const text = await c.req.text();
+    let body: unknown = {};
+    if (text !== '') {
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        return c.json({ error: 'invalid_body' }, 400);
+      }
+    }
+    try {
+      const { profile, input } = parseSimBody(deps.db, body, todayInTokyo(now()));
+      return c.json(simulate(profile, input));
+    } catch (e) {
+      return fail(c, e);
+    }
   });
 
   return r;
