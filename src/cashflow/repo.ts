@@ -196,6 +196,17 @@ export function listRecurrenceCandidatesFor(db: Db, accountId: string, descripti
     .all(accountId, descriptionNorm, interval) as RecurrenceCandidateRow[];
 }
 
+// actor が dismissed にした（payload の reason = superseded）候補の id。監査ログから読む。
+export function listSupersededCandidateIds(db: Db, actor: string): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT entity_id FROM audit_log
+        WHERE actor = ? AND action = 'recurrence_candidate.dismissed' AND json_extract(payload_json, '$.reason') = 'superseded'`,
+    )
+    .all(actor) as { entity_id: string }[];
+  return new Set(rows.map((r) => r.entity_id));
+}
+
 export type DetectTxnRow = { id: string; account_id: string; txn_date: string; amount: number; description_norm: string };
 
 // 検出に使う支出の明細（from 〜 to、両端を含む）。口座が active かつ include_in_cashflow のものだけ。口座・摘要・日付の順。
