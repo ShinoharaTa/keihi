@@ -15,6 +15,8 @@
 // - receipt（経費の明細だけ。それ以外は null）: matched（有効な紐付けの証憑が approved / sent / verified）/ pending_review
 //   （有効な紐付けはあるが確認前）/ candidate（候補が 1 件以上）/ waiting（領収書待ち）。
 // - receipt_hint: 経費か unset の支出に有効な紐付けがあるとき、最後に紐付けた証憑の {document_id, status}。
+// - mail_hint: receipt が candidate / waiting の明細に、本文だけのメールの手がかり（mail_messages.hint_*。src/mail/hints.ts）のうち
+//   金額が等しく、手がかりの日を証憑の日として日付の幅に入るもので、日付差（の絶対値）が最小の 1 件。照合の表には入れない。
 import { appendAudit } from '../audit.ts';
 import { DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS, DEFAULT_MATCH_DATE_WINDOW_DAYS } from '../config.ts';
 import { tx, type Db } from '../db/index.ts';
@@ -78,7 +80,15 @@ export type Link = {
   txn: TxnBrief;
 };
 export type Candidate = { document_id: string; score: number; date_diff: number; vendor_match: 0 | 1; document: DocBrief };
-export type ReceiptInfo = { receipt: ReceiptStatus | null; receipt_hint: { document_id: string; status: string } | null };
+export type MailHintView = {
+  mail_message_id: string;
+  account_id: string;
+  received_on: string | null;
+  from_domain: string | null;
+  subject: string | null;
+  order_ref: string | null;
+};
+export type ReceiptInfo = { receipt: ReceiptStatus | null; receipt_hint: { document_id: string; status: string } | null; mail_hint: MailHintView | null };
 
 export class MatchError extends Error {
   readonly status: 400 | 404 | 409 | 422;
@@ -397,10 +407,43 @@ export function runMatchingSafe(
 
 // ---- receipt ----
 
+type MailHintRow = MailHintView & { hint_txn_date: string; hint_amount: number };
+
+// 金額と日付のある手がかり（金額ごと）。
+function loadMailHints(db: Db): Map<number, MailHintRow[]> {
+  const rows = db
+    .prepare(
+      `SELECT id AS mail_message_id, account_id, received_on, from_domain, subject, hint_order_ref AS order_ref, hint_txn_date, hint_amount
+       FROM mail_messages WHERE state = 'body_only' AND hint_amount IS NOT NULL AND hint_txn_date IS NOT NULL ORDER BY id`,
+    )
+    .all() as MailHintRow[];
+  const out = new Map<number, MailHintRow[]>();
+  for (const r of rows) {
+    if (!DATE.test(r.hint_txn_date)) continue;
+    const g = out.get(r.hint_amount);
+    if (g) g.push(r);
+    else out.set(r.hint_amount, [r]);
+  }
+  return out;
+}
+
+function mailHintOf(hints: Map<number, MailHintRow[]>, t: MatchTxn, w: MatchWindows): MailHintView | null {
+  let best: { r: MailHintRow; diff: number } | null = null;
+  for (const r of hints.get(t.amount) ?? []) {
+    const diff = dayDiff(t.txn_date, r.hint_txn_date);
+    if (!inWindow(diff, windowDays(t, w))) continue;
+    if (!best || Math.abs(diff) < Math.abs(best.diff)) best = { r, diff };
+  }
+  if (!best) return null;
+  const { mail_message_id, account_id, received_on, from_domain, subject, order_ref } = best.r;
+  return { mail_message_id, account_id, received_on, from_domain, subject, order_ref };
+}
+
 // 明細 ID → receipt・receipt_hint を返す関数。証憑・組の状態は作るときに 1 回だけ読む（一覧のループで何度も呼ぶ）。
 export function createReceiptResolver(db: Db, windows: MatchWindows = DEFAULT_MATCH_WINDOWS): (txnIds: readonly string[]) => Map<string, ReceiptInfo> {
   const ctx = loadContext(db, windows);
   const excluded = excludedFromCashflow(db);
+  const hints = loadMailHints(db);
   return (txnIds) => {
     const out = new Map<string, ReceiptInfo>();
     const txns = loadTxnsByIds(db, txnIds);
@@ -415,7 +458,8 @@ export function createReceiptResolver(db: Db, windows: MatchWindows = DEFAULT_MA
         if (links.length > 0) receipt = links.some((l) => MATCHED_STATUSES.includes(ctx.docs.get(l.document_id)!.status)) ? 'matched' : 'pending_review';
         else receipt = candidatesOf(ctx, t).length > 0 ? 'candidate' : 'waiting';
       }
-      out.set(t.id, { receipt, receipt_hint: hint });
+      const mailHint = receipt === 'candidate' || receipt === 'waiting' ? mailHintOf(hints, t, windows) : null;
+      out.set(t.id, { receipt, receipt_hint: hint, mail_hint: mailHint });
     }
     return out;
   };

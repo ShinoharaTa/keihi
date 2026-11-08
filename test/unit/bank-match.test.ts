@@ -133,8 +133,8 @@ describe('runMatching（表駆動）', () => {
     const d = doc('2026-10-16', 2345);
     const created = runMatching(db, T0, { windows: W });
     assert.deepEqual(created.map((r) => r.bank_txn_id), [u]);
-    assert.deepEqual(receipt(u), { receipt: null, receipt_hint: { document_id: d, status: 'needs_review' } });
-    assert.deepEqual(receipt(p), { receipt: null, receipt_hint: null });
+    assert.deepEqual(receipt(u), { receipt: null, receipt_hint: { document_id: d, status: 'needs_review' }, mail_hint: null });
+    assert.deepEqual(receipt(p), { receipt: null, receipt_hint: null, mail_hint: null });
   });
 
   test('有効な紐付けを持つ明細・証憑は候補にしない。2 回目は何も作らない。監査は txn_match.auto（摘要・金額なし）', () => {
@@ -155,7 +155,7 @@ describe('有効な紐付け', () => {
     const d = doc('2026-10-15', 1234);
     runMatching(db, T0, { windows: W });
     review(d, { txnDate: '2026-10-15', amount: 1234, vendor: 'カフェテスト' }, 'reject', 'rejected');
-    assert.deepEqual(receipt(t), { receipt: 'waiting', receipt_hint: null });
+    assert.deepEqual(receipt(t), { receipt: 'waiting', receipt_hint: null, mail_hint: null });
   });
 
   test('auto の後に確定で金額が変わったら効かない。confirmed は効き続ける', () => {
@@ -239,5 +239,78 @@ describe('txn_matches は追記専用', () => {
     assert.throws(() => db.prepare('DELETE FROM txn_matches').run(), /追記専用/);
     assert.equal(rows().length, 1);
     assert.equal(rows()[0]!.bank_txn_id, t);
+  });
+});
+
+describe('mail_hint（本文だけのメールの手がかり。src/mail/hints.ts）', () => {
+  let mailN = 0;
+  // 手がかりを抜き出した body_only のメール。送信元・注文番号は架空の値。
+  function mail(hintDate: string | null, hintAmount: number | null, over: { state?: string; orderRef?: string | null } = {}): string {
+    const id = `M${String(++mailN).padStart(4, '0')}`;
+    db.prepare(
+      `INSERT INTO mail_messages (id, account_id, provider, remote_id, from_domain, subject, internal_at, received_on, state, attempts,
+         hint_txn_date, hint_amount, hint_order_ref, hint_extracted_at, created_at, updated_at)
+       VALUES (?, 'personal', 'gmail_api', ?, 'example.com', 'ご注文の確認', ?, '2026-10-16', ?, 0, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, `r${id}`, NOW, over.state ?? 'body_only', hintDate, hintAmount, over.orderRef === undefined ? '123-0000000' : over.orderRef, NOW, NOW, NOW);
+    return id;
+  }
+  const view = (id: string) => ({ mail_message_id: id, account_id: 'personal', received_on: '2026-10-16', from_domain: 'example.com', subject: 'ご注文の確認', order_ref: '123-0000000' });
+
+  // 明細の日 − 手がかりの日（diff）と口座の種別で、付くか。
+  const cases: { name: string; kind: AccountKind; diff: number; amountDelta?: number; want: boolean }[] = [
+    { name: '同じ日・同じ金額 → 付く', kind: 'bank', diff: 0, want: true },
+    { name: '−1 日 → 付く', kind: 'bank', diff: -1, want: true },
+    { name: '−2 日 → 外れる', kind: 'bank', diff: -2, want: false },
+    { name: '銀行 +3 日 → 付く', kind: 'bank', diff: 3, want: true },
+    { name: '銀行 +4 日（W+1）→ 外れる', kind: 'bank', diff: 4, want: false },
+    { name: 'カード +10 日 → 付く', kind: 'card', diff: 10, want: true },
+    { name: 'カード +11 日（W+1）→ 外れる', kind: 'card', diff: 11, want: false },
+    { name: '金額が 1 円違う → 外れる', kind: 'bank', diff: 0, amountDelta: 1, want: false },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      const t = txn(account(c.kind), '2026-10-15', 1234);
+      const m = mail(new Date(Date.UTC(2026, 9, 15 - c.diff)).toISOString().slice(0, 10), 1234 + (c.amountDelta ?? 0));
+      assert.equal(receipt(t).receipt, 'waiting');
+      assert.deepEqual(receipt(t).mail_hint, c.want ? view(m) : null);
+    });
+  }
+
+  test('日付差が最小の 1 件。候補のある明細（candidate）にも付く', () => {
+    const t = txn(account('card'), '2026-10-15', 1234);
+    mail('2026-10-10', 1234);
+    const near = mail('2026-10-14', 1234);
+    mail('2026-10-16', 1234, { orderRef: null }); // −1 日（絶対値 1 で同じ）。先の行を採る
+    doc('2026-10-12', 1234, '別の店');
+    doc('2026-10-13', 1234, '別の店');
+    assert.equal(receipt(t).receipt, 'candidate');
+    assert.deepEqual(receipt(t).mail_hint, view(near));
+  });
+
+  test('紐付いた明細（pending_review）・経費でない明細には付かない。日付・金額の無い手がかり・body_only 以外は使わない', () => {
+    const acc = account('bank');
+    const linked = txn(acc, '2026-10-15', 1234);
+    linkDocument(db, { txnId: linked, documentId: doc('2026-09-01', 9999), user: null, now: T0, windows: W });
+    const priv = txn(account('bank', 'private'), '2026-10-15', 1234);
+    const unset = txn(account('bank', 'unset'), '2026-10-15', 1234);
+    mail('2026-10-15', 1234);
+    assert.equal(receipt(linked).receipt, 'pending_review');
+    assert.equal(receipt(linked).mail_hint, null);
+    assert.equal(receipt(priv).mail_hint, null);
+    assert.equal(receipt(unset).mail_hint, null);
+
+    const t = txn(acc, '2026-10-20', 2222);
+    mail(null, 2222);
+    mail('2026-10-20', null);
+    mail('2026-10-20', 2222, { state: 'ingested' });
+    assert.equal(receipt(t).mail_hint, null);
+  });
+
+  test('一括で引く: 複数の明細に 1 回で付ける', () => {
+    const acc = account('bank');
+    const ids = Array.from({ length: 5 }, (_, i) => txn(acc, `2026-10-1${i}`, 1000 + i));
+    const m = mail('2026-10-12', 1002);
+    const out = receiptStatusBulk(db, ids, W);
+    assert.deepEqual(ids.map((id) => out.get(id)!.mail_hint?.mail_message_id ?? null), [null, null, m, null, null]);
   });
 });

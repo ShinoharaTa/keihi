@@ -23,7 +23,10 @@ export type Txn = {
   // 照合（src/bank/match.ts。古いサーバーには無い）。receipt は経費の明細のときだけ。
   receipt?: ReceiptStatus | null;
   receipt_hint?: { document_id: string; status: string } | null;
+  // 本文だけのメールの手がかり（receipt が candidate / waiting のときだけ。古いサーバーには無い）。
+  mail_hint?: MailHint | null;
 };
+export type MailHint = { mail_message_id: string; account_id: string; received_on: string | null; from_domain: string | null; subject: string | null; order_ref: string | null };
 export type TxnPage = { items: Txn[]; next_cursor: string | null };
 
 export type MonthlySummary = {
@@ -1212,7 +1215,14 @@ export function applyMatches(t: Txn, m: Matches): Txn {
     : m.candidates.length
       ? 'candidate'
       : 'waiting';
-  return { ...t, receipt, receipt_hint };
+  // mail_hint は待ち・候補の明細だけに付く（match.ts）。紐付いたら消す。
+  const mail_hint = receipt === 'candidate' || receipt === 'waiting' ? (t.mail_hint ?? null) : null;
+  return { ...t, receipt, receipt_hint, mail_hint };
+}
+// シートの「証憑」の段の 1 行（mail_hint）。「注文 #… の確認メールあり（11/3、example.com）→ …」。
+export function mailHintText(h: MailHint): string {
+  const meta = [h.received_on ? md(h.received_on) : null, h.from_domain].filter(Boolean).join('、');
+  return `${h.order_ref ? `注文 #${h.order_ref} の` : '注文の'}確認メールあり${meta ? `（${meta}）` : ''}→ 注文履歴から領収書を保存して共有シートで入れてください`;
 }
 // 紐付けの警告（POST /api/bank_txns/:id/matches の warnings。拒否はされない）。
 export const MATCH_WARNINGS: Record<string, string> = { amount_mismatch: '金額が明細と違います', date_out_of_window: '日付が離れています' };

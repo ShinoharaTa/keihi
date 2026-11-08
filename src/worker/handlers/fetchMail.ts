@@ -8,7 +8,9 @@
 // - settings.mail_status_<id> に last_run_at・last_ok_at・last_error・last_internal_at を残す。last_error は種別の文字列だけ
 //   （token_missing / invalid_grant / http_401 / http_429 / http_500 / network / config_error / reauth_required など。errorKind）。
 //   再認可待ちで呼ばなかった回は reauth_required。
+// - [mail] extract_hints = true で gemini があれば、本文だけのメールの手がかりを抜き出す（src/mail/hints.ts）。
 import { appendAudit } from '../../audit.ts';
+import type { Gemini } from '../../ai/gemini/client.ts';
 import { ConfigError, type Config } from '../../config.ts';
 import type { Handler } from '../../jobs/worker.ts';
 import { GmailAuthError, GmailRetryableError, isGmailReauthRequired, setGmailReauthRequired } from '../../mail/gmail/auth.ts';
@@ -22,6 +24,8 @@ export type FetchMailDeps = {
   objectsDir: string;
   // アカウントの Gmail のクライアント（トークンはアカウントごと）。
   client: (accountId: string) => GmailClient;
+  // 手がかりの抽出に使う（[mail] extract_hints = false なら呼ばない）。
+  gemini?: () => Gemini;
   log?: (s: string) => void;
 };
 
@@ -64,10 +68,11 @@ export function createFetchMailHandler(getDeps: () => FetchMailDeps): Handler {
       const r = await fetchMailForAccount({
         db, objectsDir: deps.objectsDir, config: deps.config, now: ctx.now,
         client: deps.client(account.id), account, maxMessages: deps.mail.maxMessagesPerRun,
+        hints: deps.mail.extractHints && deps.gemini ? { gemini: deps.gemini, log } : null,
       });
       const at = ctx.now();
       updateMailStatus(db, account.id, { last_ok_at: at.toISOString(), last_error: null, last_internal_at: lastInternalAt(db, account.id) }, at);
-      log(`fetch_mail ${account.id}: listed=${r.listed} processed=${r.processed} remaining=${r.remaining} documents=${r.documents}`);
+      log(`fetch_mail ${account.id}: listed=${r.listed} processed=${r.processed} remaining=${r.remaining} documents=${r.documents} hint_retries=${r.hint_retries}`);
     } catch (e) {
       const at = ctx.now();
       const last = lastInternalAt(db, account.id);

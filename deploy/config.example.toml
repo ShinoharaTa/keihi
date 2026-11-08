@@ -84,7 +84,7 @@ paid_tier_confirmed = false
 # enabled = false               # false なら daily も手動（POST /api/mail/sync）も取りに行かない
 # provider = "gmail_api"        # "gmail_api" だけ（"imap" は予約。指定すると起動時エラー）
 # max_messages_per_run = 100    # 1 回に取り込む通数（アカウントごと。1〜500）。残りは次回
-# extract_hints = true          # 本文だけのメールから手がかりを抽出する（後の版で使う）
+# extract_hints = true          # 本文だけのメールから手がかり（注文日・金額・注文番号）を Gemini で抜き出し、領収書待ちの明細に出す
 
 # アカウントごとに 1 つ書く。トークンは <data_dir>/gmail-token-<id>.json（`keihi gmail auth <id>` で作る）
 # [[mail.accounts]]

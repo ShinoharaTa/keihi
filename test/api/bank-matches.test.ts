@@ -212,6 +212,21 @@ describe('GET /api/bank_txns の excluded・vendor_key・receipt', () => {
     ] as const) assert.deepEqual(await call('GET', `/api/bank_txns?${q}`, 400), { error }, q);
     await call('GET', `/api/bank_txns?vendor_key=${'a'.repeat(200)}`, 200);
   });
+
+  test('mail_hint: 領収書待ちの明細に、金額が等しく日付の幅に入る注文の確認メールの手がかり', async () => {
+    const a = account('カードA', 'card');
+    const t = txn(a, '2026-10-15', 1234);
+    const other = txn(a, '2026-10-16', 2345);
+    db.prepare(
+      `INSERT INTO mail_messages (id, account_id, provider, remote_id, from_domain, subject, internal_at, received_on, state, attempts,
+         hint_txn_date, hint_amount, hint_order_ref, hint_extracted_at, created_at, updated_at)
+       VALUES ('M1', 'personal', 'gmail_api', 'r1', 'example.com', 'ご注文の確認', ?, '2026-10-08', 'body_only', 0, '2026-10-07', 1234, '123-0000000', ?, ?, ?)`,
+    ).run(NOW, NOW, NOW, NOW);
+    const r = await call<{ items: (Item & { mail_hint: unknown })[] }>('GET', '/api/bank_txns?from=2026-10-01&to=2026-10-31', 200);
+    const by = new Map(r.items.map((i) => [i.id, i]));
+    assert.deepEqual(by.get(t)!.mail_hint, { mail_message_id: 'M1', account_id: 'personal', received_on: '2026-10-08', from_domain: 'example.com', subject: 'ご注文の確認', order_ref: '123-0000000' });
+    assert.equal(by.get(other)!.mail_hint, null);
+  });
 });
 
 describe('GET /api/bank/overview の receipt_waiting_count', () => {

@@ -10,6 +10,8 @@
 //   同じ内容の証憑が既にあれば duplicate（document_id は既存の証憑）。
 // - メールの状態: too_large の添付が 1 つでもあれば too_large（証憑にした添付はそのまま残す）、無ければ証憑にした（か既にある）添付が
 //   あれば ingested、無ければ unsupported → body_only の順。
+// - body_only になった直後に、手がかりの抽出（src/mail/hints.ts。deps.hints があるとき = [mail] extract_hints）を 1 回だけ呼ぶ。
+//   失敗してもメールの状態は変えない（hint_extracted_at を空のまま残し、次回の fetch_mail で取り直す）。
 // - 1 通の取得（4xx）・解析の失敗は state = error（fetch_failed / parse_failed）、attempts + 1 にして投げない（他の通を止めない）。
 //   認可（GmailAuthError）と一時的な失敗（GmailRetryableError）は投げ直す（ジョブの側で扱う）。
 import { appendAudit } from '../audit.ts';
@@ -21,6 +23,7 @@ import { insertDocument, prepareDocument, sanitizeFileName, type PreparedDocumen
 import { sniffMime } from '../ingest/validate.ts';
 import { putObject } from '../storage/objects.ts';
 import { GmailApiError, decodeBase64Url, type GmailClient, type GmailMessage, type GmailPart } from './gmail/client.ts';
+import { bodyTextOf, extractMailHint, type HintDeps } from './hints.ts';
 
 export const MAIL_PROVIDER = 'gmail_api';
 export const MAX_SUBJECT_LENGTH = 1000;
@@ -33,6 +36,8 @@ export type MailIngestDeps = {
   objectsDir: string;
   config: Pick<Config, 'ingest' | 'calendar' | 'deadline'>;
   now: () => Date;
+  // 本文だけのメールの手がかりの抽出（[mail] extract_hints = false なら渡さない）。
+  hints?: HintDeps | null;
 };
 
 export type AttachmentRef = {
@@ -52,6 +57,8 @@ export type ParsedMessage = {
   internalAt: Date;
   receivedOn: string;
   attachments: AttachmentRef[];
+  // 手がかりの抽出に送る本文（hints.ts の bodyTextOf）。
+  body: string | null;
 };
 
 export class MailParseError extends Error {
@@ -124,6 +131,7 @@ export function parseGmailMessage(m: GmailMessage): ParsedMessage {
     internalAt,
     receivedOn: todayInTokyo(internalAt),
     attachments,
+    body: bodyTextOf(payload),
   };
 }
 
@@ -232,7 +240,7 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
 
   const at = deps.now();
   const iso = at.toISOString();
-  return tx(db, () => {
+  const result = tx(db, () => {
     let documents = 0;
     let duplicates = 0;
     for (const p of planned) {
@@ -291,4 +299,6 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
     );
     return { mail_message_id: id, state, documents, duplicates };
   });
+  if (result.state === 'body_only' && deps.hints) await extractMailHint(db, deps.hints, result.mail_message_id, parsed.body, deps.now);
+  return result;
 }
