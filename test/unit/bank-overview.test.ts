@@ -135,6 +135,15 @@ describe('GET /api/bank/overview', () => {
     });
   });
 
+  test('active = 0 の口座の明細は untagged_count と all_income / all_expense に入らない', async () => {
+    const { db, txn, card3 } = setupOverview();
+    txn(card3, '2026-11-03', 4_000, 'expense');
+    const res = await mkApp(db).request('/api/bank/overview', { headers });
+    const o = (await res.json()) as { untagged_count: number; this_month: { all_income: number; all_expense: number } };
+    assert.equal(o.untagged_count, 2);
+    assert.deepEqual([o.this_month.all_income, o.this_month.all_expense], [300_000, 33_000]);
+  });
+
   test('空の DB でも 200（0 と空の配列）', async () => {
     const { db } = base();
     const res = await mkApp(db).request('/api/bank/overview', { headers });

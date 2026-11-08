@@ -5,6 +5,7 @@
 // メールの要対応（mail）はホームの「メールの要対応 n 件」から開く（取り込みが無効なら行を出さない）。
 // onCapture は撮影タブへ移る（明細のシートの「領収書を撮る」）。
 // フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。税・保険の見積もり（tax）は予定から開き、「戻る」で予定に戻る。
+// 税の試算（tax_sim）は予定のカードと見積もりの画面から開き、「戻る」で呼んだ画面（intent.back、既定は予定）に戻る。
 import type { ComponentChildren } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
@@ -18,10 +19,11 @@ import type { Account, Categories, Direction, TxnFilter } from './model.ts';
 import { Monthly } from './Monthly.tsx';
 import { Schedule } from './Schedule.tsx';
 import { Tax } from './Tax.tsx';
+import { TaxSim } from './TaxSim.tsx';
 import { Txns } from './Txns.tsx';
 
-export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'expenses' | 'mail';
-export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string; receipt?: 'waiting' };
+export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail';
+export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string; receipt?: 'waiting'; back?: MoneyView };
 export type Go = (view: MoneyView, intent?: Intent) => void;
 
 // 各画面の上の帯: 「戻る」・題・右端（任意）。
@@ -99,9 +101,12 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
       {view === 'expenses' && <Expenses key={key} today={today} cats={cats} initialWaiting={intent.receipt === 'waiting'} onBack={home} go={go} />}
       {view === 'mail' && <Mail key={key} today={today} onBack={home} />}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
-      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} />}
+      {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} onTaxSim={() => go('tax_sim', { back: 'schedule' })} />}
       {view === 'accounts' && <Accounts key={key} today={today} accounts={accounts} focus={intent.account} locked={locked} onChanged={loadAccounts} onLock={setLocked} onBack={home} />}
-      {view === 'tax' && <Tax key={key} today={today} accounts={accounts} locked={locked} onLock={setLocked} onBack={() => go('schedule')} />}
+      {view === 'tax' && <Tax key={key} today={today} accounts={accounts} locked={locked} onLock={setLocked} onBack={() => go('schedule')} onSim={() => go('tax_sim', { back: 'tax' })} />}
+      {view === 'tax_sim' && (
+        <TaxSim key={key} today={today} backLabel={intent.back === 'tax' ? '見積もりに戻る' : '予定に戻る'} onBack={() => go(intent.back ?? 'schedule')} />
+      )}
     </section>
   );
 }

@@ -1,9 +1,14 @@
-// 周期の検出（docs/mvp-plan-v3.md T302、requirements-v2.md D2・C11）。過去の明細から周期の支出を拾い、予定支出の候補にする。
-// 同じ口座・同じ正規化摘要の支出（振替・カードの引き落とし・チャージと、active でない・資金繰りに入れない口座は除く）を、
-// 金額の差が ±5% 以内のものでまとめ、隣り合う間隔で周期を決める。同じ日・同じ額の明細（2 回線など）は 1 件に畳む。
-// 1 つのまとまりの中では最後の出現日が新しい列を採り、同じ日なら短い周期を採る。最後の出現が古い列（止まった支払い）は採らない。
+// 周期の検出（docs/mvp-plan-v3.md T302、requirements-v2.md D2・C11、docs/cashflow.md §7）。過去の明細から周期の支出を拾い、予定支出の候補にする。
+// 同じ口座・同じ正規化摘要の支出（振替・カードの引き落とし・チャージと、active でない・資金繰りに入れない口座は除く）を見る。同じ日・同じ額の明細（2 回線など）は 1 件に畳む。
+// 明細は「枠」（その周期の何月目か）に当てる。日の最頻値からのずれが −SHIFT_BEFORE〜+SHIFT_AFTER 日なら枠に入る（休日で前後する口座振替）。
+// 枠の差がちょうど周期の月数で続くものを 1 本の列とし、2 段で判定する。
+//   段 1: 金額を見ずに枠で列を作る。列の期間の明細のうち列に入った割合（純度）が PURITY_MIN 未満なら捨てる。金額の段（値上げ）が 2 つまでなら定額（額は最新）。
+//         段が 3 つ以上で、周期に minCountVariable があり回数がそれ以上なら不定額（額は直近 VARIABLE_RECENT 回の中央値を 100 円単位に切り上げ）。
+//   段 2: 段 1 で採った明細を除いた残りを金額 ±5% でまとめ、まとまりごとに枠で列を作る（定期購読と単発の買い物が同じ摘要に混ざる場合）。
+// どちらも最後の出現日が新しい列を採り、同じ日なら短い周期を採る。止まった列（次の予定日から months × 15 + SHIFT_AFTER 日を過ぎた）は採らない。
 // 候補（recurrence_candidates）は人が受け入れると台帳（scheduled_items、origin = detected）に入る。却下したものは同じ条件では出さない。
-// 候補の amount・occurrences_json は 0006_cashflow.sql のトリガで更新できないので、金額が変わったら open の候補を dismissed にして作り直す。
+// 候補の amount・occurrences_json・amount_kind はトリガで更新できないので、金額が変わったら open の候補を dismissed にして作り直す。
+// 却下した主体は dismissed_by に持つ（人 = human、置き換え = system。0009_recurrence_v2.sql）。
 import { appendAudit } from '../audit.ts';
 import { excludedFromCashflow } from '../bank/transfers.ts';
 import { addMonths } from '../calendar/businessDays.ts';
@@ -13,8 +18,10 @@ import {
   hasActiveScheduledItemLike,
   insertRecurrenceCandidate,
   listExpenseTxnsForDetect,
+  listRecurrenceCandidates,
   listRecurrenceCandidatesFor,
   setRecurrenceCandidateState,
+  type AmountKind,
   type Category,
   type DetectTxnRow,
   type Interval,
@@ -26,21 +33,28 @@ import { DEFAULT_NOTIFY_DAYS_BEFORE, ScheduleError, createItem, type By } from '
 export const DEFAULT_LOOKBACK_MONTHS = 26;
 // 金額の差の許容（%）。大きい方が小さい方の 105% 以下なら同じ額とみなす。
 export const AMOUNT_TOLERANCE_PCT = 5;
+// 日の最頻値からのずれの許容（日）。前営業日払い（土日 + 祝日 1）と翌営業日払い（年末年始 12/31〜1/3 + 土日）。
+export const SHIFT_BEFORE = 3;
+export const SHIFT_AFTER = 6;
+// 段 1 の純度の下限。列の最初 −SHIFT_BEFORE 〜 最後 +SHIFT_AFTER 日にある同じ摘要の明細のうち、列に入った割合。
+export const PURITY_MIN = 0.8;
+// 不定額の代表値に使う直近の回数。
+export const VARIABLE_RECENT = 6;
 
 // 周期ごとの条件。短い順に並べる（最後の出現日が同じなら先のものを採る）。
-// 最後の出現から today まで maxDays + floor(maxDays / 2) 日を超えた列は止まったとみなす。
-export const RULES: readonly { interval: Interval; minDays: number; maxDays: number; minCount: number; months: number }[] = [
-  { interval: 'monthly', minDays: 28, maxDays: 31, minCount: 3, months: 1 },
-  { interval: 'bimonthly', minDays: 58, maxDays: 62, minCount: 3, months: 2 },
-  { interval: 'quarterly', minDays: 85, maxDays: 97, minCount: 3, months: 3 },
-  { interval: 'yearly', minDays: 350, maxDays: 380, minCount: 2, months: 12 },
-  { interval: 'biennial', minDays: 715, maxDays: 745, minCount: 2, months: 24 },
+// minCountVariable は不定額（金額の段が 3 つ以上）の列に要る回数。null の周期は不定額を出さない。
+export const RULES: readonly { interval: Interval; months: number; minCount: number; minCountVariable: number | null }[] = [
+  { interval: 'monthly', months: 1, minCount: 3, minCountVariable: 4 },
+  { interval: 'bimonthly', months: 2, minCount: 3, minCountVariable: 3 },
+  { interval: 'quarterly', months: 3, minCount: 3, minCountVariable: null },
+  { interval: 'yearly', months: 12, minCount: 2, minCountVariable: null },
+  { interval: 'biennial', months: 24, minCount: 2, minCountVariable: null },
 ];
 type Rule = (typeof RULES)[number];
 
 export type Occurrence = { date: string; amount: number; bank_txn_id: string };
 
-export type Detected = { accountId: string; descriptionNorm: string; interval: Interval; amount: number; occurrences: Occurrence[] };
+export type Detected = { accountId: string; descriptionNorm: string; interval: Interval; amount: number; amountKind: AmountKind; occurrences: Occurrence[] };
 
 const dayNumber = (d: string) => Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10))) / 86_400_000;
 const cmpDate = (a: DetectTxnRow, b: DetectTxnRow) => (a.txn_date < b.txn_date ? -1 : a.txn_date > b.txn_date ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -49,8 +63,130 @@ export function sameAmount(a: number, b: number): boolean {
   return Math.max(a, b) * 100 <= Math.min(a, b) * (100 + AMOUNT_TOLERANCE_PCT);
 }
 
-// 金額でまとめる（金額の昇順に見て、まとまりの最小の 105% を超えたら次のまとまり）。
-// 各まとまりは日付順で、同じ日・同じ額は 1 件に畳む。まとまりは最後の出現日が新しい順に返す。
+const MONTH_END = 32; // 「月末」の印（日の最頻値を数えるとき、その月の末日は日付によらずこれにまとめる）
+const lastDayOfMonth = (ym: string) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
+const dayKey = (d: string) => (Number(d.slice(8, 10)) === lastDayOfMonth(d.slice(0, 7)) ? MONTH_END : Number(d.slice(8, 10)));
+const withDay = (ym: string, day: number) => `${ym}-${String(Math.min(day, lastDayOfMonth(ym))).padStart(2, '0')}`;
+
+// 日の最頻値（月末は MONTH_END にまとめる）。同数なら新しい日付の日。
+function modeDay(dates: string[]): number {
+  const occ = [...dates].sort().reverse();
+  const counts = new Map<number, number>();
+  let mode = dayKey(occ[0]);
+  for (const d of occ) {
+    const k = dayKey(d);
+    const v = (counts.get(k) ?? 0) + 1;
+    counts.set(k, v);
+    if (v > (counts.get(mode) ?? 0)) mode = k;
+  }
+  return mode;
+}
+
+// 枠の番号 = 年 × 12 + 月（0 始まり）。
+const slotOf = (ym: string) => Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1;
+const ymOfSlot = (s: number) => `${Math.floor(s / 12)}-${String((s % 12) + 1).padStart(2, '0')}`;
+
+// 明細の日付を枠に当てる: 前月・その月・翌月のうち、日 day を当てた日からのずれが −SHIFT_BEFORE〜+SHIFT_AFTER のもの（複数なら |ずれ| が小さい方）。
+// どれにも入らなければ null（枠外）。
+function assignSlot(date: string, day: number): { slot: number; shift: number } | null {
+  const base = slotOf(date.slice(0, 7));
+  let best: { slot: number; shift: number } | null = null;
+  for (const slot of [base - 1, base, base + 1]) {
+    const shift = dayNumber(date) - dayNumber(withDay(ymOfSlot(slot), day));
+    if (shift < -SHIFT_BEFORE || shift > SHIFT_AFTER) continue;
+    if (!best || Math.abs(shift) < Math.abs(best.shift)) best = { slot, shift };
+  }
+  return best;
+}
+
+type SlotRun = { run: DetectTxnRow[]; lastSlot: number; day: number };
+
+// 日付順の列を枠に当て、枠の差がちょうど rule.months で続く部分のうち、minCount 回以上で最後の枠が最も新しいもの。無ければ null。
+// 同じ枠に 2 件あれば |ずれ| が小さい方を入れ、もう 1 件は枠外とみなす。
+function latestSlotRun(seq: DetectTxnRow[], rule: Rule): SlotRun | null {
+  if (seq.length === 0) return null;
+  const day = modeDay(seq.map((t) => t.txn_date));
+  const bySlot = new Map<number, { t: DetectTxnRow; slot: number; shift: number }>();
+  for (const t of seq) {
+    const a = assignSlot(t.txn_date, day);
+    if (!a) continue;
+    const cur = bySlot.get(a.slot);
+    if (!cur || Math.abs(a.shift) < Math.abs(cur.shift)) bySlot.set(a.slot, { t, ...a });
+  }
+  const slotted = [...bySlot.values()].sort((a, b) => a.slot - b.slot);
+  let best: typeof slotted | null = null;
+  let run: typeof slotted = [];
+  for (const s of slotted) {
+    if (run.length > 0 && s.slot - run[run.length - 1].slot !== rule.months) {
+      if (run.length >= rule.minCount) best = run;
+      run = [];
+    }
+    run.push(s);
+  }
+  if (run.length >= rule.minCount) best = run;
+  return best ? { run: best.map((s) => s.t), lastSlot: best[best.length - 1].slot, day } : null;
+}
+
+// 止まった: 次の予定日（最後の枠 + months の月に日を当てた日）から months × 15 + SHIFT_AFTER 日を today が過ぎた。
+const isStale = (r: SlotRun, today: string, rule: Rule) =>
+  dayNumber(today) - dayNumber(withDay(ymOfSlot(r.lastSlot + rule.months), r.day)) > rule.months * 15 + SHIFT_AFTER;
+
+// 純度: 列の最初 −SHIFT_BEFORE 〜 最後 +SHIFT_AFTER 日にある seq の明細のうち、列に入った割合。
+function purity(run: DetectTxnRow[], seq: DetectTxnRow[]): number {
+  const from = dayNumber(run[0].txn_date) - SHIFT_BEFORE;
+  const to = dayNumber(run[run.length - 1].txn_date) + SHIFT_AFTER;
+  return run.length / seq.filter((t) => dayNumber(t.txn_date) >= from && dayNumber(t.txn_date) <= to).length;
+}
+
+// 金額の段ごとの件数: 日付順に見て、段の先頭の額と ±5% で合わなくなったら次の段。
+function levelSizes(run: DetectTxnRow[]): number[] {
+  const sizes = [0];
+  let head = run[0].amount;
+  for (const t of run) {
+    if (!sameAmount(head, t.amount)) {
+      sizes.push(0);
+      head = t.amount;
+    }
+    sizes[sizes.length - 1]++;
+  }
+  return sizes;
+}
+
+// 段 1 の列の金額の種類: 段が 1 つ、または 2 つでどちらも 2 件以上なら定額（1 件だけの段は値上げとみなさない）。
+// 段が 3 つ以上で、周期に minCountVariable があり回数がそれ以上なら不定額。どちらでもなければ null（段 2 に回す）。
+function levelKind(run: DetectTxnRow[], rule: Rule): AmountKind | null {
+  const sizes = levelSizes(run);
+  if (sizes.length === 1 || (sizes.length === 2 && sizes.every((n) => n >= 2))) return 'fixed';
+  if (sizes.length >= 3 && rule.minCountVariable !== null && run.length >= rule.minCountVariable) return 'variable';
+  return null;
+}
+
+// 不定額の代表値: 直近 VARIABLE_RECENT 回（足りなければ全回）の中央値（偶数個は中央 2 つの平均）を 100 円単位に切り上げ。
+export function variableAmount(amounts: number[]): number {
+  const xs = amounts.slice(-VARIABLE_RECENT).sort((a, b) => a - b);
+  const mid = Math.floor(xs.length / 2);
+  const median = xs.length % 2 === 1 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+  return Math.ceil(median / 100) * 100;
+}
+
+type Best = { rule: Rule; run: DetectTxnRow[]; kind: AmountKind };
+
+// 周期ごとに列を作り、kind が null でないもののうち最後の出現日が最も新しい列（同じなら短い周期）。止まった列は採らない。
+function bestRun(seq: DetectTxnRow[], today: string, kind: (run: DetectTxnRow[], rule: Rule) => AmountKind | null): Best | null {
+  let best: Best | null = null;
+  for (const rule of RULES) {
+    const r = latestSlotRun(seq, rule);
+    if (!r || isStale(r, today, rule)) continue;
+    const k = kind(r.run, rule);
+    if (k === null) continue;
+    // 短い順に見ているので、最後の出現日が厳密に新しいときだけ入れ替える。
+    if (!best || r.run[r.run.length - 1].txn_date > best.run[best.run.length - 1].txn_date) best = { rule, run: r.run, kind: k };
+  }
+  return best;
+}
+
+// 金額でまとめる（金額の昇順に見て、まとまりの最小の 105% を超えたら次のまとまり）。各まとまりは日付順。
+// まとまりは最後の出現日が新しい順に返す。
 function clusterByAmount(txns: DetectTxnRow[]): DetectTxnRow[][] {
   const sorted = [...txns].sort((a, b) => a.amount - b.amount || cmpDate(a, b));
   const out: DetectTxnRow[][] = [];
@@ -63,35 +199,25 @@ function clusterByAmount(txns: DetectTxnRow[]): DetectTxnRow[][] {
     cur.push(t);
   }
   if (cur.length > 0) out.push(cur);
-  const folded = out.map((c) =>
-    c.sort(cmpDate).filter((t, i, xs) => i === 0 || xs[i - 1].txn_date !== t.txn_date || xs[i - 1].amount !== t.amount),
-  );
+  for (const c of out) c.sort(cmpDate);
   const lastDate = (c: DetectTxnRow[]) => c[c.length - 1].txn_date;
-  return folded.sort((a, b) => (lastDate(a) > lastDate(b) ? -1 : lastDate(a) < lastDate(b) ? 1 : 0));
+  return out.sort((a, b) => (lastDate(a) > lastDate(b) ? -1 : lastDate(a) < lastDate(b) ? 1 : 0));
 }
 
-// 日付順の列から、隣り合う間隔がすべて minDays〜maxDays に入る連続した部分のうち、minCount 回以上で最も新しいもの。無ければ null。
-function latestRun(seq: DetectTxnRow[], rule: Rule): DetectTxnRow[] | null {
-  let best: DetectTxnRow[] | null = null;
-  let run: DetectTxnRow[] = [];
-  for (const t of seq) {
-    if (run.length > 0) {
-      const gap = dayNumber(t.txn_date) - dayNumber(run[run.length - 1].txn_date);
-      if (gap < rule.minDays || gap > rule.maxDays) {
-        if (run.length >= rule.minCount) best = run;
-        run = [];
-      }
-    }
-    run.push(t);
-  }
-  if (run.length >= rule.minCount) best = run;
-  return best;
+function toDetected({ rule, run, kind }: Best): Detected {
+  const last = run[run.length - 1];
+  return {
+    accountId: last.account_id,
+    descriptionNorm: last.description_norm,
+    interval: rule.interval,
+    amount: kind === 'variable' ? variableAmount(run.map((t) => t.amount)) : last.amount,
+    amountKind: kind,
+    occurrences: run.map((t) => ({ date: t.txn_date, amount: t.amount, bank_txn_id: t.id })),
+  };
 }
-
-const isStale = (lastDate: string, today: string, rule: Rule) => dayNumber(today) - dayNumber(lastDate) > rule.maxDays + Math.floor(rule.maxDays / 2);
 
 // 明細から周期を見つける（DB には書かない）。today から lookbackMonths か月前〜today の支出を見る。
-// 同じ口座・摘要の中では、最後の出現日が新しいまとまりから順に並べる。
+// 同じ口座・摘要の中では、段 1 の列を先に、続けて段 2 の列を最後の出現日が新しいまとまりから順に並べる。
 export function findRecurrences(db: Db, opts: { today: string; lookbackMonths?: number }): Detected[] {
   const from = addMonths(opts.today, -(opts.lookbackMonths ?? DEFAULT_LOOKBACK_MONTHS));
   const excluded = excludedFromCashflow(db);
@@ -105,23 +231,22 @@ export function findRecurrences(db: Db, opts: { today: string; lookbackMonths?: 
   }
   const out: Detected[] = [];
   for (const txns of groups.values()) {
-    for (const cluster of clusterByAmount(txns)) {
-      let best: { rule: Rule; run: DetectTxnRow[] } | null = null;
-      for (const rule of RULES) {
-        const run = latestRun(cluster, rule);
-        if (!run || isStale(run[run.length - 1].txn_date, opts.today, rule)) continue;
-        // 短い順に見ているので、最後の出現日が厳密に新しいときだけ入れ替える。
-        if (!best || run[run.length - 1].txn_date > best.run[best.run.length - 1].txn_date) best = { rule, run };
-      }
-      if (!best) continue;
-      const last = best.run[best.run.length - 1];
-      out.push({
-        accountId: last.account_id,
-        descriptionNorm: last.description_norm,
-        interval: best.rule.interval,
-        amount: last.amount,
-        occurrences: best.run.map((t) => ({ date: t.txn_date, amount: t.amount, bank_txn_id: t.id })),
-      });
+    // 日付順。同じ日・同じ額は 1 件に畳む。
+    const seq = [...txns]
+      .sort((a, b) => (a.txn_date < b.txn_date ? -1 : a.txn_date > b.txn_date ? 1 : a.amount - b.amount || cmpDate(a, b)))
+      .filter((t, i, xs) => i === 0 || xs[i - 1].txn_date !== t.txn_date || xs[i - 1].amount !== t.amount);
+    // 段 1: 金額を見ずに枠で列を作る（定額・増額・不定額）。どちらともみなせない列は段 2 に回す。
+    const first = bestRun(seq, opts.today, (run, rule) => (purity(run, seq) >= PURITY_MIN ? levelKind(run, rule) : null));
+    let rest = seq;
+    if (first) {
+      out.push(toDetected(first));
+      const taken = new Set(first.run.map((t) => t.id));
+      rest = seq.filter((t) => !taken.has(t.id));
+    }
+    // 段 2: 残りを金額でまとめ、まとまりごとに枠で列を作る。純度はまとまりの中で測る（週 1 回の同額の買い物が毎月に化けないように）。
+    for (const cluster of clusterByAmount(rest)) {
+      const best = bestRun(cluster, opts.today, (run) => (purity(run, cluster) >= PURITY_MIN ? 'fixed' : null));
+      if (best) out.push(toDetected(best));
     }
   }
   return out;
@@ -130,10 +255,14 @@ export function findRecurrences(db: Db, opts: { today: string; lookbackMonths?: 
 const SUPERSEDE_ACTOR = 'system';
 
 // 検出して候補にする。daily から呼ぶ口。
-// 作らないもの: 同じ口座・摘要・周期で金額が ±5% 以内の候補がある（open / accepted、または dismissed）、
-// 同じ口座の active な予定項目に、同じ名前（= 正規化摘要）か、同じ周期で金額が ±5% 以内のものがある。
-// 新しい候補を作ったとき、同じ口座・摘要・周期の open の候補のうち、今回の検出のどの列とも金額が合わないもの（値上げ前など）は
-// dismissed にする（actor = system、payload {reason: 'superseded', by}）。updated はその件数。人が dismissed にしたものには触らない。
+// 作らないもの（同じ口座・摘要・周期の候補は状態を問わず数える。ただし system が置き換えで dismissed にしたもの〈dismissed_by = system〉は数えない）:
+//   - 定額: amount_kind = fixed で金額が ±5% 以内の候補がある。同じ口座の active な予定項目に、同じ名前（= 正規化摘要）か、同じ周期で金額が ±5% 以内のものがある。
+//   - 不定額: amount_kind = variable の候補がある（代表値が変わっても作り直さない）。同じ口座の active な予定項目に、同じ名前か、
+//     同じ周期で金額が代表値 ±5% 以内のもの（origin = estimate は除く）がある。
+// 新しい候補を作ったとき、次の open の候補を dismissed にする（actor = system、dismissed_by = system、payload {reason: 'superseded', by}）。updated はその件数。
+//   - 同じ口座・摘要・周期で、今回の検出のどの列とも合わないもの（値上げ前など）。定額は金額 ±5% で、不定額は今回も不定額の列があれば合うとみなす
+//   - 周期・金額の種類によらず、occurrences の明細（bank_txn_id）が新しい候補と 1 件でも重なるもの
+// 人が dismissed にしたもの・accepted のものには触らない。
 export function detectRecurrences(db: Db, opts: { today: string; lookbackMonths?: number; now?: Date }): { created: number; updated: number } {
   const nowDate = opts.now ?? new Date();
   const now = nowDate.toISOString();
@@ -146,19 +275,33 @@ export function detectRecurrences(db: Db, opts: { today: string; lookbackMonths?
     for (const d of found) foundByKey.set(keyOf(d), [...(foundByKey.get(keyOf(d)) ?? []), d]);
     for (const d of found) {
       const existing = listRecurrenceCandidatesFor(db, d.accountId, d.descriptionNorm, d.interval);
-      if (existing.some((c) => sameAmount(c.amount, d.amount))) continue;
-      if (hasActiveScheduledItemLike(db, { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT })) {
-        continue;
+      const counted = existing.filter((c) => c.dismissed_by !== SUPERSEDE_ACTOR && c.amount_kind === d.amountKind);
+      if (d.amountKind === 'variable') {
+        if (counted.length > 0) continue;
+        // 代表値 ±5% で合わせる。税の見積もり（origin = estimate）は額が近くても別物なので数えない。
+        const like = { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT };
+        if (hasActiveScheduledItemLike(db, { ...like, excludeOrigin: 'estimate' })) continue;
+      } else {
+        if (counted.some((c) => sameAmount(c.amount, d.amount))) continue;
+        if (hasActiveScheduledItemLike(db, { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT })) {
+          continue;
+        }
       }
       const row = insertRecurrenceCandidate(db, { ...d, now });
       created++;
       const siblings = foundByKey.get(keyOf(d))!;
-      for (const c of existing) {
-        if (c.state !== 'open' || siblings.some((x) => sameAmount(x.amount, c.amount))) continue;
-        setRecurrenceCandidateState(db, c.id, 'dismissed', null, now);
+      const matches = (c: RecurrenceCandidateRow) =>
+        siblings.some((x) => (c.amount_kind === 'variable' ? x.amountKind === 'variable' : sameAmount(x.amount, c.amount)));
+      const ids = new Set(d.occurrences.map((o) => o.bank_txn_id));
+      const superseded = new Set(existing.filter((c) => c.state === 'open' && !matches(c)).map((c) => c.id));
+      for (const c of listRecurrenceCandidates(db, { state: 'open', accountId: d.accountId })) {
+        if (c.id !== row.id && parseOccurrences(c).some((o) => ids.has(o.bank_txn_id))) superseded.add(c.id);
+      }
+      for (const id of superseded) {
+        setRecurrenceCandidateState(db, id, 'dismissed', null, now, SUPERSEDE_ACTOR);
         appendAudit(
           db,
-          { actor: SUPERSEDE_ACTOR, action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: c.id, payload: { reason: 'superseded', by: row.id } },
+          { actor: SUPERSEDE_ACTOR, action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: id, payload: { reason: 'superseded', by: row.id } },
           nowDate,
         );
         updated++;
@@ -174,27 +317,14 @@ export function parseOccurrences(c: RecurrenceCandidateRow): Occurrence[] {
   return JSON.parse(c.occurrences_json) as Occurrence[];
 }
 
-const MONTH_END = 32; // 「月末」の印（日の最頻値を数えるとき、その月の末日は日付によらずこれにまとめる）
-const lastDayOfMonth = (ym: string) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
-const dayKey = (d: string) => (Number(d.slice(8, 10)) === lastDayOfMonth(d.slice(0, 7)) ? MONTH_END : Number(d.slice(8, 10)));
-const withDay = (ym: string, day: number) => `${ym}-${String(Math.min(day, lastDayOfMonth(ym))).padStart(2, '0')}`;
-
 // 次の期日: 出現の「日」の最頻値（月末が多ければ月末。同数なら新しい出現の日）を、最後の出現の月に当てて周期を 1 回足した日。
 export function nextDueFromCandidate(c: RecurrenceCandidateRow): string {
   const occ = parseOccurrences(c)
     .map((o) => o.date)
     .sort()
     .reverse();
-  const counts = new Map<number, number>();
-  let mode = dayKey(occ[0]);
-  for (const d of occ) {
-    const k = dayKey(d);
-    const v = (counts.get(k) ?? 0) + 1;
-    counts.set(k, v);
-    if (v > (counts.get(mode) ?? 0)) mode = k;
-  }
   const nextYm = addMonths(`${occ[0].slice(0, 7)}-01`, STEP_MONTHS[c.interval]).slice(0, 7);
-  return withDay(nextYm, mode);
+  return withDay(nextYm, modeDay(occ));
 }
 
 export type AcceptOverrides = { category?: Category; name?: string; amount?: number };
@@ -224,6 +354,7 @@ export function acceptCandidate(
         endDate: null,
         notifyDaysBefore: DEFAULT_NOTIFY_DAYS_BEFORE,
         origin: 'detected',
+        amountKind: cur.amount_kind,
       },
       by,
       now,
@@ -245,7 +376,7 @@ export function dismissCandidate(db: Db, id: string, by: By, now: Date = new Dat
     if (!cur) throw new ScheduleError('not_found', 404);
     if (cur.state === 'dismissed') return cur;
     if (cur.state !== 'open') throw new ScheduleError('not_open');
-    const row = setRecurrenceCandidateState(db, id, 'dismissed', null, now.toISOString())!;
+    const row = setRecurrenceCandidateState(db, id, 'dismissed', null, now.toISOString(), 'human')!;
     appendAudit(db, { actor: by.actor, action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: id, payload: { user: by.user ?? null } }, now);
     return row;
   });

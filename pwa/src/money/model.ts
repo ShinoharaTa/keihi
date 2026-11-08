@@ -68,7 +68,10 @@ export type BankStatus = {
 };
 
 export type Direction = 'in' | 'out';
-export type ScheduleCategory = 'tax' | 'insurance' | 'car' | 'other' | 'income';
+// savings（積立）は支出だけ（古いサーバーは invalid_category で断る）。
+export type ScheduleCategory = 'tax' | 'insurance' | 'car' | 'savings' | 'other' | 'income';
+// 金額の種類。variable は金額が毎回変わる支払い（額は概算）。古いサーバーには無い。
+export type AmountKind = 'fixed' | 'variable';
 // quarterly は API 側で追加中（古いサーバーは invalid_recurrence で断る）。
 export type Recurrence = 'once' | 'monthly' | 'bimonthly' | 'quarterly' | 'yearly' | 'biennial';
 export type ScheduledItem = {
@@ -87,6 +90,7 @@ export type ScheduledItem = {
   // 税・保険の見積もり（origin = estimate）の key と、人が手直ししたか（古いサーバーには無い）。
   estimate_key?: string | null;
   pinned?: 0 | 1;
+  amount_kind?: AmountKind;
 };
 export type Candidate = {
   id: string;
@@ -99,13 +103,34 @@ export type Candidate = {
   interval: Exclude<Recurrence, 'once'>;
   occurrences_json: string;
   state: string;
+  amount_kind?: AmountKind;
 };
 
-// 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。
-export const candidateName = (c: Candidate) => c.description || c.description_norm;
+// 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。大きな出費の名前も同じ規則。
+export const candidateName = (c: { description?: string; description_norm: string }) => c.description || c.description_norm;
 
-// origin・estimate_key・pinned は追加中の項目（古いサーバーには無い）。
-export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string; origin?: string; estimate_key?: string | null; pinned?: 0 | 1 };
+// 大きな出費（5 万円以上。GET /api/large_expenses、src/cashflow/large.ts）。同じ口座・摘要の明細を 1 行にまとめ、bank_txn_id・金額・日付は最新の明細。
+export type LargeExpense = {
+  bank_txn_id: string;
+  account_id: string;
+  account_name: string;
+  txn_date: string;
+  amount: number;
+  description: string;
+  description_norm: string;
+  same_desc_count: number;
+  total_amount: number;
+  first_date: string;
+  suggested: 'monthly' | 'yearly' | 'biennial';
+};
+export type LargeRecurrence = 'monthly' | 'yearly' | 'biennial' | 'once';
+// 大きな出費から開くフォームで選べる周期。
+export const LARGE_FORM_RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'yearly', 'biennial'];
+// 一覧に最初から出す件数（残りは「もっと見る」）。
+export const LARGE_SHOWN = 3;
+
+// origin・estimate_key・pinned・amount_kind は追加中の項目（古いサーバーには無い）。
+export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string; origin?: string; estimate_key?: string | null; pinned?: 0 | 1; amount_kind?: AmountKind };
 export type ForecastMonth = {
   month: string;
   planned_in: number;
@@ -123,7 +148,9 @@ export type ForecastWarning =
   | { kind: 'short_history'; months_available: number }
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
-  | { kind: 'consumption_tax_not_implemented'; mode: string };
+  | { kind: 'special20_expired'; year: number }
+  | { kind: 'simplified_class_missing' }
+  | { kind: 'revenue_missing'; year: number };
 export type Forecast = {
   as_of: string;
   opening_balance: number;
@@ -181,8 +208,8 @@ export const KIND_LABELS: Record<TransferKind, string> = { transfer: '振替', c
 export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = { bank: '銀行', card: 'カード', wallet: '電子マネー', paypay: 'PayPay', cash: '現金' };
 export const VISIBILITY_LABELS: Record<McpVisibility, string> = { full: '明細も', summary: '合計だけ', none: '見せない' };
 export const VISIBILITY_ORDER: readonly McpVisibility[] = ['none', 'summary', 'full'];
-export const SCHEDULE_CATEGORY_LABELS: Record<ScheduleCategory, string> = { tax: '税金', insurance: '保険', car: '車', other: 'その他', income: '収入' };
-export const SCHEDULE_CATEGORIES: readonly ScheduleCategory[] = ['tax', 'insurance', 'car', 'other', 'income'];
+export const SCHEDULE_CATEGORY_LABELS: Record<ScheduleCategory, string> = { tax: '税金', insurance: '保険', car: '車', savings: '積立', other: 'その他', income: '収入' };
+export const SCHEDULE_CATEGORIES: readonly ScheduleCategory[] = ['tax', 'insurance', 'car', 'savings', 'other', 'income'];
 export const RECURRENCE_LABELS: Record<Recurrence, string> = { once: '1 回', monthly: '毎月', bimonthly: '隔月', quarterly: '3 か月ごと', yearly: '毎年', biennial: '隔年' };
 export const RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'];
 export const RECURRENCE_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, quarterly: 3, yearly: 12, biennial: 24 };
@@ -216,7 +243,7 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_end_date: '終わりの日が正しくありません。',
   invalid_notify_days_before: '知らせる日数は 0〜365 で入れてください。',
   end_before_anchor: '終わりの日は最初の支払日より後にしてください。',
-  invalid_category_for_direction: '支出の予定に「収入」の分類は付けられません。',
+  invalid_category_for_direction: 'この分類はこの向きの予定には使えません。',
   invalid_recurrence: '周期が正しくありません（「3 か月ごと」はサーバーの更新後に使えます）。',
   invalid_pattern: '摘要の文字が正しくありません。',
   invalid_card_settlement_account_id: '引落元の口座が正しくありません。',
@@ -224,6 +251,8 @@ export const ERROR_TEXT: Record<string, string> = {
   unknown_account: '口座が見つかりません。',
   not_open: 'この提案はもう処理されています。',
   not_found: '見つかりませんでした。読み直してください。',
+  anchor_date_required: '1 回だけの予定は、今日より後の支払日を入れてください。',
+  already_decided: 'この出費はもう処理されています。',
   invalid_kind: '種別が正しくありません。',
   not_csv_account: 'この口座は CSV では取り込めません（freee から同期する口座です）。',
   unknown_format: 'この CSV の形式は読めません（今は PayPay の CSV だけ）。',
@@ -231,6 +260,13 @@ export const ERROR_TEXT: Record<string, string> = {
   too_large: 'ファイルが大きすぎます（5MB まで）。',
   already_imported: '同じファイルは取り込み済みです。',
   empty_file: 'CSV に明細の行がありません。',
+  income_required: '売上を入れてください（保存した年の売上も所得もありません）。',
+  invalid_year: '年が正しくありません。',
+  invalid_revenue: '売上は 0 以上の整数で入れてください。',
+  invalid_expenses: '経費は 0 以上の整数で入れてください。',
+  invalid_taxable_purchases: '課税仕入は 0 以上の整数で入れてください。',
+  invalid_ideco: 'iDeCo は 0 以上の整数で入れてください。',
+  invalid_kyosai: '小規模企業共済は 0 以上の整数で入れてください。',
   already_linked: 'この証憑はもう紐付いています。',
   not_linked: 'この証憑は紐付いていません。読み直してください。',
   document_not_found: '証憑が見つかりませんでした。',
@@ -432,14 +468,15 @@ const GUESS: [RegExp, ScheduleCategory][] = [
   [/ソンポ|保険|生命|共済/, 'insurance'],
   [/税|ゼイ|国保|年金/, 'tax'],
   [/車|ジドウシャ|ガソリン|駐車/, 'car'],
+  [/積立|ツミタテ|投信|証券/, 'savings'],
 ];
 export function guessCategory(description: string): ScheduleCategory {
   const s = description.normalize('NFKC');
   return GUESS.find(([re]) => re.test(s))?.[1] ?? 'other';
 }
 
-// 支出の予定には「収入」の分類を選べない（サーバーも invalid_category_for_direction で断る）。
-export const categoriesFor = (d: Direction): readonly ScheduleCategory[] => (d === 'out' ? SCHEDULE_CATEGORIES.filter((c) => c !== 'income') : SCHEDULE_CATEGORIES);
+// 支出の予定には「収入」、収入の予定には「積立」の分類を選べない（サーバーも invalid_category_for_direction で断る）。
+export const categoriesFor = (d: Direction): readonly ScheduleCategory[] => SCHEDULE_CATEGORIES.filter((c) => c !== (d === 'out' ? 'income' : 'savings'));
 
 export type ItemDraft = {
   name: string;
@@ -494,6 +531,7 @@ export function draftError(d: ItemDraft): string | null {
   const n = notifyOf(d.notify_days_before);
   if (n === null || n > NOTIFY_MAX) return ERROR_TEXT.invalid_notify_days_before!;
   if (d.direction === 'out' && d.category === 'income') return ERROR_TEXT.invalid_category_for_direction!;
+  if (d.direction === 'in' && d.category === 'savings') return ERROR_TEXT.invalid_category_for_direction!;
   return null;
 }
 
@@ -521,7 +559,9 @@ export function warningText(w: ForecastWarning, accountName: (id: string) => str
   if (w.kind === 'stale_balance') return `${accountName(w.account_id)} の残高が ${w.as_of_date} から更新されていません。`;
   if (w.kind === 'tax_profile_missing') return '税・保険の見積もりが未設定です（予定 → 税・保険の見積もり）。';
   if (w.kind === 'consumption_tax_mode_unset') return '消費税は見通しに入っていません（方式が未設定）。';
-  if (w.kind === 'consumption_tax_not_implemented') return consumptionNotImplemented(w.mode);
+  if (w.kind === 'special20_expired') return SPECIAL20_EXPIRED;
+  if (w.kind === 'simplified_class_missing') return SIMPLIFIED_CLASS_MISSING;
+  if (w.kind === 'revenue_missing') return revenueMissing(w.year);
   return w.months_available === 0
     ? '過去の明細がまだ無いため、予定外支出の目安を 0 円にしています。'
     : `過去の明細が ${w.months_available} か月分しかないため、予定外支出の目安は粗い値です。`;
@@ -773,7 +813,7 @@ export const itemInfoMap = (items: ScheduledItem[]): Record<string, ItemInfo> =>
 
 // 見通しの印: 月ごとの 税金・保険・車 の予定支出（毎月の分は除く）。
 export type MarkCat = 'tax' | 'insurance' | 'car';
-export type MonthMarks = { month: string; tax: number; insurance: number; car: number; names: { category: MarkCat; name: string; amount: number; estimate?: true }[] };
+export type MonthMarks = { month: string; tax: number; insurance: number; car: number; names: { category: MarkCat; name: string; amount: number; estimate?: true; variable?: true }[] };
 export function monthMarks(months: ForecastMonth[], info: Record<string, ItemInfo>): MonthMarks[] {
   return months.map((m) => {
     const out: MonthMarks = { month: m.month, tax: 0, insurance: 0, car: 0, names: [] };
@@ -782,7 +822,13 @@ export function monthMarks(months: ForecastMonth[], info: Record<string, ItemInf
       if (it.direction !== 'out' || !i || i.recurrence === 'monthly') continue;
       if (i.category !== 'tax' && i.category !== 'insurance' && i.category !== 'car') continue;
       out[i.category] += it.amount;
-      out.names.push({ category: i.category, name: it.name, amount: it.amount, ...(it.origin === 'estimate' ? { estimate: true as const } : {}) });
+      out.names.push({
+        category: i.category,
+        name: it.name,
+        amount: it.amount,
+        ...(it.origin === 'estimate' ? { estimate: true as const } : {}),
+        ...(it.amount_kind === 'variable' ? { variable: true as const } : {}),
+      });
     }
     return out;
   });
@@ -811,7 +857,8 @@ export function peakMonths(upcoming: Upcoming[], today: string): PeakMonth[] {
     if (it.direction !== 'out' || it.recurrence === 'monthly') continue;
     const m = out.find((x) => x.month === it.due_date.slice(0, 7));
     if (!m) continue;
-    const k = it.category === 'income' ? 'other' : it.category;
+    // 収入・積立は その他 に寄せる（凡例は 4 色のまま）。
+    const k = it.category === 'tax' || it.category === 'insurance' || it.category === 'car' ? it.category : 'other';
     m[k] += it.amount;
     m.total += it.amount;
   }
@@ -843,6 +890,17 @@ export function candidateNext(c: Candidate): string | null {
   const m = addMonth(last.slice(0, 7), RECURRENCE_MONTHS[c.interval]);
   const d = Math.min(Number(last.slice(8, 10)), Number(lastDay(m).slice(8, 10)));
   return `${m}-${pad(d)}`;
+}
+// 提案の金額の幅（occurrences の最小〜最大）。読めなければ null。
+export function candidateRange(c: Candidate): { min: number; max: number } | null {
+  try {
+    const v = JSON.parse(c.occurrences_json) as unknown;
+    if (!Array.isArray(v)) return null;
+    const xs = v.map((o) => (o as { amount?: unknown } | null)?.amount).filter((a): a is number => typeof a === 'number');
+    return xs.length ? { min: Math.min(...xs), max: Math.max(...xs) } : null;
+  } catch {
+    return null;
+  }
 }
 // 提案の出現回数。
 export function occurrenceCount(c: Candidate): number {
@@ -910,13 +968,17 @@ export function tagShares(cur: MonthlySummary): { tag: Tag; expense: number; pct
 // 期日の短い表示: 今年なら「11/27」、それ以外は「2027-01-31」。
 export const dateShort = (date: string, today: string) => (date.slice(0, 4) === today.slice(0, 4) ? md(date) : date);
 
-// ---- 税・保険の見積もり（GET/PUT /api/tax/profile・PUT /api/tax/years/:year・POST /api/tax/recalculate、src/web/routes/tax.ts） ----
+// ---- 税・保険の見積もり（GET /api/tax/profile・PUT /api/tax（一括保存）・POST /api/tax/recalculate、src/web/routes/tax.ts） ----
 
 export type BlueReturn = '65' | '55' | '10' | 'white';
+export type ConsumptionMode = 'unset' | 'exempt' | 'special20' | 'simplified' | 'standard';
 export type PensionMode = 'monthly' | 'prepay6' | 'prepay12' | 'prepay24' | 'none';
 export type TaxProfile = {
   blue_return: BlueReturn;
-  consumption_mode: string;
+  consumption_mode: ConsumptionMode;
+  // 簡易課税の事業区分（1〜6）。
+  simplified_class: number | null;
+  revenue_includes_tax: boolean;
   biz_tax_rate: number | null;
   nhi_preset: string | null;
   nhi_members: number;
@@ -944,7 +1006,9 @@ export type TaxProfileResponse = { profile: TaxProfile | null; years: TaxYear[];
 export type TaxWarning =
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
-  | { kind: 'consumption_tax_not_implemented'; mode: string }
+  | { kind: 'special20_expired'; year: number }
+  | { kind: 'simplified_class_missing' }
+  | { kind: 'revenue_missing'; year: number }
   | { kind: 'income_missing'; year: number }
   | { kind: 'pinned_withdrawn'; key: string; item_id: string }
   | { kind: 'possible_duplicate'; key: string; item_ids: [string, string] };
@@ -958,8 +1022,20 @@ const BLUE_DEDUCTION: Record<BlueReturn, number> = { '65': 650000, '55': 550000,
 export const PENSION_LABELS: Record<Exclude<PensionMode, 'none'>, string> = { monthly: '月払い', prepay6: '6 か月', prepay12: '1 年', prepay24: '2 年' };
 export const PENSION_MODES: readonly Exclude<PensionMode, 'none'>[] = ['monthly', 'prepay6', 'prepay12', 'prepay24'];
 export const CONSUMPTION_LABELS: Record<string, string> = { unset: '未設定', exempt: '免税', special20: '2 割特例', simplified: '簡易課税', standard: '本則' };
-// 方式は設定済みだが PR1 は消費税を作らない（consumption_tax_not_implemented）。
-export const consumptionNotImplemented = (mode: string) => `消費税（方式: ${CONSUMPTION_LABELS[mode] ?? mode}）はまだ見通しに入りません。`;
+export const CONSUMPTION_MODES: readonly Exclude<ConsumptionMode, 'unset'>[] = ['exempt', 'special20', 'simplified', 'standard'];
+// 簡易課税の事業区分（みなし仕入率）。
+export const SIMPLIFIED_CLASS_LABELS: readonly { v: number; label: string }[] = [
+  { v: 1, label: '第 1 種 卸売 90%' },
+  { v: 2, label: '第 2 種 小売 80%' },
+  { v: 3, label: '第 3 種 製造 70%' },
+  { v: 4, label: '第 4 種 その他 60%' },
+  { v: 5, label: '第 5 種 サービス 50%' },
+  { v: 6, label: '第 6 種 不動産 40%' },
+];
+export const SPECIAL20_EXPIRED = '2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。';
+export const SIMPLIFIED_CLASS_MISSING = '簡易課税の事業区分が未設定なので消費税は見通しに入りません。';
+// 消費税を作る方式なのに、その年分の売上が無い（所得を直接入れた年）。
+export const revenueMissing = (year: number) => `${year} 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。`;
 // 個人事業税の納税通知が来ているときの税率。
 export const BIZ_TAX_RATE = 0.05;
 
@@ -967,6 +1043,8 @@ export const BIZ_TAX_RATE = 0.05;
 export const DEFAULT_TAX_PROFILE: TaxProfile = {
   blue_return: '65',
   consumption_mode: 'unset',
+  simplified_class: null,
+  revenue_includes_tax: true,
   biz_tax_rate: null,
   nhi_preset: 'saitama-city-2026',
   nhi_members: 1,
@@ -992,16 +1070,21 @@ export function taxIncome(years: TaxYear[], year: number, blue: BlueReturn): num
 // ISO の日時 → 東京の暦日（YYYY-MM-DD）。
 export const tokyoDate = (iso: string) => new Date(Date.parse(iso) + 9 * 3600000).toISOString().slice(0, 10);
 
-// カードの 1 行: 「2026 年分 所得 400万円 / 最終計算 11/7」。
+// カードの 1 行: 「2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7」。
 export function taxCardLine(t: TaxSummary, today: string): string {
   const y = Number(today.slice(0, 4));
   const inc = taxIncome(t.years, y, t.profile?.blue_return ?? '65');
   const last = t.last_run_at ? md(tokyoDate(t.last_run_at)) : '—';
-  return `${y} 年分 所得 ${inc === null ? '未入力' : `${man(inc)}円`} / 最終計算 ${last}`;
+  const mode = t.profile?.consumption_mode ?? 'unset';
+  return `${y} 年分 所得 ${inc === null ? '未入力' : `${man(inc)}円`} · 消費税 ${CONSUMPTION_LABELS[mode] ?? mode} / 最終計算 ${last}`;
 }
 
 export type TaxProfileDraft = {
   blue_return: BlueReturn;
+  consumption_mode: ConsumptionMode;
+  // '' は未設定。
+  simplified_class: string;
+  revenue_includes_tax: boolean;
   biz_tax_rate: number | null;
   nhi_preset: string;
   nhi_members: string;
@@ -1017,6 +1100,9 @@ export function taxProfileDraft(p: TaxProfile | null): TaxProfileDraft {
   const v = p ?? DEFAULT_TAX_PROFILE;
   return {
     blue_return: v.blue_return,
+    consumption_mode: v.consumption_mode,
+    simplified_class: v.simplified_class === null ? '' : String(v.simplified_class),
+    revenue_includes_tax: v.revenue_includes_tax,
     biz_tax_rate: v.biz_tax_rate,
     nhi_preset: v.nhi_preset ?? '',
     nhi_members: String(v.nhi_members),
@@ -1042,7 +1128,7 @@ export function parseAmount(s: string, signed = false): number | null | undefine
   return Number.isSafeInteger(n) ? n : undefined;
 }
 
-// PUT /api/tax/profile の本文（フォームで扱う列だけ。消費税の方式は送らない）。だめなら理由の文。
+// プロファイルの本文（フォームで扱う列だけ）。だめなら理由の文。PUT /api/tax にはこのうち変えた列だけを送る（taxSaveBody）。
 export function taxProfileBody(d: TaxProfileDraft): Record<string, unknown> | string {
   const members = parseAmount(d.nhi_members);
   const m4064 = parseAmount(d.nhi_members_40_64);
@@ -1052,8 +1138,13 @@ export function taxProfileBody(d: TaxProfileDraft): Record<string, unknown> | st
   if (typeof m4064 !== 'number' || m4064 > members) return '40〜64 歳の人数は加入人数以下で入れてください。';
   if (typeof deps !== 'number' || deps > 20) return '扶養の人数は 0〜20 で入れてください。';
   if (other === undefined) return 'iDeCo 等の年額は 0 以上の整数で入れてください。';
+  if (d.consumption_mode === 'simplified' && d.simplified_class === '') return '簡易課税の事業区分を選んでください。';
   return {
     blue_return: d.blue_return,
+    consumption_mode: d.consumption_mode,
+    // 簡易課税のときだけ事業区分を送る（他の方式では null）。
+    simplified_class: d.consumption_mode === 'simplified' ? Number(d.simplified_class) : null,
+    revenue_includes_tax: d.revenue_includes_tax,
     biz_tax_rate: d.biz_tax_rate,
     nhi_preset: d.nhi_preset || null,
     nhi_members: members,
@@ -1098,7 +1189,7 @@ export function taxYearDrafts(years: TaxYear[], today: string): TaxYearDraft[] {
   });
 }
 
-// 変えた年の PUT /api/tax/years/:year の本文。だめな値があれば理由の文。まだ無い年で全部空欄なら送らない（前の年を繰り越す）。
+// 変えた年の本文（PUT /api/tax の years に入れる）。だめな値があれば理由の文。まだ無い年で全部空欄なら送らない（前の年を繰り越す）。
 // 年が替わって見込みの行が確定の年に来ても、確定の欄に値を入れるまでは kind を変えない（何もしなければ送らない）。
 export function taxYearBodies(drafts: TaxYearDraft[], years: TaxYear[]): { year: number; body: Record<string, unknown> }[] | string {
   const out: { year: number; body: Record<string, unknown> }[] = [];
@@ -1126,8 +1217,12 @@ export function taxWarningText(w: TaxWarning): string {
       return '設定がまだ無いので作っていません。';
     case 'consumption_tax_mode_unset':
       return '消費税は未反映です。';
-    case 'consumption_tax_not_implemented':
-      return consumptionNotImplemented(w.mode);
+    case 'special20_expired':
+      return SPECIAL20_EXPIRED;
+    case 'simplified_class_missing':
+      return SIMPLIFIED_CLASS_MISSING;
+    case 'revenue_missing':
+      return revenueMissing(w.year);
     case 'income_missing':
       return `${w.year} 年の所得が無い分は作っていません。`;
     case 'pinned_withdrawn':
@@ -1137,13 +1232,250 @@ export function taxWarningText(w: TaxWarning): string {
   }
 }
 
-// 保存・再計算の結果の 1 行。何回か PUT したら件数は足し、警告は最後の回のもの。
-export function runText(runs: RunSummary[], head: string): string {
-  const sum = (k: 'created' | 'updated' | 'deactivated') => runs.reduce((a, r) => a + r[k], 0);
-  const last = runs[runs.length - 1];
-  const pinned = last ? last.skipped_pinned.length : 0;
-  const warns = last ? [...new Set(last.warnings.map(taxWarningText))] : [];
-  return [`${head}予定は作成 ${sum('created')}・更新 ${sum('updated')}・停止 ${sum('deactivated')} 件`, pinned > 0 ? `（手直しの ${pinned} 件はそのまま）` : '', '。', ...warns].join('');
+// PUT /api/tax の本文: プロファイルは今の値から変えた列だけ、年は変えた年だけ。まだプロファイルが無ければ全部の列を送る（作る）。
+// 何も変えていなければ null（送らない）。だめな値があれば理由の文。
+export function taxSaveBody(
+  draft: TaxProfileDraft,
+  drafts: TaxYearDraft[],
+  data: Pick<TaxProfileResponse, 'profile' | 'years'>,
+): { profile?: Record<string, unknown>; years?: Record<string, unknown>[] } | null | string {
+  const body = taxProfileBody(draft);
+  if (typeof body === 'string') return body;
+  const ys = taxYearBodies(drafts, data.years);
+  if (typeof ys === 'string') return ys;
+  const cur = data.profile as Record<string, unknown> | null;
+  const profile = cur ? Object.fromEntries(Object.entries(body).filter(([k, v]) => JSON.stringify(cur[k] ?? null) !== JSON.stringify(v))) : body;
+  const out: { profile?: Record<string, unknown>; years?: Record<string, unknown>[] } = {};
+  // 方式を簡易課税から変えたら、事業区分の null も必ず送る。
+  if ('consumption_mode' in profile && body.consumption_mode !== 'simplified') profile.simplified_class = null;
+  if (Object.keys(profile).length > 0) out.profile = profile;
+  if (ys.length > 0) out.years = ys.map((y) => ({ year: y.year, ...y.body }));
+  return out.profile || out.years ? out : null;
+}
+
+// 保存・再計算の結果の 1 行（件数と警告）。
+export function runText(run: RunSummary, head: string): string {
+  const pinned = run.skipped_pinned.length;
+  const warns = [...new Set(run.warnings.map(taxWarningText))];
+  return [`${head}予定は作成 ${run.created}・更新 ${run.updated}・停止 ${run.deactivated} 件`, pinned > 0 ? `（手直しの ${pinned} 件はそのまま）` : '', '。', ...warns].join('');
+}
+
+// ---- 税の試算（POST /api/tax/simulate、src/cashflow/tax/simulate.ts。同じ売上が続いた年の 1 年分。何も保存しない） ----
+
+export type TaxSimKind = 'income_tax' | 'resident' | 'nhi' | 'pension' | 'biz_tax' | 'ctax';
+export type TaxSimAmount = { kind: TaxSimKind; year: number; basis: 'year' | 'fiscal_year'; amount: number; lines: { label: string; amount: number }[] };
+export type CtaxReason = 'over_10m' | 'over_50m' | 'special20_expired' | 'revenue_missing';
+export type CtaxCompareRow = {
+  mode: Exclude<ConsumptionMode, 'unset'>;
+  simplified_class: number | null;
+  available: boolean;
+  reason: CtaxReason | null;
+  // available=false の行は null。
+  tax: number | null;
+  take_home: number | null;
+  notes: string[];
+};
+export type TaxSimWarning =
+  | TaxWarning
+  | { kind: 'selected_mode_unavailable'; mode: Exclude<ConsumptionMode, 'unset'>; reason: CtaxReason }
+  // プロファイルの方式がその年に使えないので、既定の方式（簡易課税 or 本則）で計算した。方式を選べば出ない。
+  | { kind: 'mode_defaulted'; from: Exclude<ConsumptionMode, 'unset'>; to: 'simplified' | 'standard'; simplified_class: number | null }
+  | { kind: 'rates_assumed'; year: number; latest: number };
+export type TaxSimResponse = {
+  year: number;
+  inputs: {
+    revenue: number | null;
+    expenses: number;
+    business_income: number | null;
+    taxable_purchases: number;
+    ideco: number;
+    kyosai: number;
+    other_deductions: number;
+    revenue_includes_tax: boolean;
+    blue_return: BlueReturn;
+    consumption_mode: ConsumptionMode;
+    simplified_class: number | null;
+    // revenue・expenses は 'body' / 'tax_years:<年>' / 'default'。consumption_mode は 'profile' / 'body' / 'defaulted'。
+    source: Record<string, string>;
+  };
+  income: { pre_blue: number; business_income: number };
+  // 常に 6 要素（所得税・住民税・国保・国民年金・個人事業税・消費税の順）。
+  amounts: TaxSimAmount[];
+  total: number;
+  cash_profit: number;
+  take_home: number;
+  free_cash: number;
+  effective_rate: number | null;
+  marginal: { delta: number; total_increase: number; take_home_increase: number; rate: number };
+  deductions: { ideco: number; kyosai: number; saving: number };
+  // 常に 9 要素（exempt・special20・simplified 1〜6・standard）。
+  ctax_compare: CtaxCompareRow[];
+  best: { mode: Exclude<ConsumptionMode, 'unset'>; simplified_class: number | null } | null;
+  warnings: TaxSimWarning[];
+  assumptions: string[];
+};
+
+export const TAX_SIM_LABELS: Record<TaxSimKind, string> = { income_tax: '所得税', resident: '住民税', nhi: '国保', pension: '国民年金', biz_tax: '個人事業税', ctax: '消費税' };
+// 比較表で簡易課税の区分が入力にもプロファイルにも無いときの区分（第 5 種 サービス）。
+export const SIM_DEFAULT_CLASS = 5;
+export const SIM_STEP_MAN = 100;
+export const SIM_DEBOUNCE_MS = 300;
+export const SIM_NOTE = '同じ売上が続いた年の概算。給与など他の所得・医療費控除等は入れていない。';
+
+// 円 → 入力欄の万円（整数に丸める）。
+export const toManInput = (n: number) => String(Math.round(n / 10000));
+// 入力欄の万円 → 円。空は null、だめ（負・小数・文字）なら undefined。
+export function parseMan(s: string): number | null | undefined {
+  const v = parseAmount(s);
+  return v === null || v === undefined ? v : v * 10000;
+}
+// 「−100 万」「+100 万」: 万円の欄に足す。読めない・空は 0 から。0 未満にはしない。
+export function stepMan(s: string, delta: number): string {
+  const v = parseAmount(s);
+  return String(Math.max(0, (typeof v === 'number' ? v : 0) + delta));
+}
+// 「123.4万」。万円・小数 1 桁。負は「−」。
+export function simMan(n: number): string {
+  const s = (Math.abs(n) / 10000).toFixed(1);
+  return `${n < 0 && s !== '0.0' ? '−' : ''}${s}万`;
+}
+// 「27.5%」。null は「—」。
+export const simPct = (r: number | null) => (r === null ? '—' : `${(Math.round(r * 1000) / 10).toFixed(1)}%`);
+
+// 試算の入力（万円の文字列）。'' は既定（売上・経費は保存した年の値、課税仕入は経費と同じ、掛金は 0。方式・区分はプロファイル）。
+export type TaxSimForm = {
+  year: string;
+  revenue: string;
+  expenses: string;
+  purchases: string;
+  ideco: string;
+  kyosai: string;
+  mode: ConsumptionMode | '';
+  cls: string;
+};
+// 年も空（最初は本文なしで呼び、サーバーの既定 = 翌年を使う）。
+export const emptySimForm = (): TaxSimForm => ({
+  year: '',
+  revenue: '',
+  expenses: '',
+  purchases: '',
+  ideco: '',
+  kyosai: '',
+  mode: '',
+  cls: '',
+});
+// 年のセレクト: 今年・翌年・翌々年。
+export const simYears = (today: string) => [0, 1, 2].map((d) => Number(today.slice(0, 4)) + d);
+
+// 最初に読めた応答で、空の欄を埋める（課税仕入は経費と同じなら空のまま。掛金は 0 なら空のまま）。
+export function seedSimForm(f: TaxSimForm, r: TaxSimResponse): TaxSimForm {
+  const i = r.inputs;
+  const fill = (cur: string, v: string) => (cur === '' ? v : cur);
+  return {
+    year: fill(f.year, String(r.year)),
+    revenue: fill(f.revenue, i.revenue === null ? '' : toManInput(i.revenue)),
+    expenses: fill(f.expenses, toManInput(i.expenses)),
+    purchases: fill(f.purchases, i.taxable_purchases === i.expenses ? '' : toManInput(i.taxable_purchases)),
+    ideco: fill(f.ideco, i.ideco > 0 ? toManInput(i.ideco) : ''),
+    kyosai: fill(f.kyosai, i.kyosai > 0 ? toManInput(i.kyosai) : ''),
+    mode: f.mode === '' ? i.consumption_mode : f.mode,
+    cls: fill(f.cls, i.simplified_class === null ? '' : String(i.simplified_class)),
+  };
+}
+
+const SIM_FIELDS: readonly { k: 'revenue' | 'expenses' | 'purchases' | 'ideco' | 'kyosai'; key: string; label: string }[] = [
+  { k: 'revenue', key: 'revenue', label: '売上' },
+  { k: 'expenses', key: 'expenses', label: '経費' },
+  { k: 'purchases', key: 'taxable_purchases', label: '本則の課税仕入' },
+  { k: 'ideco', key: 'ideco', label: 'iDeCo' },
+  { k: 'kyosai', key: 'kyosai', label: '小規模企業共済' },
+];
+// POST /api/tax/simulate の本文。空の欄は送らない（既定）。方式を選んでいればプロファイルを上書き（区分は簡易課税のときだけ）。だめなら理由の文。
+export function taxSimBody(f: TaxSimForm): Record<string, unknown> | string {
+  const body: Record<string, unknown> = f.year === '' ? {} : { year: Number(f.year) };
+  for (const x of SIM_FIELDS) {
+    const v = parseMan(f[x.k]);
+    if (v === undefined) return `「${x.label}」は 0 以上の整数（万円）で入れてください。`;
+    if (v !== null) body[x.key] = v;
+  }
+  if (f.mode !== '') body.profile = { consumption_mode: f.mode, ...(f.mode === 'simplified' && f.cls !== '' ? { simplified_class: Number(f.cls) } : {}) };
+  return body;
+}
+
+// 負担の表の行: 「所得税（2027 年分）」「住民税（2028 年度）」。個人事業税は 0 なら出さない。
+export function simAmountRows(amounts: TaxSimAmount[]): { kind: TaxSimKind; label: string; amount: number }[] {
+  return amounts
+    .filter((a) => a.kind !== 'biz_tax' || a.amount !== 0)
+    .map((a) => ({ kind: a.kind, label: `${TAX_SIM_LABELS[a.kind]}（${a.year} 年${a.basis === 'year' ? '分' : '度'}）`, amount: a.amount }));
+}
+
+// 「+100万で手取り +62.3万（負担率 37.7%）」。
+export const marginalText = (m: TaxSimResponse['marginal']) =>
+  `+${man(m.delta)}で手取り ${m.take_home_increase > 0 ? '+' : ''}${simMan(m.take_home_increase)}（負担率 ${simPct(m.rate)}）`;
+
+// 方式の比較の画面の行: 2 割特例 / 簡易（区分）/ 本則（概算）。免税は出さない（インボイス登録済みのため。API は返す）。
+// 簡易の区分は 入力の区分 → プロファイルの区分 → 第 5 種 の順。
+export function simCompareRows(rows: CtaxCompareRow[], inputClass: number | null, profileClass: number | null): CtaxCompareRow[] {
+  const cls = inputClass ?? profileClass ?? SIM_DEFAULT_CLASS;
+  const pick = (mode: CtaxCompareRow['mode'], c: number | null = null) => rows.find((r) => r.mode === mode && (c === null || r.simplified_class === c));
+  return [pick('special20'), pick('simplified', cls), pick('standard')].filter((r): r is CtaxCompareRow => r !== undefined);
+}
+export function ctaxRowLabel(r: CtaxCompareRow): string {
+  if (r.mode === 'simplified') return `簡易（第 ${r.simplified_class} 種）`;
+  if (r.mode === 'standard') return '本則（概算）';
+  return CONSUMPTION_LABELS[r.mode] ?? r.mode;
+}
+// 「最安」の行: 表示する行（simCompareRows の結果）のうち、使えて消費税が最小の行。同額なら前の行（2 割特例 → 簡易 → 本則）。
+// API の best は簡易の全区分から選ぶので使わない。使える行が無ければ null。
+export function bestRow(rows: CtaxCompareRow[]): CtaxCompareRow | null {
+  let best: CtaxCompareRow | null = null;
+  for (const r of rows) if (r.available && r.tax !== null && (best === null || r.tax < best.tax!)) best = r;
+  return best;
+}
+
+// 方式が使えない理由。
+export const CTAX_REASON_TEXT: Record<CtaxReason, string> = {
+  special20_expired: '2026 年分まで',
+  over_10m: '売上 1,000 万超',
+  over_50m: '売上 5,000 万超',
+  revenue_missing: '売上が未入力',
+};
+export const ctaxReasonText = (r: CtaxReason) => CTAX_REASON_TEXT[r] ?? r;
+// 2 割特例の最後の年分（src/cashflow/tax/rates.ts の CTAX_SPECIAL20_LAST_YEAR）。
+const SPECIAL20_LAST_YEAR = 2026;
+
+// year は試算の年（mode_defaulted の理由を分けるのに使う）。
+export function simWarningText(w: TaxSimWarning, year?: number): string {
+  switch (w.kind) {
+    case 'consumption_tax_mode_unset':
+      return '消費税の方式が未設定なので、消費税は 0 円で計算しています。';
+    case 'simplified_class_missing':
+      return '簡易課税の事業区分が未選択なので、消費税は 0 円で計算しています。';
+    case 'revenue_missing':
+      return '売上が無いので消費税は計算していません。';
+    case 'selected_mode_unavailable':
+      // 2 割特例の期限切れはエンジンが消費税を作らない（0 円）。売上の上限超えはその方式のまま計算する。
+      return `選んだ方式（${CONSUMPTION_LABELS[w.mode] ?? w.mode}）は使えない条件です（${ctaxReasonText(w.reason)}）。${
+        w.reason === 'special20_expired' ? '消費税は 0 円で計算しています。' : '消費税はその方式のまま計算しています。'
+      }`;
+    case 'mode_defaulted': {
+      // 2 割特例は期限切れか売上 1,000 万超、免税は売上 1,000 万超。
+      const why =
+        w.from === 'special20' && (year === undefined || year > SPECIAL20_LAST_YEAR)
+          ? `2 割特例は ${SPECIAL20_LAST_YEAR + 1} 年分から使えないため`
+          : '売上 1,000 万円超のため';
+      return `${why}、${w.to === 'simplified' ? `簡易課税（第 ${w.simplified_class} 種）` : '本則（概算）'}で計算しています。`;
+    }
+    case 'rates_assumed':
+      return `${w.year} 年の税率・料率はまだ無いので、${w.latest} 年の値で計算しています。`;
+    default:
+      return taxWarningText(w);
+  }
+}
+const ASSUMPTION_TEXT: Record<string, string> = { pension_prepay24_as_prepay12: '国民年金の 2 年前納は、1 年前納として計算しています。' };
+// 結果の上に 1 行ずつ出す文（警告と、該当する前提。同じ文はまとめる）。
+export function simNotices(r: Pick<TaxSimResponse, 'year' | 'warnings' | 'assumptions'>): string[] {
+  return [...new Set([...r.warnings.map((w) => simWarningText(w, r.year)), ...r.assumptions.flatMap((a) => (ASSUMPTION_TEXT[a] ? [ASSUMPTION_TEXT[a]] : []))])];
 }
 
 // ---- 照合・経費の一覧（docs/cashflow.md §16・§16.1。src/bank/match.ts・src/expenses/summary.ts） ----

@@ -54,7 +54,8 @@ function YearBlock({ g, marks, flat, open, onToggle }: { g: YearGroup; marks: Mo
                     <span key={`${n.category}-${n.name}`} class="m-mk">
                       <span class={`mk mk-${n.category}`} />
                       {n.name}
-                      {n.estimate ? ' · 見積' : ''} {yen(n.amount)}
+                      {n.estimate ? ' · 見積' : ''} {n.variable ? '約 ' : ''}
+                      {yen(n.amount)}
                     </span>
                   ))}
                   <span class={m.balance_end < 0 ? 'm-frow-bal m-warn-text' : 'm-frow-bal'}>{yen(m.balance_end)}</span>
