@@ -29,8 +29,8 @@ import {
   type TagRuleRow,
 } from './tagRepo.ts';
 
-// カテゴリ（V10。固定 12 種 + 未分類 = null）。DB に CHECK は無いので、ここで検証する。
-export const CATEGORIES = ['food', 'daily', 'transport', 'telecom', 'housing', 'utilities', 'insurance', 'tax', 'car', 'leisure', 'medical', 'other'] as const;
+// カテゴリ（V10。固定 13 種 + 未分類 = null）。DB に CHECK は無いので、ここで検証する。
+export const CATEGORIES = ['food', 'daily', 'transport', 'telecom', 'housing', 'utilities', 'insurance', 'tax', 'car', 'leisure', 'medical', 'savings', 'other'] as const;
 export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABELS: Record<Category, string> = {
   food: '食費',
@@ -44,6 +44,7 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   car: '車',
   leisure: '娯楽',
   medical: '医療',
+  savings: '積立',
   other: 'その他',
 };
 export const UNCATEGORIZED_LABEL = '未分類';

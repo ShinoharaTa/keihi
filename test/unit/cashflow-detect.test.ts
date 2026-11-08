@@ -9,11 +9,18 @@ import { appendAudit, verifyAudit } from '../../src/audit.ts';
 import { insertAccount, insertBankTxn, updateAccountSettings, type TxnSide } from '../../src/bank/repo.ts';
 import { detectTransfers } from '../../src/bank/transfers.ts';
 import { addDays, addMonths } from '../../src/calendar/businessDays.ts';
-import { acceptCandidate, detectRecurrences, dismissCandidate, findRecurrences, nextDueFromCandidate } from '../../src/cashflow/detect.ts';
-import { insertRecurrenceCandidate, listRecurrenceCandidates, listScheduledItems, setRecurrenceCandidateState } from '../../src/cashflow/repo.ts';
-import { createItem } from '../../src/cashflow/schedule.ts';
-import { openDb, type Db } from '../../src/db/index.ts';
-import { migrate } from '../../src/db/migrate.ts';
+import { acceptCandidate, detectRecurrences, dismissCandidate, findRecurrences, nextDueFromCandidate, variableAmount } from '../../src/cashflow/detect.ts';
+import {
+  getRecurrenceCandidate,
+  getScheduledItem,
+  insertRecurrenceCandidate,
+  listRecurrenceCandidates,
+  listScheduledItems,
+  setRecurrenceCandidateState,
+} from '../../src/cashflow/repo.ts';
+import { createItem, deactivateItem } from '../../src/cashflow/schedule.ts';
+import { integrityCheck, openDb, type Db } from '../../src/db/index.ts';
+import { listMigrations, migrate } from '../../src/db/migrate.ts';
 import { createAuth } from '../../src/web/auth.ts';
 import { cashflowRoutes } from '../../src/web/routes/cashflow.ts';
 
@@ -374,14 +381,14 @@ describe('既存の候補・予定項目との重複', () => {
     db.close();
   });
 
-  test('system が superseded で dismissed にした候補は、作らない判定に数えない', () => {
+  test('system が superseded で dismissed にした候補（dismissed_by = system）は、作らない判定に数えない', () => {
     const { db, A } = fresh();
     const yms = ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'];
     const ids = yms.map((ym) => txn(db, A, day(ym, 10), 5000, 'テスト保険'));
     const occ = ids.slice(0, 3).map((id, i) => ({ date: day(yms[i], 10), amount: 5000, bank_txn_id: id }));
     // 同じ摘要・周期・金額の候補を、system が superseded で dismissed にした状態で置く。
     const sys = insertRecurrenceCandidate(db, { accountId: A, descriptionNorm: 'テスト保険', interval: 'monthly', amount: 5000, occurrences: occ, now });
-    setRecurrenceCandidateState(db, sys.id, 'dismissed', null, now);
+    setRecurrenceCandidateState(db, sys.id, 'dismissed', null, now, 'system');
     appendAudit(db, { actor: 'system', action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: sys.id, payload: { reason: 'superseded', by: 'X' } }, T0);
     assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
     const neu = listRecurrenceCandidates(db, { state: 'open' });
@@ -580,6 +587,152 @@ describe('acceptCandidate / dismissCandidate', () => {
   });
 });
 
+describe('不定額の候補（第 2 版）', () => {
+  // 2026-04 〜 2026-10 の毎月 10 日。
+  const YMS7 = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'];
+  const variable = (db: Db, A: string, amounts: number[], yms = YMS7.slice(-amounts.length), desc = 'テストでんき') =>
+    amounts.map((a, i) => txn(db, A, day(yms[i], 10), a, desc));
+  const kinds = (db: Db, today = TODAY) =>
+    findRecurrences(db, { today })
+      .map((d) => `${d.descriptionNorm}:${d.interval}:${d.amountKind}:${d.amount}:${d.occurrences.length}`)
+      .sort();
+
+  test('代表値: 直近 6 回の中央値（偶数個は中央 2 つの平均）を 100 円単位に切り上げ', () => {
+    assert.equal(variableAmount([30000, 10000, 13000, 8000, 12000, 9000, 11500]), 10800); // 直近 6 回 → (10000 + 11500) / 2 = 10750
+    assert.equal(variableAmount([8000, 12000, 9050]), 9100);
+    assert.equal(variableAmount([9000, 9000, 9000]), 9000);
+  });
+
+  test('金額が毎回 ±30% で変わる月 1 回 → 毎月の不定額。額は直近 6 回の中央値の 100 円切り上げ', () => {
+    const { db, A } = fresh();
+    variable(db, A, [30000, 10000, 13000, 8000, 12000, 9000, 11500]);
+    assert.deepEqual(kinds(db), ['テストでんき:monthly:variable:10800:7']);
+    db.close();
+  });
+
+  test('定額の列は amountKind = fixed', () => {
+    const { db, A } = fresh();
+    variable(db, A, [5000, 5000, 5000]);
+    assert.deepEqual(kinds(db), ['テストでんき:monthly:fixed:5000:3']);
+    db.close();
+  });
+
+  test('不定額の月 1 回 13 回のうち 1 年違いで ±5% の 2 回があっても、毎年は作らない（段 1 が明細を取る）', () => {
+    const { db, A } = fresh();
+    const yms = Array.from({ length: 13 }, (_, i) => addMonths('2025-10-01', i).slice(0, 7));
+    const amounts = [35000, 20000, 28000, 22000, 31000, 18000, 26000, 24000, 30000, 19000, 27000, 23000, 35500];
+    variable(db, A, amounts, yms);
+    assert.deepEqual(kinds(db), ['テストでんき:monthly:variable:25500:13']);
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
+    assert.deepEqual(listRecurrenceCandidates(db).map((c) => [c.interval, c.amount_kind]), [['monthly', 'variable']]);
+    db.close();
+  });
+
+  test('不定額は毎月 4 回・隔月 3 回から。3 か月ごと・毎年の不定額は作らない', () => {
+    const { db, A } = fresh();
+    variable(db, A, [10000, 13000, 8000], undefined, 'テスト三回');
+    variable(db, A, [10000, 13000, 8000, 11500], undefined, 'テスト四回');
+    for (const [d, a] of [['2026-06-15', 6000], ['2026-08-15', 8000], ['2026-10-15', 7000]] as const) txn(db, A, d, a, 'テスト水道');
+    for (const [d, a] of [['2026-01-20', 40000], ['2026-04-20', 52000], ['2026-07-20', 31000], ['2026-10-20', 45000]] as const) txn(db, A, d, a, 'テスト国保');
+    for (const [d, a] of [['2024-12-05', 30000], ['2025-12-05', 40000]] as const) txn(db, A, d, a, 'テスト年払い');
+    assert.deepEqual(kinds(db), ['テスト四回:monthly:variable:10800:4', 'テスト水道:bimonthly:variable:7000:3']);
+    db.close();
+  });
+
+  test('人が却下した不定額は、代表値が変わっても作らない。dismissed_by = human', () => {
+    const { db, A } = fresh();
+    variable(db, A, [10000, 13000, 8000, 12000, 9000], YMS7.slice(1, 6));
+    assert.deepEqual(detectRecurrences(db, { today: '2026-10-01', now: T0 }), { created: 1, updated: 0 });
+    const c = listRecurrenceCandidates(db)[0];
+    assert.deepEqual([c.amount_kind, c.amount], ['variable', 10000]);
+    assert.equal(dismissCandidate(db, c.id, by, T0).dismissed_by, 'human');
+    txn(db, A, day('2026-10', 10), 30000, 'テストでんき');
+    assert.equal(findRecurrences(db, { today: TODAY })[0].amount, 11000); // 代表値が変わった
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 0, updated: 0 });
+    db.close();
+  });
+
+  test('open の不定額も代表値が変わっただけでは作り直さない', () => {
+    const { db, A } = fresh();
+    variable(db, A, [10000, 13000, 8000, 12000, 9000], YMS7.slice(1, 6));
+    detectRecurrences(db, { today: '2026-10-01', now: T0 });
+    txn(db, A, day('2026-10', 10), 30000, 'テストでんき');
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 0, updated: 0 });
+    assert.equal(listRecurrenceCandidates(db, { state: 'open' }).length, 1);
+    db.close();
+  });
+
+  test('同じ口座の active な予定に、同じ周期で額が明細の最小〜最大に入るものがあれば作らない（止めた項目なら作る）', () => {
+    const mk = (db: Db, A: string, amount: number) =>
+      createItem(
+        db,
+        { name: '電気代', amount, direction: 'out', category: 'other', accountId: A, recurrence: 'monthly', anchorDate: '2026-11-10', endDate: null, notifyDaysBefore: 14, origin: 'manual' },
+        by,
+        T0,
+      );
+    const { db, A } = fresh();
+    variable(db, A, [10000, 13000, 8000, 12000]);
+    mk(db, A, 13001); // 最大を超える
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 1);
+    db.close();
+    const f = fresh();
+    variable(f.db, f.A, [10000, 13000, 8000, 12000]);
+    const it = mk(f.db, f.A, 8000);
+    assert.equal(detectRecurrences(f.db, { today: TODAY, now: T0 }).created, 0);
+    deactivateItem(f.db, it.id, by, T0);
+    assert.equal(detectRecurrences(f.db, { today: TODAY, now: T0 }).created, 1);
+    f.db.close();
+  });
+
+  test('明細が重なる open の毎年の定額は、不定額で置き換える（dismissed_by = system、監査 1 件）', () => {
+    const { db, A } = fresh();
+    const yms = Array.from({ length: 13 }, (_, i) => addMonths('2025-10-01', i).slice(0, 7));
+    const ids = variable(db, A, [35000, 20000, 28000, 22000, 31000, 18000, 26000, 24000, 30000, 19000, 27000, 23000, 35500], yms);
+    const old = insertRecurrenceCandidate(db, {
+      accountId: A,
+      descriptionNorm: 'テストでんき',
+      interval: 'yearly',
+      amount: 35500,
+      occurrences: [
+        { date: '2025-10-10', amount: 35000, bank_txn_id: ids[0] },
+        { date: '2026-10-10', amount: 35500, bank_txn_id: ids[12] },
+      ],
+      now,
+    });
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 1 });
+    const neu = listRecurrenceCandidates(db, { state: 'open' });
+    assert.deepEqual(neu.map((c) => [c.interval, c.amount_kind]), [['monthly', 'variable']]);
+    const o = getRecurrenceCandidate(db, old.id)!;
+    assert.deepEqual([o.state, o.dismissed_by], ['dismissed', 'system']);
+    const audits = db.prepare("SELECT entity_id, payload_json FROM audit_log WHERE actor = 'system' AND action = 'recurrence_candidate.dismissed'").all() as {
+      entity_id: string;
+      payload_json: string;
+    }[];
+    assert.deepEqual(audits.map((a) => [a.entity_id, JSON.parse(a.payload_json)]), [[old.id, { reason: 'superseded', by: neu[0].id }]]);
+    assert.equal(verifyAudit(db).ok, true);
+    db.close();
+  });
+
+  test('受け入れると台帳の amount_kind = variable、amount = 候補の額（上書きもできる）', () => {
+    const { db, A } = fresh();
+    variable(db, A, [30000, 10000, 13000, 8000, 12000, 9000, 11500]);
+    detectRecurrences(db, { today: TODAY, now: T0 });
+    const c = listRecurrenceCandidates(db)[0];
+    const { item } = acceptCandidate(db, c.id, by, { category: 'savings' }, T0);
+    assert.deepEqual([item.amount_kind, item.amount, item.category, item.recurrence], ['variable', 10800, 'savings', 'monthly']);
+    assert.equal(getScheduledItem(db, item.id)!.amount_kind, 'variable');
+    // 受け入れた後は再検出で作らない（同じ名前の active な予定がある）。
+    assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
+    db.close();
+    const f = fresh();
+    variable(f.db, f.A, [10000, 13000, 8000, 12000]);
+    detectRecurrences(f.db, { today: TODAY, now: T0 });
+    const r = acceptCandidate(f.db, listRecurrenceCandidates(f.db)[0].id, by, { amount: 15000 }, T0);
+    assert.deepEqual([r.item.amount_kind, r.item.amount], ['variable', 15000]);
+    f.db.close();
+  });
+});
+
 describe('/api/recurrence_candidates', () => {
   const HOST = '127.0.0.1:8787';
   const USER = 'me@example.com';
@@ -595,6 +748,7 @@ describe('/api/recurrence_candidates', () => {
     app.route('/api', cashflowRoutes({ db, now: () => T0, config: { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } }));
   });
   const headers = { Host: HOST, 'Tailscale-User-Login': USER, 'content-type': 'application/json' };
+  const pick = (o: Record<string, unknown>, ...ks: string[]) => Object.fromEntries(ks.map((k) => [k, o[k]]));
   const get = (url: string) => app.request(url, { headers });
   const post = (url: string, body?: unknown) =>
     app.request(url, { method: 'POST', headers, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
@@ -608,8 +762,9 @@ describe('/api/recurrence_candidates', () => {
 
     res = await get('/api/recurrence_candidates?state=open');
     assert.equal(res.status, 200);
-    const { candidates } = (await res.json()) as { candidates: { id: string; description_norm: string }[] };
+    const { candidates } = (await res.json()) as { candidates: { id: string; description_norm: string; amount_kind: string; dismissed_by: string | null }[] };
     assert.equal(candidates.length, 4);
+    for (const c of candidates) assert.deepEqual([c.amount_kind, c.dismissed_by], ['fixed', null]);
     const id = (s: string) => candidates.find((c) => c.description_norm === s)!.id;
 
     res = await post(`/api/recurrence_candidates/${id('自動車税')}/accept`, { category: 'car' });
@@ -622,7 +777,7 @@ describe('/api/recurrence_candidates', () => {
 
     res = await post(`/api/recurrence_candidates/${id('水道')}/dismiss`);
     assert.equal(res.status, 200);
-    assert.equal(((await res.json()) as { state: string }).state, 'dismissed');
+    assert.deepEqual(pick((await res.json()) as Record<string, unknown>, 'state', 'dismissed_by'), { state: 'dismissed', dismissed_by: 'human' });
 
     res = await get('/api/recurrence_candidates?state=open');
     assert.equal(((await res.json()) as { candidates: unknown[] }).candidates.length, 2);
@@ -675,5 +830,86 @@ describe('/api/recurrence_candidates', () => {
     assert.equal(res.status, 400);
     assert.deepEqual(await res.json(), { error: 'invalid_state' });
     assert.equal(listScheduledItems(db).length, 0);
+  });
+});
+
+describe('0009_recurrence_v2 のマイグレーション', () => {
+  test('0008 まで上げた DB（行あり）から上がり、行数・estimate_key・pinned・state が保たれ、dismissed_by は監査ログから埋まる', () => {
+    const db = openDb(path.join(root, `${n++}.db`));
+    try {
+      const ms = listMigrations();
+      const upTo8 = ms.filter((m) => m.version <= 8);
+      assert.equal(upTo8.at(-1)!.name, '0008_tax.sql');
+      migrate(db, upTo8);
+      const A = insertAccount(db, { provider: 'fake', name: '銀行A', kind: 'bank', source: 'csv', now }).id;
+      const base = { amount: 1000, direction: 'out', category: 'other', accountId: A, recurrence: 'monthly', anchorDate: '2026-12-01', endDate: null, notifyDaysBefore: 14 } as const;
+      const system = { actor: 'system' };
+      const manual = createItem(db, { ...base, name: 'テスト家賃', origin: 'manual' }, by, T0);
+      const est = createItem(db, { ...base, name: '見積', origin: 'estimate', estimateKey: 'income_tax:2026:final', accountId: null }, system, T0);
+      db.prepare('UPDATE scheduled_items SET pinned = 1 WHERE id = ?').run(est.id);
+      const stopped = deactivateItem(db, createItem(db, { ...base, name: '止めた', origin: 'manual' }, by, T0).id, by, T0);
+      const cand = (d: string) => insertRecurrenceCandidate(db, { accountId: A, descriptionNorm: d, amount: 1000, interval: 'monthly', occurrences: [], now });
+      const open = cand('テスト開');
+      const accepted = cand('テスト受');
+      setRecurrenceCandidateState(db, accepted.id, 'accepted', manual.id, now);
+      const human = cand('テスト人');
+      setRecurrenceCandidateState(db, human.id, 'dismissed', null, now);
+      appendAudit(db, { actor: 'user', action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: human.id, payload: { user: 'me' } }, T0);
+      const sys = cand('テスト系');
+      setRecurrenceCandidateState(db, sys.id, 'dismissed', null, now);
+      appendAudit(db, { actor: 'system', action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: sys.id, payload: { reason: 'superseded', by: open.id } }, T0);
+      const beforeItems = db.prepare('SELECT * FROM scheduled_items ORDER BY id').all() as Record<string, unknown>[];
+      const beforeCands = db.prepare('SELECT * FROM recurrence_candidates ORDER BY id').all() as Record<string, unknown>[];
+      assert.throws(() => createItem(db, { ...base, name: 'x', category: 'savings', origin: 'manual' }, by, T0), /CHECK/);
+
+      assert.deepEqual(migrate(db, ms.filter((m) => m.version <= 9)), ['0009_recurrence_v2.sql']);
+      assert.deepEqual(integrityCheck(db), []);
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.equal((db.prepare(`SELECT count(*) n FROM sqlite_master WHERE instr(name, '_old') > 0 OR instr(sql, '_old') > 0`).get() as { n: number }).n, 0);
+      assert.deepEqual(
+        db.prepare('SELECT * FROM scheduled_items ORDER BY id').all().map((r) => ({ ...r })),
+        beforeItems.map((r) => ({ ...r, amount_kind: 'fixed' })),
+      );
+      const dismissedBy: Record<string, string | null> = { [open.id]: null, [accepted.id]: null, [human.id]: 'human', [sys.id]: 'system' };
+      assert.deepEqual(
+        db.prepare('SELECT * FROM recurrence_candidates ORDER BY id').all().map((r) => ({ ...r })),
+        beforeCands.map((r) => ({ ...r, amount_kind: 'fixed', dismissed_by: dismissedBy[r.id as string] })),
+      );
+      const e = getScheduledItem(db, est.id)!;
+      assert.deepEqual([e.estimate_key, e.pinned], ['income_tax:2026:final', 1]);
+      assert.equal(getScheduledItem(db, stopped.id)!.active, 0);
+      assert.equal(getRecurrenceCandidate(db, accepted.id)!.scheduled_item_id, manual.id);
+
+      // 新しい表でも索引・外部キー・CHECK・トリガーが効く。savings と variable が入る。
+      assert.equal(createItem(db, { ...base, name: 'テスト積立A', category: 'savings', origin: 'manual', amountKind: 'variable' }, by, T0).category, 'savings');
+      assert.throws(() => createItem(db, { ...base, name: '見積2', origin: 'estimate', estimateKey: 'income_tax:2026:final', accountId: null }, system, T0), /UNIQUE/);
+      assert.throws(() => db.prepare(`UPDATE scheduled_items SET estimate_key = 'k2' WHERE id = ?`).run(est.id), /不変/);
+      assert.throws(() => db.prepare(`UPDATE scheduled_items SET amount_kind = 'rough' WHERE id = ?`).run(manual.id), /CHECK/);
+      assert.throws(() => db.prepare('DELETE FROM scheduled_items WHERE id = ?').run(manual.id), /削除できない/);
+      assert.throws(() => db.prepare('DELETE FROM recurrence_candidates WHERE id = ?').run(open.id), /削除できない/);
+      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET amount_kind = 'variable' WHERE id = ?`).run(open.id), /state・scheduled_item_id 以外/);
+      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET dismissed_by = 'agent' WHERE id = ?`).run(human.id), /CHECK/);
+      assert.throws(() => db.prepare('UPDATE recurrence_candidates SET scheduled_item_id = ? WHERE id = ?').run('NOPE', accepted.id), /FOREIGN KEY/);
+      const objects = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE tbl_name IN ('scheduled_items', 'recurrence_candidates') AND type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name`,
+        )
+        .all() as { name: string }[];
+      assert.deepEqual(
+        objects.map((r) => r.name),
+        [
+          'recurrence_candidates_account',
+          'recurrence_candidates_immutable',
+          'recurrence_candidates_no_delete',
+          'scheduled_items_active',
+          'scheduled_items_estimate_key',
+          'scheduled_items_immutable',
+          'scheduled_items_no_delete',
+        ],
+      );
+      assert.equal(verifyAudit(db).ok, true);
+    } finally {
+      db.close();
+    }
   });
 });

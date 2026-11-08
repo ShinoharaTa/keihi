@@ -5,7 +5,8 @@ import { ulid } from '../db/ids.ts';
 
 export const DIRECTIONS = ['in', 'out'] as const;
 export type Direction = (typeof DIRECTIONS)[number];
-export const CATEGORIES = ['tax', 'insurance', 'car', 'other', 'income'] as const;
+// savings（積立）は direction = out だけ（0009_recurrence_v2.sql）。
+export const CATEGORIES = ['tax', 'insurance', 'car', 'savings', 'other', 'income'] as const;
 export type Category = (typeof CATEGORIES)[number];
 export const RECURRENCES = ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'] as const;
 export type Recurrence = (typeof RECURRENCES)[number];
@@ -15,6 +16,11 @@ export const INTERVALS = ['monthly', 'bimonthly', 'quarterly', 'yearly', 'bienni
 export type Interval = (typeof INTERVALS)[number];
 export const CANDIDATE_STATES = ['open', 'accepted', 'dismissed'] as const;
 export type CandidateState = (typeof CANDIDATE_STATES)[number];
+// 金額の種類。variable は金額が毎回変わる支払い（額は概算。0009_recurrence_v2.sql）。
+export const AMOUNT_KINDS = ['fixed', 'variable'] as const;
+export type AmountKind = (typeof AMOUNT_KINDS)[number];
+// 却下した主体。system は検出が置き換えた（superseded）もの。
+export type DismissedBy = 'human' | 'system';
 
 export type ScheduledItemRow = {
   id: string;
@@ -33,6 +39,7 @@ export type ScheduledItemRow = {
   updated_at: string;
   estimate_key: string | null; // origin = estimate のときだけ（0008_tax.sql）
   pinned: 0 | 1; // 人が手直しした見積もりの項目。再計算で上書きしない
+  amount_kind: AmountKind; // 0009_recurrence_v2.sql
 };
 
 export type RecurrenceCandidateRow = {
@@ -46,6 +53,8 @@ export type RecurrenceCandidateRow = {
   scheduled_item_id: string | null;
   created_at: string;
   updated_at: string;
+  amount_kind: AmountKind; // 不変
+  dismissed_by: DismissedBy | null; // dismissed のときだけ
 };
 
 // ---- scheduled_items ----
@@ -62,17 +71,21 @@ export type NewScheduledItem = {
   notifyDaysBefore: number;
   origin: Origin;
   estimateKey?: string | null;
+  amountKind?: AmountKind;
   now: string;
 };
 
-// estimate_key は渡したときだけ書く（0008 より前の版の DB でも見積もり以外は作れるように。マイグレーションのテストが使う）。
+// estimate_key は渡したときだけ、amount_kind は variable のときだけ書く
+// （0008・0009 より前の版の DB でも見積もり以外・定額は作れるように。マイグレーションのテストが使う）。
 export function insertScheduledItem(db: Db, a: NewScheduledItem): ScheduledItemRow {
   const id = ulid(Date.parse(a.now));
-  const key = a.estimateKey ?? null;
+  const extra: [string, string][] = [];
+  if (a.estimateKey != null) extra.push(['estimate_key', a.estimateKey]);
+  if (a.amountKind === 'variable') extra.push(['amount_kind', a.amountKind]);
   db.prepare(
-    `INSERT INTO scheduled_items (id, name, amount, direction, category, account_id, recurrence, anchor_date, end_date, notify_days_before, origin, active, created_at, updated_at${key !== null ? ', estimate_key' : ''})
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?${key !== null ? ', ?' : ''})`,
-  ).run(id, a.name, a.amount, a.direction, a.category, a.accountId, a.recurrence, a.anchorDate, a.endDate, a.notifyDaysBefore, a.origin, a.now, a.now, ...(key !== null ? [key] : []));
+    `INSERT INTO scheduled_items (id, name, amount, direction, category, account_id, recurrence, anchor_date, end_date, notify_days_before, origin, active, created_at, updated_at${extra.map(([c]) => `, ${c}`).join('')})
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?${extra.map(() => ', ?').join('')})`,
+  ).run(id, a.name, a.amount, a.direction, a.category, a.accountId, a.recurrence, a.anchorDate, a.endDate, a.notifyDaysBefore, a.origin, a.now, a.now, ...extra.map(([, v]) => v));
   return getScheduledItem(db, id)!;
 }
 
@@ -98,6 +111,7 @@ export type ScheduledItemPatch = Partial<{
   origin: Origin;
   active: 0 | 1;
   pinned: 0 | 1;
+  amountKind: AmountKind;
 }>;
 
 const ITEM_COLUMNS: Record<keyof ScheduledItemPatch, string> = {
@@ -113,6 +127,7 @@ const ITEM_COLUMNS: Record<keyof ScheduledItemPatch, string> = {
   origin: 'origin',
   active: 'active',
   pinned: 'pinned',
+  amountKind: 'amount_kind',
 };
 
 // 渡したキーだけ書く。項目が無ければ null。
@@ -137,15 +152,18 @@ export type NewRecurrenceCandidate = {
   descriptionNorm: string;
   amount: number;
   interval: Interval;
+  amountKind?: AmountKind;
   occurrences: unknown[];
   now: string;
 };
 
+// amount_kind は variable のときだけ書く（0009 より前の版の DB でも定額は作れるように。マイグレーションのテストが使う）。
 export function insertRecurrenceCandidate(db: Db, a: NewRecurrenceCandidate): RecurrenceCandidateRow {
   const id = ulid(Date.parse(a.now));
+  const v = a.amountKind === 'variable';
   db.prepare(
-    `INSERT INTO recurrence_candidates (id, account_id, description_norm, amount, interval, occurrences_json, state, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+    `INSERT INTO recurrence_candidates (id, account_id, description_norm, amount, interval, occurrences_json, state, created_at, updated_at${v ? ', amount_kind' : ''})
+     VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?${v ? ", 'variable'" : ''})`,
   ).run(id, a.accountId, a.descriptionNorm, a.amount, a.interval, JSON.stringify(a.occurrences), a.now, a.now);
   return getRecurrenceCandidate(db, id)!;
 }
@@ -196,17 +214,6 @@ export function listRecurrenceCandidatesFor(db: Db, accountId: string, descripti
     .all(accountId, descriptionNorm, interval) as RecurrenceCandidateRow[];
 }
 
-// actor が dismissed にした（payload の reason = superseded）候補の id。監査ログから読む。
-export function listSupersededCandidateIds(db: Db, actor: string): Set<string> {
-  const rows = db
-    .prepare(
-      `SELECT entity_id FROM audit_log
-        WHERE actor = ? AND action = 'recurrence_candidate.dismissed' AND json_extract(payload_json, '$.reason') = 'superseded'`,
-    )
-    .all(actor) as { entity_id: string }[];
-  return new Set(rows.map((r) => r.entity_id));
-}
-
 export type DetectTxnRow = { id: string; account_id: string; txn_date: string; amount: number; description_norm: string };
 
 // 検出に使う支出の明細（from 〜 to、両端を含む）。口座が active かつ include_in_cashflow のものだけ。口座・摘要・日付の順。
@@ -234,9 +241,27 @@ export function hasActiveScheduledItemLike(
     .get(a.accountId, a.name, a.recurrence, a.amount, k, a.amount, k);
 }
 
-// 状態を変える（accepted なら台帳の項目を結ぶ）。候補が無ければ null。
-export function setRecurrenceCandidateState(db: Db, id: string, state: CandidateState, scheduledItemId: string | null, now: string): RecurrenceCandidateRow | null {
-  const r = db.prepare('UPDATE recurrence_candidates SET state = ?, scheduled_item_id = ?, updated_at = ? WHERE id = ?').run(state, scheduledItemId, now, id);
+// active な予定項目に、同じ口座で「同じ名前」か「同じ周期で金額が min〜max（両端を含む）」のものがあるか（不定額の候補の重複判定）。
+export function hasActiveScheduledItemWithin(db: Db, a: { accountId: string; name: string; recurrence: Recurrence; min: number; max: number }): boolean {
+  return !!db
+    .prepare('SELECT 1 FROM scheduled_items WHERE active = 1 AND account_id = ? AND (name = ? OR (recurrence = ? AND amount BETWEEN ? AND ?)) LIMIT 1')
+    .get(a.accountId, a.name, a.recurrence, a.min, a.max);
+}
+
+// 状態を変える（accepted なら台帳の項目を結ぶ）。dismissed にするときは dismissedBy に却下した主体を渡す。候補が無ければ null。
+// dismissed_by は渡したときだけ書く（0009 より前の版の DB でも状態は変えられるように。マイグレーションのテストが使う）。
+export function setRecurrenceCandidateState(
+  db: Db,
+  id: string,
+  state: CandidateState,
+  scheduledItemId: string | null,
+  now: string,
+  dismissedBy?: DismissedBy,
+): RecurrenceCandidateRow | null {
+  const by = dismissedBy !== undefined ? ', dismissed_by = ?' : '';
+  const r = db
+    .prepare(`UPDATE recurrence_candidates SET state = ?, scheduled_item_id = ?, updated_at = ?${by} WHERE id = ?`)
+    .run(state, scheduledItemId, now, ...(dismissedBy !== undefined ? [dismissedBy] : []), id);
   return r.changes === 0 ? null : getRecurrenceCandidate(db, id);
 }
 

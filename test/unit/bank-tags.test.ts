@@ -201,8 +201,10 @@ describe('効くタグの決定順（V5）', () => {
 });
 
 describe('カテゴリ（V10）', () => {
-  test('固定 12 種で、全部に日本語のラベルがある', () => {
-    assert.equal(CATEGORIES.length, 12);
+  test('固定 13 種で、全部に日本語のラベルがある（積立は その他 の前）', () => {
+    assert.equal(CATEGORIES.length, 13);
+    assert.deepEqual(CATEGORIES.slice(-2), ['savings', 'other']);
+    assert.equal(CATEGORY_LABELS.savings, '積立');
     for (const c of CATEGORIES) assert.ok(CATEGORY_LABELS[c]);
     assert.equal(CATEGORY_LABELS.utilities, '水道光熱');
   });

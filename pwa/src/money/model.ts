@@ -62,7 +62,10 @@ export type BankStatus = {
 };
 
 export type Direction = 'in' | 'out';
-export type ScheduleCategory = 'tax' | 'insurance' | 'car' | 'other' | 'income';
+// savings（積立）は支出だけ（古いサーバーは invalid_category で断る）。
+export type ScheduleCategory = 'tax' | 'insurance' | 'car' | 'savings' | 'other' | 'income';
+// 金額の種類。variable は金額が毎回変わる支払い（額は概算）。古いサーバーには無い。
+export type AmountKind = 'fixed' | 'variable';
 // quarterly は API 側で追加中（古いサーバーは invalid_recurrence で断る）。
 export type Recurrence = 'once' | 'monthly' | 'bimonthly' | 'quarterly' | 'yearly' | 'biennial';
 export type ScheduledItem = {
@@ -81,6 +84,7 @@ export type ScheduledItem = {
   // 税・保険の見積もり（origin = estimate）の key と、人が手直ししたか（古いサーバーには無い）。
   estimate_key?: string | null;
   pinned?: 0 | 1;
+  amount_kind?: AmountKind;
 };
 export type Candidate = {
   id: string;
@@ -93,13 +97,14 @@ export type Candidate = {
   interval: Exclude<Recurrence, 'once'>;
   occurrences_json: string;
   state: string;
+  amount_kind?: AmountKind;
 };
 
 // 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。
 export const candidateName = (c: Candidate) => c.description || c.description_norm;
 
-// origin・estimate_key・pinned は追加中の項目（古いサーバーには無い）。
-export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string; origin?: string; estimate_key?: string | null; pinned?: 0 | 1 };
+// origin・estimate_key・pinned・amount_kind は追加中の項目（古いサーバーには無い）。
+export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string; origin?: string; estimate_key?: string | null; pinned?: 0 | 1; amount_kind?: AmountKind };
 export type ForecastMonth = {
   month: string;
   planned_in: number;
@@ -173,8 +178,8 @@ export const KIND_LABELS: Record<TransferKind, string> = { transfer: '振替', c
 export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = { bank: '銀行', card: 'カード', wallet: '電子マネー', paypay: 'PayPay', cash: '現金' };
 export const VISIBILITY_LABELS: Record<McpVisibility, string> = { full: '明細も', summary: '合計だけ', none: '見せない' };
 export const VISIBILITY_ORDER: readonly McpVisibility[] = ['none', 'summary', 'full'];
-export const SCHEDULE_CATEGORY_LABELS: Record<ScheduleCategory, string> = { tax: '税金', insurance: '保険', car: '車', other: 'その他', income: '収入' };
-export const SCHEDULE_CATEGORIES: readonly ScheduleCategory[] = ['tax', 'insurance', 'car', 'other', 'income'];
+export const SCHEDULE_CATEGORY_LABELS: Record<ScheduleCategory, string> = { tax: '税金', insurance: '保険', car: '車', savings: '積立', other: 'その他', income: '収入' };
+export const SCHEDULE_CATEGORIES: readonly ScheduleCategory[] = ['tax', 'insurance', 'car', 'savings', 'other', 'income'];
 export const RECURRENCE_LABELS: Record<Recurrence, string> = { once: '1 回', monthly: '毎月', bimonthly: '隔月', quarterly: '3 か月ごと', yearly: '毎年', biennial: '隔年' };
 export const RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'];
 export const RECURRENCE_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, bimonthly: 2, quarterly: 3, yearly: 12, biennial: 24 };
@@ -397,14 +402,15 @@ const GUESS: [RegExp, ScheduleCategory][] = [
   [/ソンポ|保険|生命|共済/, 'insurance'],
   [/税|ゼイ|国保|年金/, 'tax'],
   [/車|ジドウシャ|ガソリン|駐車/, 'car'],
+  [/積立|ツミタテ|投信|証券/, 'savings'],
 ];
 export function guessCategory(description: string): ScheduleCategory {
   const s = description.normalize('NFKC');
   return GUESS.find(([re]) => re.test(s))?.[1] ?? 'other';
 }
 
-// 支出の予定には「収入」の分類を選べない（サーバーも invalid_category_for_direction で断る）。
-export const categoriesFor = (d: Direction): readonly ScheduleCategory[] => (d === 'out' ? SCHEDULE_CATEGORIES.filter((c) => c !== 'income') : SCHEDULE_CATEGORIES);
+// 支出の予定には「収入」、収入の予定には「積立」の分類を選べない（サーバーも invalid_category_for_direction で断る）。
+export const categoriesFor = (d: Direction): readonly ScheduleCategory[] => SCHEDULE_CATEGORIES.filter((c) => c !== (d === 'out' ? 'income' : 'savings'));
 
 export type ItemDraft = {
   name: string;
@@ -738,7 +744,7 @@ export const itemInfoMap = (items: ScheduledItem[]): Record<string, ItemInfo> =>
 
 // 見通しの印: 月ごとの 税金・保険・車 の予定支出（毎月の分は除く）。
 export type MarkCat = 'tax' | 'insurance' | 'car';
-export type MonthMarks = { month: string; tax: number; insurance: number; car: number; names: { category: MarkCat; name: string; amount: number; estimate?: true }[] };
+export type MonthMarks = { month: string; tax: number; insurance: number; car: number; names: { category: MarkCat; name: string; amount: number; estimate?: true; variable?: true }[] };
 export function monthMarks(months: ForecastMonth[], info: Record<string, ItemInfo>): MonthMarks[] {
   return months.map((m) => {
     const out: MonthMarks = { month: m.month, tax: 0, insurance: 0, car: 0, names: [] };
@@ -747,7 +753,13 @@ export function monthMarks(months: ForecastMonth[], info: Record<string, ItemInf
       if (it.direction !== 'out' || !i || i.recurrence === 'monthly') continue;
       if (i.category !== 'tax' && i.category !== 'insurance' && i.category !== 'car') continue;
       out[i.category] += it.amount;
-      out.names.push({ category: i.category, name: it.name, amount: it.amount, ...(it.origin === 'estimate' ? { estimate: true as const } : {}) });
+      out.names.push({
+        category: i.category,
+        name: it.name,
+        amount: it.amount,
+        ...(it.origin === 'estimate' ? { estimate: true as const } : {}),
+        ...(it.amount_kind === 'variable' ? { variable: true as const } : {}),
+      });
     }
     return out;
   });
@@ -776,7 +788,8 @@ export function peakMonths(upcoming: Upcoming[], today: string): PeakMonth[] {
     if (it.direction !== 'out' || it.recurrence === 'monthly') continue;
     const m = out.find((x) => x.month === it.due_date.slice(0, 7));
     if (!m) continue;
-    const k = it.category === 'income' ? 'other' : it.category;
+    // 収入・積立は その他 に寄せる（凡例は 4 色のまま）。
+    const k = it.category === 'tax' || it.category === 'insurance' || it.category === 'car' ? it.category : 'other';
     m[k] += it.amount;
     m.total += it.amount;
   }
@@ -808,6 +821,17 @@ export function candidateNext(c: Candidate): string | null {
   const m = addMonth(last.slice(0, 7), RECURRENCE_MONTHS[c.interval]);
   const d = Math.min(Number(last.slice(8, 10)), Number(lastDay(m).slice(8, 10)));
   return `${m}-${pad(d)}`;
+}
+// 提案の金額の幅（occurrences の最小〜最大）。読めなければ null。
+export function candidateRange(c: Candidate): { min: number; max: number } | null {
+  try {
+    const v = JSON.parse(c.occurrences_json) as unknown;
+    if (!Array.isArray(v)) return null;
+    const xs = v.map((o) => (o as { amount?: unknown } | null)?.amount).filter((a): a is number => typeof a === 'number');
+    return xs.length ? { min: Math.min(...xs), max: Math.max(...xs) } : null;
+  } catch {
+    return null;
+  }
 }
 // 提案の出現回数。
 export function occurrenceCount(c: Candidate): number {

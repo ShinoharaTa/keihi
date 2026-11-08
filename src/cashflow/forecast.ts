@@ -24,6 +24,7 @@ import {
   listCashflowTxns,
   listScheduledItems,
   txnAccounts,
+  type AmountKind,
   type CashflowAccountRow,
   type Direction,
   type Origin,
@@ -45,6 +46,7 @@ export type ForecastItem = {
   origin: Origin;
   estimate_key: string | null;
   pinned: 0 | 1;
+  amount_kind: AmountKind; // variable の amount は概算（代表値をそのまま積む）
 };
 
 export type ForecastMonth = {
@@ -101,7 +103,7 @@ function dueItems(items: ScheduledItemRow[], from: string, to: string): Forecast
   const out: ForecastItem[] = [];
   for (const it of items) {
     for (const due of nextDueDates(it, from, to)) {
-      out.push({ id: it.id, name: it.name, amount: it.amount, direction: it.direction, due, origin: it.origin, estimate_key: it.estimate_key, pinned: it.pinned });
+      out.push({ id: it.id, name: it.name, amount: it.amount, direction: it.direction, due, origin: it.origin, estimate_key: it.estimate_key, pinned: it.pinned, amount_kind: it.amount_kind });
     }
   }
   out.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
