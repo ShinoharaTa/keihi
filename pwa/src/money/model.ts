@@ -1341,8 +1341,13 @@ export function ctaxRowLabel(r: CtaxCompareRow): string {
   if (r.mode === 'standard') return '本則（概算）';
   return CONSUMPTION_LABELS[r.mode] ?? r.mode;
 }
-export const isBestRow = (r: CtaxCompareRow, best: TaxSimResponse['best']) =>
-  best !== null && r.mode === best.mode && (r.mode !== 'simplified' || r.simplified_class === best.simplified_class);
+// 「最安」の行: 表示する行（simCompareRows の結果）のうち、使えて消費税が最小の行。同額なら前の行（2 割特例 → 簡易 → 本則）。
+// API の best は簡易の全区分から選ぶので使わない。使える行が無ければ null。
+export function bestRow(rows: CtaxCompareRow[]): CtaxCompareRow | null {
+  let best: CtaxCompareRow | null = null;
+  for (const r of rows) if (r.available && r.tax !== null && (best === null || r.tax < best.tax!)) best = r;
+  return best;
+}
 
 // 方式が使えない理由。
 export const CTAX_REASON_TEXT: Record<CtaxReason, string> = {
@@ -1362,7 +1367,10 @@ export function simWarningText(w: TaxSimWarning): string {
     case 'revenue_missing':
       return '売上が無いので消費税は計算していません。';
     case 'selected_mode_unavailable':
-      return `選んだ方式（${CONSUMPTION_LABELS[w.mode] ?? w.mode}）は使えない条件です（${ctaxReasonText(w.reason)}）。消費税はその方式のまま計算しています。`;
+      // 2 割特例の期限切れはエンジンが消費税を作らない（0 円）。売上の上限超えはその方式のまま計算する。
+      return `選んだ方式（${CONSUMPTION_LABELS[w.mode] ?? w.mode}）は使えない条件です（${ctaxReasonText(w.reason)}）。${
+        w.reason === 'special20_expired' ? '消費税は 0 円で計算しています。' : '消費税はその方式のまま計算しています。'
+      }`;
     case 'rates_assumed':
       return `${w.year} 年の税率・料率はまだ無いので、${w.latest} 年の値で計算しています。`;
     default:

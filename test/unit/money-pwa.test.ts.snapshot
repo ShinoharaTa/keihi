@@ -403,7 +403,7 @@ exports[`SSR スナップショット > 税の試算: 入力（年・売上 ±10
   "<div class=\\"m-total\\"><span>手取り</span><b>453.0万</b></div>",
   "<dl class=\\"m-dl m-dl-sm\\"><dt>実効負担率</dt><dd>35.3%</dd><dt>掛金で</dt><dd>−7.2万</dd><dt>自由に使える額</dt><dd>429.0万</dd></dl>",
   "<p class=\\"m-sub13\\">+100万で手取り +62.3万（負担率 37.7%）</p>",
-  "</section><section class=\\"m-card m-pad12 m-gap8\\" aria-labelledby=\\"m-sim-ctax\\"><h2 id=\\"m-sim-ctax\\" class=\\"m-h2\\">消費税の方式の比較</h2><dl class=\\"m-dl3\\"><dt class=\\"m-sub\\">方式</dt><dd class=\\"m-sub\\">消費税</dd><dd>手取り</dd><dt class=\\"m-sim-off\\">2 割特例</dt><dd class=\\"m-sim-off m-sim-span\\">2026 年分まで</dd><dt>簡易（第 5 種）</dt><dd>16.0万</dd><dd>500.0万</dd><dt>本則（概算）</dt><dd>64.0万</dd><dd>500.0万</dd></dl>",
+  "</section><section class=\\"m-card m-pad12 m-gap8\\" aria-labelledby=\\"m-sim-ctax\\"><h2 id=\\"m-sim-ctax\\" class=\\"m-h2\\">消費税の方式の比較</h2><dl class=\\"m-dl3\\"><dt class=\\"m-sub\\">方式</dt><dd class=\\"m-sub\\">消費税</dd><dd class=\\"m-sub\\">手取り</dd><dt class=\\"m-sim-off\\">2 割特例</dt><dd class=\\"m-sim-off m-sim-span\\">2026 年分まで</dd><dt>簡易（第 5 種）<span class=\\"m-badge b-income m-sim-best\\">最安</span></dt><dd>16.0万</dd><dd>500.0万</dd><dt>本則（概算）</dt><dd>64.0万</dd><dd>500.0万</dd></dl>",
   "</section><p class=\\"m-sub13 m-px4\\">同じ売上が続いた年の概算。給与など他の所得・医療費控除等は入れていない。</p>"
 ]
 `;

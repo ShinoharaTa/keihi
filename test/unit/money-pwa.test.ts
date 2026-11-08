@@ -21,7 +21,7 @@ import {
   countLabel,
   dateShort,
   emptySimForm,
-  isBestRow,
+  bestRow,
   marginalText,
   parseMan,
   seedSimForm,
@@ -851,11 +851,18 @@ describe('税の試算の純関数', () => {
     assert.deepEqual(rows(3, 2), ['2 割特例', '簡易（第 3 種）', '本則（概算）']);
     assert.deepEqual(rows(null, 2), ['2 割特例', '簡易（第 2 種）', '本則（概算）']);
     assert.deepEqual(rows(null, null), ['2 割特例', '簡易（第 5 種）', '本則（概算）']);
-    const shown = simCompareRows(simCompare, 1, null);
-    assert.deepEqual(shown.map((r) => isBestRow(r, simRes.best)), [false, true, false], '最安は区分まで一致した行だけ');
-    assert.equal(simCompareRows(simCompare, 2, null).some((r) => isBestRow(r, simRes.best)), false);
-    assert.equal(isBestRow(shown[2]!, { mode: 'standard', simplified_class: null }), true);
-    assert.equal(isBestRow(shown[2]!, null), false);
+    const best = (rows: CtaxCompareRow[]) => {
+      const b = bestRow(rows);
+      return b === null ? null : ctaxRowLabel(b);
+    };
+    assert.equal(best(simCompareRows(simCompare, 1, null)), '簡易（第 1 種）', '表示する 3 行の中で最小（API の best は使わない）');
+    assert.equal(best(simCompareRows(simCompare, 5, null)), '簡易（第 5 種）', '区分 5 でも簡易が最安');
+    const cheapStd = simCompare.map((r) => (r.mode === 'standard' ? { ...r, tax: 100000 } : r));
+    assert.equal(best(simCompareRows(cheapStd, 5, null)), '本則（概算）');
+    const tie = simCompare.map((r) => (r.mode === 'special20' ? { ...r, available: true, reason: null, tax: 160000, take_home: 5000000 } : r));
+    assert.equal(best(simCompareRows(tie, 5, null)), '2 割特例', '同額なら 2 割特例 → 簡易 → 本則');
+    const none = simCompare.map((r) => ({ ...r, available: false, reason: 'revenue_missing' as const, tax: null, take_home: null }));
+    assert.equal(best(simCompareRows(none, 5, null)), null, '使える行が無ければ印なし');
   });
   test('理由と警告の文言', () => {
     assert.equal(ctaxReasonText('special20_expired'), '2026 年分まで');
@@ -863,7 +870,8 @@ describe('税の試算の純関数', () => {
     assert.equal(ctaxReasonText('over_50m'), '売上 5,000 万超');
     assert.equal(ctaxReasonText('revenue_missing'), '売上が未入力');
     assert.equal(simWarningText({ kind: 'consumption_tax_mode_unset' }), '消費税の方式が未設定なので、消費税は 0 円で計算しています。');
-    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }), '選んだ方式（2 割特例）は使えない条件です（2026 年分まで）。消費税はその方式のまま計算しています。');
+    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }), '選んだ方式（2 割特例）は使えない条件です（2026 年分まで）。消費税は 0 円で計算しています。');
+    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'over_10m' }), '選んだ方式（2 割特例）は使えない条件です（売上 1,000 万超）。消費税はその方式のまま計算しています。');
     assert.equal(simWarningText({ kind: 'rates_assumed', year: 2028, latest: 2026 }), '2028 年の税率・料率はまだ無いので、2026 年の値で計算しています。');
     assert.equal(simWarningText({ kind: 'special20_expired', year: 2027 }), taxWarningText({ kind: 'special20_expired', year: 2027 }), '知らない kind は見積もりの文言');
     assert.deepEqual(simNotices({ warnings: [{ kind: 'simplified_class_missing' }, { kind: 'simplified_class_missing' }], assumptions: ['steady_state', 'pension_prepay24_as_prepay12'] }), [
@@ -1189,6 +1197,7 @@ describe('SSR スナップショット', () => {
     assert.match(out, /自由に使える額/);
     assert.match(out, /2028 年の税率・料率はまだ無い/);
     const best = html(m.TaxSimResult!, { res: simRes, inputClass: 1, profileClass: 5 });
+    assert.match(out, /簡易（第 5 種）<span class="m-badge b-income m-sim-best">最安<\/span>/, '区分 5 の行に最安');
     assert.match(best, /簡易（第 1 種）<span class="m-badge b-income m-sim-best">最安<\/span>/);
     t.assert.snapshot(lines(`${input}\n${out}`));
   });

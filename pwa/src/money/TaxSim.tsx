@@ -12,7 +12,7 @@ import {
   ctaxRowLabel,
   emptySimForm,
   failText,
-  isBestRow,
+  bestRow,
   marginalText,
   seedSimForm,
   SIM_DEBOUNCE_MS,
@@ -136,6 +136,8 @@ export function SimForm({
 export function TaxSimResult({ res, inputClass, profileClass }: { res: TaxSimResponse; inputClass: number | null; profileClass: number | null }) {
   const notices = simNotices(res);
   const saving = res.deductions.ideco + res.deductions.kyosai > 0;
+  const rows = simCompareRows(res.ctax_compare, inputClass, profileClass);
+  const best = bestRow(rows);
   return (
     <>
       {notices.length > 0 && (
@@ -186,12 +188,12 @@ export function TaxSimResult({ res, inputClass, profileClass }: { res: TaxSimRes
         <dl class="m-dl3">
           <dt class="m-sub">方式</dt>
           <dd class="m-sub">消費税</dd>
-          <dd>手取り</dd>
-          {simCompareRows(res.ctax_compare, inputClass, profileClass).map((r) => (
+          <dd class="m-sub">手取り</dd>
+          {rows.map((r) => (
             <Fragment key={`${r.mode}-${r.simplified_class}`}>
               <dt class={r.available ? undefined : 'm-sim-off'}>
                 {ctaxRowLabel(r)}
-                {isBestRow(r, res.best) && <span class="m-badge b-income m-sim-best">最安</span>}
+                {r === best && <span class="m-badge b-income m-sim-best">最安</span>}
               </dt>
               {r.available && r.tax !== null && r.take_home !== null ? (
                 <>
