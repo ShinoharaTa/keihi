@@ -100,8 +100,28 @@ export type Candidate = {
   amount_kind?: AmountKind;
 };
 
-// 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。
-export const candidateName = (c: Candidate) => c.description || c.description_norm;
+// 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。大きな出費の名前も同じ規則。
+export const candidateName = (c: { description?: string; description_norm: string }) => c.description || c.description_norm;
+
+// 大きな出費（5 万円以上。GET /api/large_expenses、src/cashflow/large.ts）。同じ口座・摘要の明細を 1 行にまとめ、bank_txn_id・金額・日付は最新の明細。
+export type LargeExpense = {
+  bank_txn_id: string;
+  account_id: string;
+  account_name: string;
+  txn_date: string;
+  amount: number;
+  description: string;
+  description_norm: string;
+  same_desc_count: number;
+  total_amount: number;
+  first_date: string;
+  suggested: 'monthly' | 'yearly' | 'biennial';
+};
+export type LargeRecurrence = 'monthly' | 'yearly' | 'biennial' | 'once';
+// 大きな出費から開くフォームで選べる周期。
+export const LARGE_FORM_RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'yearly', 'biennial'];
+// 一覧に最初から出す件数（残りは「もっと見る」）。
+export const LARGE_SHOWN = 3;
 
 // origin・estimate_key・pinned・amount_kind は追加中の項目（古いサーバーには無い）。
 export type ForecastItem = { id: string; name: string; amount: number; direction: Direction; due: string; origin?: string; estimate_key?: string | null; pinned?: 0 | 1; amount_kind?: AmountKind };
@@ -221,6 +241,8 @@ export const ERROR_TEXT: Record<string, string> = {
   unknown_account: '口座が見つかりません。',
   not_open: 'この提案はもう処理されています。',
   not_found: '見つかりませんでした。読み直してください。',
+  anchor_date_required: '1 回だけの予定は、今日より後の支払日を入れてください。',
+  already_decided: 'この出費はもう処理されています。',
   invalid_kind: '種別が正しくありません。',
   not_csv_account: 'この口座は CSV では取り込めません（freee から同期する口座です）。',
   unknown_format: 'この CSV の形式は読めません（今は PayPay の CSV だけ）。',

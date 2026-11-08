@@ -35,7 +35,7 @@ V4・V5・V7・V8・V10・V11 は初期案のまま実装した（2026-11-06 暫
 | 残高 | 明細の後に `listWalletables` の last_balance を as_of_date=今日・source=freee_walletable で追記。カードと残高 null は追記しない。予算で止まった回は取らない |
 | 一部失敗 | 他の口座は続け、最後に例外を投げてジョブの再試行に回す |
 
-## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2）
+## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2・0010_large_expenses）
 日付は JST の暦日 `YYYY-MM-DD`、時刻は UTC ISO8601、金額は整数の円。追記専用・不変の列は SQLite のトリガで拒否する。
 mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにしたので 0006_cashflow に繰り上げた（`0006_cashflow.sql` 冒頭）。
 
@@ -52,6 +52,7 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | sync_status | 口座ごとの取得状況（A5） | 更新可 |
 | freee_rule_links | keihi が freee に作ったルール（act 4 / 12） | 追記専用（書く処理は T109 で未実装） |
 | scheduled_items | 予定の項目（direction in / out）。amount_kind（fixed / variable。既定 fixed）は金額が毎回変わるかの印（0009） | 更新可。id・origin・created_at・estimate_key は不変。削除禁止（active=0 にする）。変更は監査 |
+| large_expense_decisions | 大きな出費（§15）への人の判断。`UNIQUE(bank_txn_id)`。decision（scheduled / dismissed）、scheduled のときだけ scheduled_item_id（0010） | 追記専用（更新・削除のトリガで拒否）。取り消しは無い（予定にしたものは台帳で停止する） |
 | recurrence_candidates | 周期の検出の候補。amount_kind（fixed / variable）、dismissed_by（human / system。dismissed のときだけ）を持つ（0009） | state・scheduled_item_id・dismissed_by・updated_at だけ更新可（amount_kind は不変）。削除禁止。accepted のときだけ scheduled_item_id を持つ |
 
 ## 3. 重複排除（`src/bank/dedup.ts`、T106）
@@ -179,6 +180,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | POST /api/recurrence_candidates/detect | ― | `{created, updated}` |
 | POST /api/recurrence_candidates/:id/accept | category?・name?・amount? | `{candidate, item}` |
 | POST /api/recurrence_candidates/:id/dismiss | ― | 候補 |
+| GET /api/large_expenses、POST /api/large_expenses/:bank_txn_id/schedule・/dismiss | §15 | §15 |
 | GET /api/cashflow | months（1〜60、既定 36） | Forecast（§8 の各項目と months[]・warnings）。months[].items に amount_kind |
 | GET /api/status | ― | `bank: {accounts, last_ok_at, errors, latest_txn_date}` が増えた |
 | GET /api/documents/counts | ― | `upcoming` が増えた |
@@ -295,3 +297,34 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 | GET /api/cashflow | ― | months[].items に origin・estimate_key・pinned が増えた。warnings に `tax_profile_missing` / `consumption_tax_mode_unset` / `consumption_tax_not_implemented`（方式は設定済みだが PR1 は消費税を作らない） |
 
 PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'、revenue_includes_tax=1、biz_tax_rate=NULL、resident_pay_mode='ordinary4'、nhi_preset='saitama-city-2026'、nhi_members=1、nhi_members_40_64=0、nhi_installments=8、nhi_first_month=7、pension_mode='monthly'、pension_addon=0、spouse=0、dependents=0、other_deductions=0、payment_account_id=NULL。
+
+## 15. 大きな出費（`src/cashflow/large.ts`）
+周期の検出（§7）に掛からない大口の支出（保険の年払い・車検・家電・毎月のように出る外注費など）を一覧し、人が「毎月 / 毎年 / 2 年ごと / 1 回だけ / しない」を選ぶ。大口の周期は自動で判定しない。
+一覧は読むたびに明細から計算する（保存しない）。保存するのは判断だけ（large_expense_decisions。§2）。閾値・期間・上限はコードの定数。
+
+| 条件 | 内容 |
+|---|---|
+| 金額 | 支出（side = expense）で 50,000 円以上（`LARGE_MIN_AMOUNT`） |
+| 口座 | active かつ include_in_cashflow（§7 と同じ） |
+| 期間 | 今日の 24 か月前〜今日（両端を含む。`LARGE_LOOKBACK_MONTHS`） |
+| 除く | §4 の除外／open・accepted の候補の occurrences に入っている明細／判断済みの明細と、同じ口座・正規化摘要でその明細日以前の明細／active な台帳の項目（origin を問わない。account_id が NULL か同じ口座）で、期日（anchor_date から周期を展開）が明細日 ±7 日・金額 ±10%（大きい方 ≤ 小さい方 × 1.1）のものがある明細（税の見積もりで既に入っている納付など） |
+| まとめ方 | 残った明細を同じ口座・正規化摘要で 1 行にする。bank_txn_id・amount・txn_date・description は最新の明細（同じ日なら ID の大きい方） |
+| 並び | 最新の明細日の新しい順。上限 50 行（`LARGE_LIST_MAX`） |
+
+- same_desc_count = その行にまとめた明細の件数、total_amount = その合計、first_date = そのうち最も古い明細日。
+- suggested = same_desc_count が 6 以上なら `monthly`。そうでなければ、同じ口座・摘要の支出（金額は問わない。§4 の除外は数えない）が最新の明細の 350〜380 日前にあれば `yearly`、無くて 715〜745 日前にあれば `biennial`、どちらも無ければ `yearly`。
+- 判断（予定にする・しない）は行の最新の明細に記録する。それより後に同じ口座・摘要の大口が出れば、その分だけで新しい行になる。
+- 予定にする: 台帳に origin = detected・direction = out・amount_kind = fixed・notify_days_before = 14・口座は明細の口座で入れる。名前の既定は正規化摘要、category の既定は other、amount の既定は最新の明細の額。
+  anchor_date の既定は monthly が明細日 + 1 か月、yearly が + 12 か月、biennial が + 24 か月（応当日が無ければ月末。2/29 → 平年の 2/28）。once は anchor_date が必須で今日より後（無いか今日以前なら 400 `anchor_date_required`）。
+- 監査: `large_expense.scheduled`（entity = large_expense、entity_id = 明細の ID。payload は scheduled_item_id・recurrence・user）、`large_expense.dismissed`（payload は user）。摘要は入れない。台帳の項目の作成は別に `scheduled_item.created` が残る。
+- `GET /api/bank/overview` の `open_candidates` は変えない（大口は数えない）。
+
+| メソッド・パス | 引数 | 応答 |
+|---|---|---|
+| GET /api/large_expenses | ― | 200 `{items: [{bank_txn_id, account_id, account_name, txn_date, amount, description, description_norm, same_desc_count, total_amount, first_date, suggested}]}` |
+| POST /api/large_expenses/:bank_txn_id/schedule | `{recurrence: monthly / yearly / biennial / once, category?, name?, amount?, anchor_date?}`（知らないキーは 400 `invalid_field`） | 201 `{decision, item}`。周期がそれ以外なら 400 `invalid_recurrence`、値は台帳と同じ検査（§10）。一覧の行の明細（最新の明細）でなければ 404 `not_found`、判断済みは 409 `already_decided` |
+| POST /api/large_expenses/:bank_txn_id/dismiss | ― | 200 `{decision}`。既に dismissed ならそのまま 200（監査は書かない）。予定にした明細は 409 `already_decided`、一覧の行の明細でなければ 404 |
+
+PWA（予定の画面、`pwa/src/money/Schedule.tsx`）: 「明細から見つけた定期の支払い」の下に「大きな出費（5 万円以上）（n）」。既定で 3 件、「もっと見る」で全件。カードに名前（正規化前の摘要）・額・口座・日付・`同じ摘要 n 回 · 合計 ○○`（2 以上のとき）と、ボタン `毎月` `毎年` / `2 年ごと` `1 回だけ` / `しない`（2 列 × 3 行、`しない` は幅いっぱい。suggested を強調）。分類は摘要から推し、名前は正規化前の摘要を送る。`1 回だけ` は周期 1 回・名前・金額・分類を入れたフォーム（周期は 1 回・毎月・毎年・隔年だけ、通知日数・終わりの日・向きの入力は出さない）を開き、支払日を入れて保存すると schedule を呼ぶ。
+
+本機 DB で確かめるときは、WAL に残っている書き込みも入るように `VACUUM INTO` か sqlite3 の `.backup` でコピーする（`cp` で本体のファイルだけ写すと、直近の候補などが入らない）。

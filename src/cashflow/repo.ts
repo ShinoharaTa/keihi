@@ -312,3 +312,73 @@ export function txnAccounts(db: Db, ids: string[]): Map<string, { account_id: st
   ).all(JSON.stringify(ids)) as { id: string; account_id: string; description: string }[];
   return new Map(rows.map((r) => [r.id, { account_id: r.account_id, description: r.description }]));
 }
+
+// ---- 大きな出費（0010_large_expenses.sql。src/cashflow/large.ts が使う） ----
+
+export type LargeDecision = 'scheduled' | 'dismissed';
+
+export type LargeExpenseDecisionRow = {
+  id: string;
+  bank_txn_id: string;
+  decision: LargeDecision;
+  scheduled_item_id: string | null; // scheduled のときだけ
+  created_at: string;
+};
+
+export type LargeExpenseTxnRow = {
+  id: string;
+  account_id: string;
+  account_name: string;
+  txn_date: string;
+  amount: number;
+  description: string;
+  description_norm: string;
+};
+
+// minAmount 以上の支出の明細（from 〜 to、両端を含む）。口座が active かつ include_in_cashflow のものだけ。新しい順。
+export function listLargeExpenseTxns(db: Db, from: string, to: string, minAmount: number): LargeExpenseTxnRow[] {
+  return db
+    .prepare(
+      `SELECT t.id, t.account_id, a.name AS account_name, t.txn_date, t.amount, t.description, t.description_norm FROM bank_txns t
+       JOIN money_accounts a ON a.id = t.account_id AND a.active = 1 AND a.include_in_cashflow = 1
+       WHERE t.side = 'expense' AND t.amount >= ? AND t.txn_date >= ? AND t.txn_date <= ? ORDER BY t.txn_date DESC, t.id DESC`,
+    )
+    .all(minAmount, from, to) as LargeExpenseTxnRow[];
+}
+
+// open・accepted の候補の occurrences に入っている明細の ID。
+export function candidateTxnIds(db: Db): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT json_extract(o.value, '$.bank_txn_id') AS id FROM recurrence_candidates c, json_each(c.occurrences_json) o
+       WHERE c.state IN ('open', 'accepted')`,
+    )
+    .all() as { id: string | null }[];
+  return new Set(rows.flatMap((r) => (r.id === null ? [] : [r.id])));
+}
+
+export function insertLargeExpenseDecision(
+  db: Db,
+  a: { bankTxnId: string; decision: LargeDecision; scheduledItemId: string | null; now: string },
+): LargeExpenseDecisionRow {
+  const id = ulid(Date.parse(a.now));
+  db.prepare('INSERT INTO large_expense_decisions (id, bank_txn_id, decision, scheduled_item_id, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    id,
+    a.bankTxnId,
+    a.decision,
+    a.scheduledItemId,
+    a.now,
+  );
+  return getLargeExpenseDecision(db, a.bankTxnId)!;
+}
+
+export function getLargeExpenseDecision(db: Db, bankTxnId: string): LargeExpenseDecisionRow | null {
+  return (db.prepare('SELECT * FROM large_expense_decisions WHERE bank_txn_id = ?').get(bankTxnId) as LargeExpenseDecisionRow | undefined) ?? null;
+}
+
+// 判断済みの明細の口座・正規化摘要・日付。
+export function listDecidedLargeExpenseTxns(db: Db): { bank_txn_id: string; account_id: string; description_norm: string; txn_date: string }[] {
+  return db
+    .prepare('SELECT d.bank_txn_id, t.account_id, t.description_norm, t.txn_date FROM large_expense_decisions d JOIN bank_txns t ON t.id = d.bank_txn_id')
+    .all() as { bank_txn_id: string; account_id: string; description_norm: string; txn_date: string }[];
+}

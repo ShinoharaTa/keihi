@@ -1,6 +1,9 @@
 // 予定（モック Schedule。docs/mvp-plan-v3.md T301・T302。src/web/routes/cashflow.ts）。
 // 上に明細から見つけた定期の支払い（GET /api/recurrence_candidates?state=open）: 「予定にする（分類）」で accept（分類は摘要から推す）、「しない」で dismiss。
 // 金額が毎回変わる候補（amount_kind = variable）は「約」を付け、明細の金額の幅を小さく出す。台帳の行には「 · 概算」。
+// その下に大きな出費（GET /api/large_expenses。5 万円以上の支出を口座・摘要ごとに 1 行。読めなければ出さない）: 既定で LARGE_SHOWN 件、「もっと見る」で全件。
+// 「毎月」「毎年」「2 年ごと」は分類を摘要から推して POST …/schedule、「1 回だけ」は支払日を入れるフォーム（周期は LARGE_FORM_RECURRENCES だけ、
+// 通知日数・終わりの日・向きは出さない）を開いて保存で POST …/schedule、「しない」で POST …/dismiss。
 // 次に この先 12 か月の山（GET /api/scheduled_items/upcoming の期日から、毎月の分を除いて分類別に積む）。
 // 下に台帳（GET /api/scheduled_items?all=1。分類で絞り、次の期日順。停止中は「停止中の n 件も表示」で出す）。
 // ヘッダの「追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」。
@@ -26,6 +29,8 @@ import {
   failText,
   guessCategory,
   heavyMonths,
+  LARGE_FORM_RECURRENCES,
+  LARGE_SHOWN,
   lastOccurrence,
   ledgerRows,
   md,
@@ -46,8 +51,11 @@ import {
   type Candidate,
   type Direction,
   type ItemDraft,
+  type LargeExpense,
+  type LargeRecurrence,
   type LedgerFilter,
   type PeakMonth,
+  type Recurrence,
   type RunSummary,
   type ScheduleCategory,
   type ScheduledItem,
@@ -101,6 +109,70 @@ export function CandidateList({ items, accounts, today, busy, onAccept, onDismis
         );
       })}
     </>
+  );
+}
+
+// 結果の文に使う周期の言い方。
+const LARGE_PER: Record<LargeRecurrence, string> = { monthly: '毎月', yearly: '毎年', biennial: '2 年ごと', once: '1 回だけ' };
+
+export function LargeList({
+  items,
+  today,
+  busy,
+  showAll,
+  onShowAll,
+  onSchedule,
+  onDismiss,
+}: {
+  items: LargeExpense[];
+  today: string;
+  busy: boolean;
+  showAll: boolean;
+  onShowAll: () => void;
+  onSchedule: (x: LargeExpense, recurrence: LargeRecurrence) => void;
+  onDismiss: (x: LargeExpense) => void;
+}) {
+  const shown = showAll ? items : items.slice(0, LARGE_SHOWN);
+  const btn = (x: LargeExpense, r: 'monthly' | 'yearly' | 'biennial') => (
+    <button type="button" class={x.suggested === r ? 'm-btn m-btn-accent' : 'm-btn'} disabled={busy} onClick={() => onSchedule(x, r)}>
+      {LARGE_PER[r]}
+    </button>
+  );
+  return (
+    <section class="m-col" aria-labelledby="m-large">
+      <h2 id="m-large" class="m-h2 m-px4">
+        大きな出費（5 万円以上）（{items.length}）
+      </h2>
+      {items.length > 0 && <p class="m-sub13 m-px4">保険の年払い・積立など、また出るものは予定にしておきましょう。</p>}
+      {shown.map((x) => (
+        <article key={x.bank_txn_id} class="m-card m-cand">
+          <div class="m-row">
+            <h3 class="m-h3">{candidateName(x)}</h3>
+            <span class="m-h3 m-num">{yen(x.amount)}</span>
+          </div>
+          <p class="m-sub">
+            {x.account_name} · {dateShort(x.txn_date, today)}
+            {x.same_desc_count >= 2 ? ` · 同じ摘要 ${x.same_desc_count} 回 · 合計 ${yen(x.total_amount)}` : ''}
+          </p>
+          <div class="m-grid2x2">
+            {btn(x, 'monthly')}
+            {btn(x, 'yearly')}
+            {btn(x, 'biennial')}
+            <button type="button" class="m-btn" disabled={busy} onClick={() => onSchedule(x, 'once')}>
+              1 回だけ
+            </button>
+            <button type="button" class="m-btn m-span2" disabled={busy} onClick={() => onDismiss(x)}>
+              しない
+            </button>
+          </div>
+        </article>
+      ))}
+      {!showAll && items.length > LARGE_SHOWN && (
+        <button type="button" class="m-link m-link-center" onClick={onShowAll}>
+          もっと見る（あと {items.length - LARGE_SHOWN} 件）
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -228,6 +300,7 @@ export function ItemForm({
   onToggle,
   onUnpin,
   onClose,
+  recurrences,
 }: {
   draft: ItemDraft;
   editing: ScheduledItem | null;
@@ -238,23 +311,34 @@ export function ItemForm({
   // 手直しした見積もりの行を自動計算に戻す。
   onUnpin?: () => void;
   onClose: () => void;
+  // 選べる周期を絞る（大きな出費から開くとき）。渡したときは向き・通知日数・終わりの日の入力を出さない（その API は受けない）。
+  recurrences?: readonly Recurrence[];
 }) {
   const set = <K extends keyof ItemDraft>(k: K, v: ItemDraft[K]) => onChange({ ...draft, [k]: v });
   const err = draftError(draft);
+  const limited = recurrences !== undefined;
+  const anchor = (
+    <label class="m-field-wrap">
+      <span class="m-label">最初の支払日</span>
+      <input class="m-field" type="date" value={draft.anchor_date} onInput={(e) => set('anchor_date', e.currentTarget.value)} />
+    </label>
+  );
   return (
     <section class="m-card m-form" aria-labelledby="m-item-form">
       <h2 id="m-item-form" class="m-h2">
         {editing ? `「${editing.name}」を編集` : '予定を追加'}
       </h2>
       {editing?.origin === 'estimate' && <p class="m-sub13">金額や日付を直すと、再計算で上書きされなくなります。</p>}
-      <div class="m-seg m-seg-3" role="group" aria-label="向き">
-        <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
-          支出
-        </button>
-        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' || draft.category === 'savings' ? 'income' : draft.category })}>
-          収入
-        </button>
-      </div>
+      {!limited && (
+        <div class="m-seg m-seg-3" role="group" aria-label="向き">
+          <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
+            支出
+          </button>
+          <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' || draft.category === 'savings' ? 'income' : draft.category })}>
+            収入
+          </button>
+        </div>
+      )}
       <label class="m-field-wrap">
         <span class="m-label">名称</span>
         <input class="m-field" maxLength={TEXT_MAX} value={draft.name} onInput={(e) => set('name', e.currentTarget.value)} />
@@ -279,28 +363,31 @@ export function ItemForm({
         <label class="m-field-wrap">
           <span class="m-label">周期</span>
           <select class="m-field" value={draft.recurrence} onChange={(e) => set('recurrence', e.currentTarget.value as ItemDraft['recurrence'])}>
-            {RECURRENCES.map((k) => (
+            {(recurrences ?? RECURRENCES).map((k) => (
               <option key={k} value={k}>
                 {RECURRENCE_LABELS[k]}
               </option>
             ))}
           </select>
         </label>
-        <label class="m-field-wrap">
-          <span class="m-label">何日前に知らせる（0〜{NOTIFY_MAX}）</span>
-          <input class="m-field" inputMode="numeric" maxLength={3} value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
-        </label>
+        {limited ? (
+          anchor
+        ) : (
+          <label class="m-field-wrap">
+            <span class="m-label">何日前に知らせる（0〜{NOTIFY_MAX}）</span>
+            <input class="m-field" inputMode="numeric" maxLength={3} value={draft.notify_days_before} onInput={(e) => set('notify_days_before', e.currentTarget.value)} />
+          </label>
+        )}
       </div>
-      <div class="m-form-2">
-        <label class="m-field-wrap">
-          <span class="m-label">最初の支払日</span>
-          <input class="m-field" type="date" value={draft.anchor_date} onInput={(e) => set('anchor_date', e.currentTarget.value)} />
-        </label>
-        <label class="m-field-wrap">
-          <span class="m-label">終わりの日（任意）</span>
-          <input class="m-field" type="date" min={draft.anchor_date} value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
-        </label>
-      </div>
+      {!limited && (
+        <div class="m-form-2">
+          {anchor}
+          <label class="m-field-wrap">
+            <span class="m-label">終わりの日（任意）</span>
+            <input class="m-field" type="date" min={draft.anchor_date} value={draft.end_date} onInput={(e) => set('end_date', e.currentTarget.value)} />
+          </label>
+        </div>
+      )}
       {err && draft.name !== '' && <p class="m-msg">{err}</p>}
       <div class="m-grid2">
         <button type="button" class="m-btn m-btn-primary" disabled={busy || err !== null} onClick={onSave}>
@@ -345,11 +432,14 @@ export function Schedule({
 }) {
   const [tax, setTax] = useState<TaxSummary | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
+  const [large, setLarge] = useState<LargeExpense[] | null>(null);
+  const [largeAll, setLargeAll] = useState(false);
   const [items, setItems] = useState<ScheduledItem[] | null>(null);
   const [upcoming, setUpcoming] = useState<Upcoming[]>([]);
   const [filter, setFilter] = useState<LedgerFilter>('');
   const [showInactive, setShowInactive] = useState(false);
-  const [form, setForm] = useState<{ draft: ItemDraft; editing: ScheduledItem | null } | null>(() =>
+  // large は「1 回だけ」で開いたときの大きな出費（保存は POST /api/large_expenses/:id/schedule）。
+  const [form, setForm] = useState<{ draft: ItemDraft; editing: ScheduledItem | null; large?: LargeExpense } | null>(() =>
     addDirection ? { draft: emptyDraft(today, addDirection), editing: null } : null,
   );
   const [undo, setUndo] = useState<ScheduledItem | null>(null);
@@ -363,17 +453,19 @@ export function Schedule({
 
   // 読み直す。失敗したときだけ msg を書く（書き込みの結果の文を消さない）。
   const load = useCallback(async () => {
-    const [c, s, u, tp, te] = await Promise.all([
+    const [c, s, u, tp, te, le] = await Promise.all([
       getJson<{ candidates: Candidate[] }>('/api/recurrence_candidates?state=open'),
       getJson<{ items: ScheduledItem[] }>('/api/scheduled_items?all=1'),
       getJson<{ items: Upcoming[] }>(`/api/scheduled_items/upcoming?days=${UPCOMING_DAYS}`),
       getJson<TaxProfileResponse>('/api/tax/profile'),
       getJson<{ created_at: string | null }>('/api/tax/estimates'),
+      getJson<{ items: LargeExpense[] }>('/api/large_expenses'),
     ]);
     setTax(tp.ok ? { ...tp.data, last_run_at: te.ok ? te.data.created_at : null } : null);
     const failed = [c, s, u].find((r) => !r.ok);
     if (failed && !failed.ok) setMsg(failText(failed.status, failed.body));
     setCands(c.ok ? c.data.candidates : []);
+    setLarge(le.ok ? le.data.items : null);
     setItems(s.ok ? s.data.items : null);
     setUpcoming(u.ok ? u.data.items : []);
   }, []);
@@ -398,6 +490,13 @@ export function Schedule({
     if (!form) return;
     const body = draftBody(form.draft);
     if (!body) return;
+    const x = form.large;
+    if (x) {
+      const { recurrence, category, name, amount, anchor_date } = body;
+      const p = postJson(`/api/large_expenses/${encodeURIComponent(x.bank_txn_id)}/schedule`, { recurrence, category, name, amount, anchor_date });
+      if (await run(p, () => `「${name as string}」を${LARGE_PER[recurrence as LargeRecurrence] ?? ''}の予定にしました。`)) setForm(null);
+      return;
+    }
     const p = form.editing ? patchJson(`/api/scheduled_items/${encodeURIComponent(form.editing.id)}`, body) : postJson('/api/scheduled_items', body);
     if (await run(p, () => '保存しました。')) setForm(null);
   };
@@ -445,6 +544,7 @@ export function Schedule({
               void run(patchJson(`/api/scheduled_items/${encodeURIComponent(it.id)}`, { pinned: false }), () => `「${it.name}」を自動計算に戻しました（次の再計算で計算値になります）。`).then((ok) => ok && setForm(null));
             }}
             onClose={() => setForm(null)}
+            recurrences={form.large ? LARGE_FORM_RECURRENCES : undefined}
           />
         ) : (
           <>
@@ -486,6 +586,24 @@ export function Schedule({
                 明細から定期の支払いを探す
               </button>
             </section>
+            {large && (
+              <LargeList
+                items={large}
+                today={today}
+                busy={busy}
+                showAll={largeAll}
+                onShowAll={() => setLargeAll(true)}
+                onSchedule={(x, recurrence) => {
+                  const category = guessCategory(x.description_norm);
+                  if (recurrence === 'once') {
+                    setForm({ draft: { ...emptyDraft(today), name: candidateName(x), amount: String(x.amount), category, recurrence: 'once', anchor_date: '' }, editing: null, large: x });
+                    return;
+                  }
+                  void run(postJson(`/api/large_expenses/${encodeURIComponent(x.bank_txn_id)}/schedule`, { recurrence, category, name: candidateName(x) }), () => `「${candidateName(x)}」を${LARGE_PER[recurrence]}の予定にしました。`);
+                }}
+                onDismiss={(x) => void run(postJson(`/api/large_expenses/${encodeURIComponent(x.bank_txn_id)}/dismiss`, {}), () => '予定にしないことにしました。')}
+              />
+            )}
             {items && <PeakCard peaks={peakMonths(upcoming, today)} fixed={monthlyFixed(items)} />}
             {items && (
               <Ledger
