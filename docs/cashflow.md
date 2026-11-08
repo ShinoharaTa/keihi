@@ -124,7 +124,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | 予定 planned_in / out | active な台帳の項目の期日を月に割り当てる。今月は**明日から**月末まで（今日の分は残高に反映済みとみなす） |
 | 予定外 unplanned_out | 今月より前の直近 `unplanned_lookback_months` か月のうち「対象口座の最初の明細の月より後」の月について、(その月の対象口座の出金合計 − その月に期日があった予定の out) の中央値。負なら 0 |
 | 予定外から除く明細 | transfer / charge は**両側とも対象口座**のときだけ、card_settlement はパターンが合う**対象のカード口座**があるときだけ |
-| 履歴から引く予定 | 停止した項目も含め（期日は anchor_date・end_date から出す）、account_id が NULL か対象口座のもの |
+| 履歴から引く予定 | 停止した項目も含め（期日は anchor_date・end_date から出す。ただし止めた見積もり（origin=estimate・active=0）は再計算で置き換えたものなので除く）、account_id が NULL か対象口座のもの |
 | unplanned_in | 同じ式を入金で。`include_unplanned_income = true` のときだけ残高に足す（既定 false） |
 | 今月の按分 | 予定外 × (月の日数 − 今日の日) ÷ 月の日数（Math.round） |
 | balance_end | 前月末 + planned_in − planned_out + unplanned_in − unplanned_out |
@@ -205,14 +205,15 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | P2 MCP（get_cashflow・list_upcoming・list_bank_txns 等） | 未着手 | K1〜K3・V2 |
 | 月次・資金繰りのグラフ | P4 | ― |
 
-## 14. 税・保険の見積もり（`src/cashflow/tax/`、T306・T307 PR1）
-年ごとの所得（前年の確定値 + 今年〜の見込み、手入力）と税プロファイルから、所得税・住民税・国民健康保険税・個人事業税・国民年金の**期日と額を概算**し、予定台帳に `origin = estimate` の項目として入れる。入力が変われば差し替える。目的は「いつ・いくら口座から出るか」を ±1〜2 割で先に知ること（税額の正確さではない）。消費税は PR2（作らない。`consumption_mode = 'unset'` なら `consumption_tax_mode_unset`、exempt 以外の方式なら `consumption_tax_not_implemented` の警告）。0 円以下になった期は作らない。自動車税・車検は対象外（周期検出・手入力のまま）。
+## 14. 税・保険の見積もり（`src/cashflow/tax/`、T306・T307 PR1・第 2 版 T308）
+年ごとの所得（前年の確定値 + 今年〜の見込み、手入力）と税プロファイルから、所得税・住民税・国民健康保険税・個人事業税・国民年金の**期日と額を概算**し、予定台帳に `origin = estimate` の項目として入れる。入力が変われば差し替える。目的は「いつ・いくら口座から出るか」を ±1〜2 割で先に知ること（税額の正確さではない）。消費税（第 2 版）は確定申告と中間申告（年 1 回）を作る。`consumption_mode = 'exempt'` なら作らず、`'unset'` なら警告 `consumption_tax_mode_unset` だけ。0 円以下になった期は作らない。自動車税・車検は対象外（周期検出・手入力のまま）。
 
 | ファイル | 中身 |
 |---|---|
 | `src/db/migrations/0008_tax.sql` | tax_profile（id='default' の 1 行）・tax_years（UNIQUE(year)）・tax_estimate_runs（追記専用）。scheduled_items に `estimate_key`（origin=estimate のときだけ、不変）と `pinned`（0/1、origin=estimate のときだけ）、部分 UNIQUE INDEX `(estimate_key) WHERE active = 1 AND estimate_key IS NOT NULL` |
 | `src/cashflow/tax/rates.ts` | 年度別の法定の数値（§14.3）。定義の無い年は前の年の値 |
 | `src/cashflow/tax/engine.ts` | 純関数 `estimate(profile, years, window) → {items, warnings, breakdown}` |
+| `src/cashflow/tax/simulate.ts` | 試算（§14.5）。純関数 `simulate(profile, input)` と body の検査 `parseSimBody`。estimate() を包むだけで engine.ts は変えない |
 | `src/cashflow/tax/sync.ts` | 入力の検査・保存（監査 `tax_profile.updated` / `tax_year.updated`）と、台帳への同期（§14.2） |
 | `src/web/routes/tax.ts` | API（§14.4） |
 
@@ -226,28 +227,33 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | `resident:Y:q1`〜`q4` | Y−1 の所得・社会保険料 | (所得 − 社保 − other − 43 万 − 33 万 × 人数) × 10% − 調整控除 2,500 + 均等割 5,000 | 6/30・8/31・10/31・Y+1 の 1/31 | tax |
 | `nhi:Y:p1`〜 | Y−1 の所得・加入人数・40〜64 歳の人数・プリセット | 課税標準 = 所得 − 43 万。区分ごとに 所得割 + 均等割 × 人数（+ 平等割）を 100 円未満切り捨て、上限で抑える。介護分は 40〜64 歳の人数だけ | nhi_first_month（7）から nhi_installments（8）期、毎月末 | insurance |
 | `biz_tax:Y:1`・`2` | Y−1 の青色控除前の所得 | (所得 − 290 万) × biz_tax_rate。biz_tax_rate が NULL か、(所得 − 290 万) が 0 以下なら作らない。1 万円以下は 8 月に一括 | 8/31・11/30 | tax |
-| `pension:F:MM` | pension_mode・pension_addon | monthly: 月額（+ 付加 400）を毎月末。prepay6: 4 月末・10 月末。prepay12: 4 月末。prepay24: 偶数の年度の 4 月末 | 月末 | insurance |
+| `pension:F:monthly`（月払い）・`pension:F:MM`（前納） | pension_mode・pension_addon | monthly: 年度ごとに 1 項目（recurrence=monthly、anchor_date = F 年 5 月末、end_date = F+1 年 4 月末、額 = 月額 + 付加 400）。prepay6: 4 月末・10 月末。prepay12: 4 月末。prepay24: 偶数の年度の 4 月末（前納は once） | 月末 | insurance |
+| `ctax:Y:final` | consumption_mode・simplified_class・revenue_includes_tax、Y の revenue・expenses（無ければ前の年で最も新しい revenue を繰り越す） | 税抜売上 = 税込なら revenue × 100/110（円未満切り捨て）。売上税額 = 税抜売上 × 10%。special20: 売上税額 × 20%。simplified: 売上税額 × (1 − みなし仕入率)。standard（**概算**）: 売上税額 − 税抜経費 × 10%（経費は全額課税仕入とみなす。0 以下なら 0）。100 円未満切り捨て = 年税額。− Y の中間申告。0 以下なら作らない | Y+1 の 3/31 | tax |
+| `ctax:Y:interim1` | Y−1 年分の国税分（Y−1 が actual で consumption_tax_final があればそれ。無ければ Y−1 年分の見積もりの年税額 × 78/100） | 国税分が 48 万円超のとき 1 回。国税分 × 6/12（100 円未満切り捨て）+ その 22/78（地方消費税、100 円未満切り捨て） | Y の 8/31 | tax |
 
-- 国民年金の月払いは「その月の分をその月末」に置いている。実際の納期限は翌月末なので 1 か月ずれる（概算として許容）。
+- 国民年金の月払いは各月分を翌月末に納める。台帳には年度ごとに monthly の 1 項目で入れ、F 年度分は F 年 5 月末〜F+1 年 4 月末に 12 回（anchor_date = F 年 5 月末、end_date = F+1 年 4 月末）。社会保険料控除は従来どおり月ごとの内訳（その月の分をその月末）で数える。
+- 第 1 版で作った `pension:F:MM` の月ごとの once 項目（pinned=0）は、再計算で key が出なくなるので止まる（期日が対象の期間より前のものは触らない）。新しい monthly 項目と重なっても possible_duplicate は manual / detected だけが相手なので出ない。
 - 2 年前納は「偶数の年度の 4 月」に仮置きしている（実際に始めた年度に合わせるなら rates ではなく engine.ts の判定を変える）。
 
 - 入力が無い年: 直近の前の年の所得を繰り越す（内訳に `carried_from`）。住民税・国保・事業税で Y−1 がどこにも無ければ Y の所得で代える（`assumed_prev_year`）。予定納税は前年の申告納税額が要るので代えない。所得が出せない年は警告 `income_missing`。
-- 項目名は「所得税 2026 年分 確定申告（見積）」「住民税 2026 年度 第 1 期（見積）」「国民健康保険税 2026 年度 第 1 期（見積）」「国民年金 2026 年度 4 月分（見積）」の形。
+- 項目名は「所得税 2026 年分 確定申告（見積）」「住民税 2026 年度 第 1 期（見積）」「国民健康保険税 2026 年度 第 1 期（見積）」「国民年金 2026 年度 月払い（見積）」「消費税 2026 年分 確定申告（見積）」「消費税 2026 年分 中間申告（見積）」の形。
+- 消費税: みなし仕入率は第 1 種 90% / 第 2 種 80% / 第 3 種 70% / 第 4 種 60% / 第 5 種 50% / 第 6 種 40%。simplified で simplified_class が NULL なら作らず警告 `simplified_class_missing`。2 割特例は 2026 年分まで。2027 年分以降も special20 のままなら、その年分は作らず警告 `special20_expired`（year つき。確定申告の期日が対象の期間に入る年だけ）。消費税を作る方式で、その年分の売上（revenue）が繰り越しも含めてどの年にも無い（所得だけ入れた年）ときは作らず警告 `revenue_missing`（year つき。期日が期間に入る年だけ）。2 割特例が切れた年分は中間申告も作らない。内訳（breakdown）は `method`（方式）と、税抜売上・売上税額・控除・年税額・中間申告で納めた額・確定申告で納める額の行。
+- 消費税の中間申告は年 1 回（前年の国税分 48 万円超〜）だけ。400 万円超の 3 回・4,800 万円超の 11 回、任意の中間申告は対象外（警告も出さない）。前年が見込みのときの国税分は「年税額 × 78/100」で代え、内訳の行に明記する。
 - 概算で切り捨てるもの: 生命保険料・医療費・寄附金の控除、国保の低所得軽減、住民税の調整控除の厳密計算・非課税限度、事業税の専従者控除・損失繰越、源泉徴収の精算、配偶者控除の所得制限。
 
 ### 14.2 再計算と台帳の同期ルール
-契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year` の直後（同じトランザクション）。daily では走らせない（rates.ts を更新したリリースの後に 1 回手で叩く）。
+契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year`・`PUT /api/tax` の直後（同じトランザクション。`PUT /api/tax` は保存をすべて終えてから 1 回）。daily ジョブの `tax_recalc` 段が毎月 1 日（JST）に 1 回、tax_profile があれば actor=system で走らせる（無ければ skipped、1 日以外は not_due。report に `{run_id, created, updated, deactivated}`）。時間が進んでも 36 か月先までの項目が切れないようにするため。rates.ts を更新したリリースの後は 1 回手で叩く。
 対象の期間: 今年の 1/1 〜 今日 + 39 か月（36 か月 + 3 か月）。過去の期日も作る（forecast が履歴から予定分を引くので、過去の納付が予定外の中央値に混ざらない）。1 回ごとに tax_estimate_runs に 1 行（inputs_json = profile + years、results_json = 項目・内訳・skipped_pinned）。
 
 | 状況 | 動き | 監査 |
 |---|---|---|
-| key が無い（有効な行が無く、最新の停止した行も pinned でない） | create（origin=estimate、recurrence=once、category は §14.1、account_id = payment_account_id、notify_days_before = 30） | scheduled_item.created actor=system payload.run_id・estimate_key |
-| key があり amount・anchor_date が同じ | 何もしない | — |
-| key があり amount・anchor_date・name・account_id のどれかが違う、pinned=0 | その行を in-place 更新（id は変えない。納税口座を後から入れたときも口座が揃う） | scheduled_item.updated actor=system payload.reason='tax_recalc'・run_id |
+| key が無い（有効な行が無く、最新の停止した行も pinned でない） | create（origin=estimate、recurrence=once（年金の月払いだけ monthly + end_date）、category は §14.1、account_id = payment_account_id、notify_days_before = 30） | scheduled_item.created actor=system payload.run_id・estimate_key |
+| key があり amount・anchor_date・end_date・recurrence・name・account_id が同じ | 何もしない | — |
+| key があり amount・anchor_date・end_date・recurrence・name・account_id のどれかが違う、pinned=0 | その行を in-place 更新（id は変えない。納税口座を後から入れたときも口座が揃う） | scheduled_item.updated actor=system payload.reason='tax_recalc'・run_id |
 | key があり pinned=1 | 触らない。run の `skipped_pinned` に key と「計算値 vs 現在値」 | — |
-| 今回の計算で key が出なくなった（期日が対象の期間にあるもの）、pinned=0 | deactivate | scheduled_item.deactivated actor=system payload.reason='estimate_withdrawn'・run_id |
+| 今回の計算で key が出なくなった（anchor_date〜end_date（once は anchor_date）が対象の期間に掛かるもの）、pinned=0 | deactivate | scheduled_item.deactivated actor=system payload.reason='estimate_withdrawn'・run_id |
 | 同上で pinned=1 | 触らない。warnings に `pinned_withdrawn` | — |
-| 人（actor が system 以外）が estimate 項目の name・amount・anchor_date を変える or 止める or 戻す | 自動で pinned=1（`src/cashflow/schedule.ts` の updateItem / deactivateItem / activateItem）。戻すとき同じ key の有効な行が既にあれば 400 `estimate_key_active` | 既存の updated / deactivated / reactivated（changes に pinned） |
+| 人（actor が system 以外）が estimate 項目の name・amount・anchor_date・end_date を変える or 止める or 戻す | 自動で pinned=1（`src/cashflow/schedule.ts` の updateItem / deactivateItem / activateItem）。戻すとき同じ key の有効な行が既にあれば 400 `estimate_key_active` | 既存の updated / deactivated / reactivated（changes に pinned） |
 | 人が PATCH `pinned: false` | 次の再計算で上書き対象に戻る | scheduled_item.updated |
 | 同じ category で ±45 日・±10% の manual / detected の有効な項目がある | 作るが warnings に `possible_duplicate`（`item_ids`: [見積もり, 相手]）。自動で消さない | — |
 
@@ -266,6 +272,9 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 | 国保（さいたま市 令和 8 年度、プリセット `saitama-city-2026`） | 医療 7.64% + 43,300 上限 67 万 / 支援 2.73% + 14,900 上限 26 万 / 介護（40〜64 歳）2.37% + 16,100 上限 17 万 / 子ども・子育て 0.26% + 1,700 上限 3 万。平等割なし。基礎控除 43 万。8 期 = 7 月末〜翌 2 月末。計算例: 42 歳・所得 300 万 → 409,900 円 | https://www.city.saitama.lg.jp/001/153/002/004/p010020.html / https://www.city.saitama.lg.jp/faq/001/001/003/p110417.html |
 | 個人事業税（埼玉県） | 事業主控除 290 万。第 1 種・第 3 種 5%。8 月・11 月（1 万円以下は 8 月一括） | https://www.pref.saitama.lg.jp/a0209/z-kurashiindex/z-2-4.html |
 | 国民年金 | 2026 年度 17,920 円/月、2027 年度 18,290 円/月。付加 400 円/月。口座振替前納（2026 年度）: 6 か月 106,300 / 1 年 210,530 / 2 年 417,150（2027 年度の前納額は未公表のため 2026 年度の値を使う） |
+| 消費税 簡易課税のみなし仕入率 | 第 1 種 90% / 第 2 種 80% / 第 3 種 70% / 第 4 種 60% / 第 5 種 50% / 第 6 種 40% | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6509.htm |
+| 消費税 2 割特例 | 売上税額 × 20%。2026 年分（令和 8 年分）まで | https://www.nta.go.jp/publication/pamph/shohi/kaisei/202304/01.htm |
+| 消費税 中間申告 | 前年の国税分 48 万円超〜400 万円以下: 年 1 回、前年の国税分 × 6/12（+ 地方消費税 22/78）。8/31 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6609.htm |
 
 年度の値の更新（年 1 回）: 新しい年度の値が公表されたら `src/cashflow/tax/rates.ts` の表に年のキーを足し（2027 年度の前納額は公表され次第 `PENSION_RATES[2027]` を書き換える）、リリースの後に `POST /api/tax/recalculate` を 1 回叩く。 https://www.nenkin.go.jp/service/kokunen/hokenryo/zenno.html / https://www.city.saitama.lg.jp/001/153/003/005/p082987.html |
 
@@ -275,9 +284,45 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 | GET /api/tax/profile | ― | `{profile（無ければ null。revenue_includes_tax・pension_addon・spouse は boolean、nhi_rates_json はオブジェクト）, years, presets: [{id, label}], missing}`。missing は `profile`・`actual:<前年>`・`estimate:<今年>`・`consumption_mode` |
 | PUT /api/tax/profile | プロファイルの列（知らないキーは 400。無いキーは今の値、プロファイルが無ければ PR1 の既定値。nhi_rates_json はプリセットが無いとき 4 区分すべての rate・per_capita・cap が要る。キーを並べて保存） | `{profile, run}`。同じトランザクションで再計算 |
 | PUT /api/tax/years/:year | kind（新しい年は必須）・revenue・expenses・business_income・social_insurance_paid・income_tax_final・consumption_tax_final・prepaid_income_tax | `{year, run}`。同上 |
+| PUT /api/tax | `{profile?: プロファイルの部分更新, years?: [{year, ...年の部分更新}]}`。検査は上の 2 つと同じ（知らないキーは 400 `invalid_field`。profile も years も無ければ 400 `empty_body`。profile がオブジェクトでなければ `invalid_profile`、years がオブジェクトの配列でなければ `invalid_years`、year が 2000〜2100 の整数でなければ `invalid_year`） | `{profile（無ければ null）, years（保存後の全年）, run}`。1 トランザクションで profile → years（配列の順）を保存し、再計算は最後に 1 回。どこかで 400 なら何も残らない。監査は tax_profile.updated / tax_year.updated のまま |
 | POST /api/tax/recalculate | ― | `{run_id, created, updated, deactivated, skipped_pinned[], warnings[]}` |
-| GET /api/tax/estimates | ― | 最新の run の `{run_id, created_at, window, items（kind・year・key・amount・due・lines・income_year・assumed_prev_year・carried_from）, breakdown, skipped_pinned, warnings}`。まだ無ければ run_id: null |
+| GET /api/tax/estimates | ― | 最新の run の `{run_id, created_at, window, items（kind・year・key・amount・due・recurrence・end_date・lines・income_year・assumed_prev_year・carried_from）, breakdown, skipped_pinned, warnings}`。まだ無ければ run_id: null |
+| POST /api/tax/simulate | `{year?, revenue?, expenses?, business_income?, taxable_purchases?, ideco?, kyosai?, marginal_delta?, profile?: プロファイルの列の上書き}`（§14.5） | 1 年分の税・社保・手取り・限界負担・消費税の方式の比較（§14.5）。**書き込み・監査なし** |
 | PATCH /api/scheduled_items/:id | `pinned`（boolean。estimate 以外は 400 invalid_pinned） | GET /api/scheduled_items の items に estimate_key・pinned が増えた |
-| GET /api/cashflow | ― | months[].items に origin・estimate_key・pinned が増えた。warnings に `tax_profile_missing` / `consumption_tax_mode_unset` / `consumption_tax_not_implemented`（方式は設定済みだが PR1 は消費税を作らない） |
+| GET /api/cashflow | ― | months[].items に origin・estimate_key・pinned が増えた。warnings に `tax_profile_missing` / `consumption_tax_mode_unset` / `simplified_class_missing`（プロファイルから判定）/ `special20_expired`（最新の run の warnings から）（第 1 版の `consumption_tax_not_implemented` は第 2 版で廃止） |
 
 PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'、revenue_includes_tax=1、biz_tax_rate=NULL、resident_pay_mode='ordinary4'、nhi_preset='saitama-city-2026'、nhi_members=1、nhi_members_40_64=0、nhi_installments=8、nhi_first_month=7、pension_mode='monthly'、pension_addon=0、spouse=0、dependents=0、other_deductions=0、payment_account_id=NULL。
+
+### 14.5 試算（`POST /api/tax/simulate`）
+仮の売上・経費で「1 年分の負担がいくらか」を出す（期日なし・何も保存しない）。§14.1〜14.4 の見積もりは「いつ・いくら口座から出るか」。両者は同じ estimate() で計算し、数字を食い違わせない。
+**定常状態**: 「Y 年の売上・経費が前後の年も同じ」とみなし、Y−3〜Y+1 に同じ行（kind=estimate、確定値の列は null）を入れて期間 `{Y−1}-01-01`〜`{Y+2}-12-31` で estimate() を呼び、**Y 年の所得から決まる額**を取り出す。所得は business_income があればそれ、無ければ `max(0, revenue − expenses − 青色控除)` を business_income として明示的に入れ、行の expenses には taxable_purchases を入れる（本則の課税仕入を所得と切り離して指定するため）。pension_mode が `prepay24` なら試算の中だけ `prepay12` で代える（assumptions に `pension_prepay24_as_prepay12`）。1 回の試算で estimate() を本体 1・限界 1・掛金なし 1（掛金があるときだけ）・方式の比較 9 回呼ぶ。
+
+| kind | 取り出す breakdown | basis | 意味 |
+|---|---|---|---|
+| income_tax | income_tax, year=Y の total | year | Y 年分の申告納税額（予定納税を引く前） |
+| resident | resident, year=Y+1 | fiscal_year | Y+1 年度（Y 年の所得） |
+| nhi | nhi, year=Y+1 | fiscal_year | Y+1 年度（Y 年の所得） |
+| pension | pension, year=Y | fiscal_year | Y 年度 |
+| biz_tax | biz_tax, year=Y+1（無ければ 0） | fiscal_year | Y+1 年度。biz_tax_rate が NULL なら 0 |
+| ctax | ctax, year=Y の total | year | Y 年分の年税額（中間申告を引く前） |
+
+入力（すべて省略可。円・整数）: `year`（既定 今年 + 1（JST）、2000〜2100）、`revenue`（既定 tax_years の year の行 → 無ければ year 以前で最も新しい revenue の行。0 以上 or null）、`expenses`（既定 revenue を取った行の expenses、無ければ 0）、`business_income`（既定 null。指定すると所得はこれ）、`taxable_purchases`（既定 expenses。本則の課税仕入、税込/税抜は revenue と同じ）、`ideco`・`kyosai`（年額、既定 0。profile.other_deductions に足す）、`marginal_delta`（既定 1,000,000、1 以上）、`profile`（DB の profile、無ければ §14.4 の既定に重ねる。検査は PUT /api/tax/profile と同じ）。
+**既定の方式の補正**: body の profile に `consumption_mode` が無く、profile の方式が Y 年に使えない（special20 で year > 2026、または exempt・special20 で税抜売上 > 1,000 万 = 下の `special20_expired`・`over_10m`）ときは、profile に simplified_class があれば `simplified`（その区分）、無ければ `standard` で計算する（simplified も `over_50m` で使えなければ `standard`）。warnings に `mode_defaulted` を 1 件出し、inputs.consumption_mode は補正後の方式、inputs.source.consumption_mode は `defaulted`。body で方式を明示したときは補正しない（`selected_mode_unavailable` のまま）。知らないキーは 400 `invalid_field`、値の誤りは `invalid_<キー>`（profile の中は `invalid_<列>`）、body が JSON オブジェクトでなければ `invalid_body`、revenue も business_income も無ければ `income_required`。
+
+| 出力 | 式 |
+|---|---|
+| total | 6 kind の年額の合計 |
+| cash_profit（事業の現金収支） | 税込入力: revenue − expenses。税抜入力: revenue + 売上税額 − expenses − taxable_purchases × 10%（円未満切り捨て）。business_income だけのとき: business_income + 青色控除 |
+| take_home | cash_profit − total（掛金は本人の資産として残るので引かない） |
+| free_cash | take_home − ideco − kyosai |
+| effective_rate | total ÷ cash_profit（小数 4 桁で四捨五入。cash_profit ≤ 0 なら null） |
+| marginal | revenue（business_income 指定時はそれも）に delta を足して再計算。`total_increase`・`take_home_increase`・`rate` = total_increase ÷ delta（4 桁） |
+| deductions.saving | （ideco = kyosai = 0 の total）− total（所得税・住民税だけが減る。other_deductions は国保の課税標準に入らない） |
+| ctax_compare | exempt・special20・simplified 第 1〜6 種・standard の 9 行（この順）。行ごとに `tax` と `take_home`（= 本体の take_home + 本体の ctax − その方式の tax）。消費税の方式は他の kind に効かない |
+| best | available な方式のうち tax が最小のもの（exempt は参考なので除く）。同額なら special20 → simplified → standard。無ければ null |
+
+方式の可否（定常状態なので基準期間 = 同じ売上。判定は税抜売上の概算。`CTAX_EXEMPT_THRESHOLD` 1,000 万・`CTAX_SIMPLIFIED_THRESHOLD` 5,000 万）: revenue が無ければ全行 `revenue_missing`。exempt は税抜売上 > 1,000 万で `over_10m`（インボイス登録の有無は持たないので常に note `exempt_requires_no_invoice`）。special20 は year > 2026 で `special20_expired`、税抜売上 > 1,000 万で `over_10m`。simplified は > 5,000 万で `over_50m`。standard は常に可で note `standard_approx`（仕入税額 = taxable_purchases × 10% の概算。経費に非課税・不課税・軽減税率のものが混ざると本則が得に見えるので、taxable_purchases で上書きする）。available=false の行は tax・take_home が null。
+
+warnings はエンジンのもの（`special20_expired` は台帳向けの文なので常に落とす。year を持つもの（`revenue_missing`・`income_missing`）は year = Y の分だけ。year を持たないものはそのまま）に加えて、`mode_defaulted`（`{from, to, simplified_class}`。上の既定の方式の補正。to は `simplified` / `standard`、simplified_class は to = simplified のときその区分、それ以外 null）・`consumption_tax_mode_unset`（試算の方式が unset。ctax = 0）・`simplified_class_missing`（simplified で区分が null。ctax = 0）・`selected_mode_unavailable`（`{mode, reason}`。本体の ctax はエンジンどおり）・`rates_assumed`（`{year, latest, table}`。表ごとに、その表を引く年（`resident` は Y+1 年度、`income_tax_basic_deduction`・`pension` は Y）が rates.ts の表の最新年より先なら 1 件。前の年の値で計算している。国保のプリセットは年のキーを持たないので対象外）。assumptions は `steady_state`（常に）と `pension_prepay24_as_prepay12`。
+
+応答のキー（この順）: `year`, `inputs` {revenue, expenses, business_income, taxable_purchases, ideco, kyosai, other_deductions（profile の値、掛金を足す前）, revenue_includes_tax（boolean）, blue_return, consumption_mode（補正後）, simplified_class, source: {revenue, expenses（`body` / `tax_years:<年>` / `default`）, consumption_mode（`profile` / `body` / `defaulted`）}}, `income` {pre_blue, business_income}, `amounts`（常に 6 要素・上の表の順。{kind, year, basis, amount, lines}）, `total`, `cash_profit`, `take_home`, `free_cash`, `effective_rate`, `marginal` {delta, total_increase, take_home_increase, rate}, `deductions` {ideco, kyosai, saving}, `ctax_compare`（常に 9 要素。{mode, simplified_class, available, reason, tax, take_home, notes}）, `best` {mode, simplified_class} | null, `warnings`, `assumptions`。

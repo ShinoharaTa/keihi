@@ -4,9 +4,13 @@
 //        → 200 {profile, run: RunSummary}（同じトランザクションで再計算する）/ 400 {error}
 //   PUT  /api/tax/years/:year      body {kind（新しい年は必須）, revenue?, expenses?, business_income?, social_insurance_paid?,
 //        income_tax_final?, consumption_tax_final?, prepaid_income_tax?} → 200 {year, run: RunSummary} / 400 {error}
+//   PUT  /api/tax                  body {profile?: プロファイルの部分更新, years?: [{year, ...年の部分更新}]}（どちらも無ければ 400 empty_body）
+//        → 200 {profile, years: [TaxYear]（全年）, run: RunSummary}。1 トランザクションで profile → years を保存し、再計算は最後に 1 回
 //   POST /api/tax/recalculate      → 200 RunSummary {run_id, created, updated, deactivated, skipped_pinned[], warnings[]}
 //   GET  /api/tax/estimates        → 200 最新の再計算の結果 {run_id, created_at, window, items（内訳の行つき）, breakdown, skipped_pinned, warnings}
 //        （まだ無ければ run_id: null・items: []）
+//   POST /api/tax/simulate         body {year?, revenue?, expenses?, business_income?, taxable_purchases?, ideco?, kyosai?, marginal_delta?, profile?}
+//        → 200 SimResult（1 年分の税・社保・手取り、限界負担、消費税の方式の比較。保存しない・監査なし。src/cashflow/tax/simulate.ts）/ 400 {error}
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login。台帳への書き込みは actor = system）。今日は Asia/Tokyo の暦日。
 import { Hono, type Context } from 'hono';
 import { todayInTokyo } from '../../calendar/businessDays.ts';
@@ -20,9 +24,11 @@ import {
   presets,
   profileView,
   recalculate,
+  saveAll,
   saveProfile,
   saveYear,
 } from '../../cashflow/tax/sync.ts';
+import { parseSimBody, simulate } from '../../cashflow/tax/simulate.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
 
@@ -65,6 +71,18 @@ export function taxRoutes(deps: TaxRouteDeps): Hono {
     }
   });
 
+  r.put('/tax', async (c) => {
+    const body = await jsonBody(c.req.raw);
+    if (!body) return c.json({ error: 'invalid_json' }, 400);
+    const t = now();
+    try {
+      const out = saveAll(deps.db, body, { by: by(c), today: todayInTokyo(t), now: t });
+      return c.json({ profile: out.profile && profileView(out.profile), years: out.years, run: out.run });
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
   r.put('/tax/years/:year', async (c) => {
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
@@ -84,6 +102,25 @@ export function taxRoutes(deps: TaxRouteDeps): Hono {
 
   r.get('/tax/estimates', (c) => {
     return c.json(latestEstimates(deps.db) ?? { run_id: null, created_at: null, items: [], breakdown: [], skipped_pinned: [], warnings: [] });
+  });
+
+  // 何も書かない。body が JSON オブジェクトでなければ 400 invalid_body。
+  r.post('/tax/simulate', async (c) => {
+    const text = await c.req.text();
+    let body: unknown = {};
+    if (text !== '') {
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        return c.json({ error: 'invalid_body' }, 400);
+      }
+    }
+    try {
+      const { profile, input } = parseSimBody(deps.db, body, todayInTokyo(now()));
+      return c.json(simulate(profile, input));
+    } catch (e) {
+      return fail(c, e);
+    }
   });
 
   return r;

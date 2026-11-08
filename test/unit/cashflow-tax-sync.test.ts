@@ -9,7 +9,8 @@ import { insertAccount } from '../../src/bank/repo.ts';
 import { getScheduledItem, listScheduledItems } from '../../src/cashflow/repo.ts';
 import { ScheduleError, activateItem, createItem, deactivateItem, parseBody, updateItem, type ItemInput } from '../../src/cashflow/schedule.ts';
 import { insertTaxEstimateRun, listTaxYears } from '../../src/cashflow/tax/repo.ts';
-import { DEFAULT_PROFILE, TaxError, estimateWindow, recalculate, saveProfile, saveYear } from '../../src/cashflow/tax/sync.ts';
+import { buildForecast } from '../../src/cashflow/forecast.ts';
+import { DEFAULT_PROFILE, TaxError, estimateWindow, recalculate, saveAll, saveProfile, saveYear } from '../../src/cashflow/tax/sync.ts';
 import { integrityCheck, openDb, type Db } from '../../src/db/index.ts';
 import { listMigrations, migrate } from '../../src/db/migrate.ts';
 
@@ -485,6 +486,178 @@ describe('レビュー対応', () => {
       const { run } = setup(db);
       const est = byKey(db).get('income_tax:2026:prepay1')!;
       assert.deepEqual(run.warnings.filter((w) => w.kind === 'possible_duplicate' && w.key === 'income_tax:2026:prepay1'), [{ kind: 'possible_duplicate', key: 'income_tax:2026:prepay1', item_ids: [est.id, det.id] }]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('国民年金の月払い（第 2 版: 年度ごとに monthly の 1 項目）', () => {
+  const o = { by: user, today: TODAY, now: T0 };
+  const pensions = (db: Db) => [...byKey(db).values()].filter((i) => i.estimate_key!.startsWith('pension:')).sort((a, b) => (a.anchor_date < b.anchor_date ? -1 : 1));
+
+  test('年度ごとに recurrence=monthly・anchor=5 月末・end_date=翌 4 月末の項目を作る。前納は once', () => {
+    const db = freshDb();
+    try {
+      setup(db, { pension_mode: 'monthly' });
+      assert.deepEqual(
+        pensions(db).map((i) => [i.estimate_key, i.recurrence, i.anchor_date, i.end_date, i.amount, i.name, i.category]),
+        [
+          // 2025 年度は 2026-01〜04 が期間に掛かる。2029 年度は 2029-05-31 が期間（〜2030-02-07）の中。
+          ['pension:2025:monthly', 'monthly', '2025-05-31', '2026-04-30', 17_920, '国民年金 2025 年度 月払い（見積）', 'insurance'],
+          ['pension:2026:monthly', 'monthly', '2026-05-31', '2027-04-30', 17_920, '国民年金 2026 年度 月払い（見積）', 'insurance'],
+          ['pension:2027:monthly', 'monthly', '2027-05-31', '2028-04-30', 18_290, '国民年金 2027 年度 月払い（見積）', 'insurance'],
+          ['pension:2028:monthly', 'monthly', '2028-05-31', '2029-04-30', 18_290, '国民年金 2028 年度 月払い（見積）', 'insurance'],
+          ['pension:2029:monthly', 'monthly', '2029-05-31', '2030-04-30', 18_290, '国民年金 2029 年度 月払い（見積）', 'insurance'],
+        ],
+      );
+      saveProfile(db, { pension_mode: 'prepay12' }, { ...o, now: T1 });
+      assert.deepEqual(pensions(db).map((i) => [i.estimate_key, i.recurrence, i.end_date]), [
+        ['pension:2026:04', 'once', null], ['pension:2027:04', 'once', null], ['pension:2028:04', 'once', null], ['pension:2029:04', 'once', null],
+      ]);
+      // monthly の項目は anchor が期間より前（2025 年度）でも、end_date が期間に掛かれば止める。
+      assert.equal(estimates(db).filter((i) => i.recurrence === 'monthly' && i.active === 1).length, 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  const variants: [string, Parameters<typeof updateItem>[2], Record<string, unknown>][] = [
+    ['end_date', { endDate: '2027-02-28' }, { end_date: { from: '2027-02-28', to: '2027-04-30' } }],
+    ['recurrence', { recurrence: 'once', endDate: null }, { recurrence: { from: 'once', to: 'monthly' }, end_date: { from: null, to: '2027-04-30' } }],
+  ];
+  for (const [label, patch, changes] of variants) {
+    test(`${label} が違う・pinned=0 → その行を書き換える（id は同じ）`, () => {
+      const db = freshDb();
+      try {
+        setup(db, { pension_mode: 'monthly' });
+        const cur = byKey(db).get('pension:2026:monthly')!;
+        updateItem(db, cur.id, patch, { actor: 'system' }, T1);
+        assert.equal(getScheduledItem(db, cur.id)!.pinned, 0);
+        const r = recalculate(db, { today: TODAY, now: T2, actor: 'user' });
+        assert.deepEqual([r.created, r.updated, r.deactivated], [0, 1, 0]);
+        const after = byKey(db).get('pension:2026:monthly')!;
+        assert.deepEqual([after.id, after.recurrence, after.end_date], [cur.id, 'monthly', '2027-04-30']);
+        const a = auditsFor(db, cur.id).at(-1)!;
+        assert.equal(a.payload.reason, 'tax_recalc');
+        assert.deepEqual(a.payload.changes, changes);
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  test('人が monthly 項目の end_date を変えたら pinned=1（再計算で戻さない）', () => {
+    const db = freshDb();
+    try {
+      setup(db, { pension_mode: 'monthly' });
+      const cur = byKey(db).get('pension:2026:monthly')!;
+      assert.equal(updateItem(db, cur.id, { endDate: '2027-01-31' }, user, T1).pinned, 1);
+      const r = recalculate(db, { today: TODAY, now: T2, actor: 'user' });
+      assert.ok(r.skipped_pinned.some((s) => s.key === 'pension:2026:monthly'));
+      assert.equal(getScheduledItem(db, cur.id)!.end_date, '2027-01-31');
+    } finally {
+      db.close();
+    }
+  });
+
+  test('第 1 版の月ごとの once 項目（pension:F:MM）は止め、新しい monthly と重なっても possible_duplicate を出さない', () => {
+    const db = freshDb();
+    try {
+      setup(db);
+      // 第 1 版で作られた項目（期間の中の 2 件と、期間より前の 1 件）。
+      const old = (key: string, anchor: string) =>
+        createItem(db, { ...estimateInput(key), name: `国民年金 旧 ${key}`, amount: 17_920, category: 'insurance', anchorDate: anchor }, { actor: 'system' }, T0).id;
+      const before = old('pension:2025:12', '2025-12-31');
+      const inWin = [old('pension:2026:11', '2026-11-30'), old('pension:2026:12', '2026-12-31')];
+      const { run } = saveProfile(db, { pension_mode: 'monthly' }, { ...o, now: T1 });
+      for (const id of inWin) assert.equal(getScheduledItem(db, id)!.active, 0);
+      assert.equal(getScheduledItem(db, before)!.active, 1); // 期間より前の期日は従来どおり触らない
+      assert.deepEqual(run.warnings.filter((w) => w.kind === 'possible_duplicate'), []);
+      assert.ok(byKey(db).has('pension:2026:monthly'));
+    } finally {
+      db.close();
+    }
+  });
+
+  test('資金繰り（forecast.ts）は monthly + end_date を毎月 1 件に展開し、年度で額が切り替わる', () => {
+    const db = freshDb();
+    try {
+      setup(db, { pension_mode: 'monthly', payment_account_id: null });
+      const f = buildForecast(db, { today: TODAY, months: 18 });
+      const rows = f.months.map((m) => {
+        const ps = m.items.filter((i) => i.estimate_key?.startsWith('pension:'));
+        assert.equal(ps.length, 1, m.month);
+        return [m.month, ps[0].estimate_key, ps[0].amount];
+      });
+      assert.equal(rows.length, 18);
+      // 各月分を翌月末に納める: 2026 年度分は 2026-05〜2027-04、2027 年度分は 2027-05〜2028-04。期日はすべて月末。
+      assert.deepEqual(rows[0], ['2026-11', 'pension:2026:monthly', 17_920]);
+      assert.deepEqual(rows[5], ['2027-04', 'pension:2026:monthly', 17_920]);
+      assert.deepEqual(rows[6], ['2027-05', 'pension:2027:monthly', 18_290]);
+      assert.deepEqual(rows[17], ['2028-04', 'pension:2027:monthly', 18_290]);
+      const dues = f.months.map((m) => m.items.find((i) => i.estimate_key?.startsWith('pension:'))!.due);
+      assert.deepEqual(dues.slice(0, 6), ['2026-11-30', '2026-12-31', '2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('一括保存（saveAll）', () => {
+  const o = { by: user, today: TODAY, now: T0 };
+  const runs = (db: Db) => (db.prepare('SELECT count(*) n FROM tax_estimate_runs').get() as { n: number }).n;
+  const audits = (db: Db, action: string) => (db.prepare('SELECT count(*) n FROM audit_log WHERE action = ?').get(action) as { n: number }).n;
+
+  test('profile → years を 1 トランザクションで保存し、再計算は 1 回だけ。監査は従来の action', () => {
+    const db = freshDb();
+    try {
+      const out = saveAll(
+        db,
+        {
+          profile: { pension_mode: 'none', nhi_preset: null, consumption_mode: 'exempt' },
+          years: [
+            { year: 2025, kind: 'actual', business_income: 3_000_000, income_tax_final: 150_000, prepaid_income_tax: 0, social_insurance_paid: 600_000 },
+            { year: 2026, kind: 'estimate', business_income: 3_000_000 },
+          ],
+        },
+        o,
+      );
+      assert.equal(runs(db), 1);
+      assert.equal(out.profile!.consumption_mode, 'exempt');
+      assert.deepEqual(out.years.map((y) => y.year), [2025, 2026]);
+      assert.ok(out.run.created > 0);
+      assert.deepEqual(out.run.warnings, []); // プロファイルが先に入るので tax_profile_missing は出ない
+      assert.deepEqual([audits(db, 'tax_profile.updated'), audits(db, 'tax_year.updated')], [1, 2]);
+      saveAll(db, { years: [{ year: 2026, business_income: 4_000_000 }] }, { ...o, now: T1 });
+      assert.equal(runs(db), 2);
+      assert.ok(verifyAudit(db).ok);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('空の body・知らないキー・途中の 400 は何も残さない', () => {
+    const db = freshDb();
+    try {
+      const code = (body: Record<string, unknown>) => {
+        try {
+          saveAll(db, body, o);
+          return 'ok';
+        } catch (e) {
+          return e instanceof TaxError ? e.code : String(e);
+        }
+      };
+      assert.equal(code({}), 'empty_body');
+      assert.equal(code({ profile: {}, other: 1 }), 'invalid_field');
+      assert.equal(code({ profile: [] }), 'invalid_profile');
+      assert.equal(code({ years: {} }), 'invalid_years');
+      assert.equal(code({ years: [{ kind: 'actual' }] }), 'invalid_year');
+      assert.equal(code({ years: [{ year: 2026, kind: 'actual', foo: 1 }] }), 'invalid_field');
+      // プロファイルは正しいが年が 400 → プロファイルも残らない。
+      assert.equal(code({ profile: { spouse: true }, years: [{ year: 2026 }] }), 'missing_kind');
+      assert.equal((db.prepare('SELECT count(*) n FROM tax_profile').get() as { n: number }).n, 0);
+      assert.equal(runs(db), 0);
     } finally {
       db.close();
     }

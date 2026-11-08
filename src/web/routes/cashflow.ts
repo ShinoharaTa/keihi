@@ -16,8 +16,7 @@
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 //   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。
-//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）・
-//        consumption_tax_not_implemented（方式は設定済みだが PR1 は消費税を作らない）を足す。
+//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）を足す。
 //   PATCH /api/scheduled_items/:id は pinned（真偽値。origin = estimate の項目だけ。それ以外は 400 invalid_pinned）も受ける。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';
