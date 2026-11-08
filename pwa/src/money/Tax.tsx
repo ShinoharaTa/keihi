@@ -2,7 +2,8 @@
 // カード: プロファイルが無ければ「設定する」だけ。あれば「2026 年分 所得 ○○万円 · 消費税 2 割特例 / 最終計算 11/7」と「設定を開く」「再計算」（POST /api/tax/recalculate）。
 // 設定画面（1 画面・縦スクロール）: 青色の区分・消費税の方式（簡易課税なら事業区分、方式を選んだら税込のトグル）・国保・個人事業税・国民年金・配偶者と扶養・iDeCo 等・納税口座・年ごとの所得。
 // 保存はプロファイルの変えた列と変えた年を 1 回の PUT /api/tax で送る（再計算を返す）。結果の件数と警告を画面の上に 1 行で出す。
-// 年ごとの所得は年を縦に並べる（スマホで横にはみ出さないように）。入力を変えている間は onLock(true) で「戻る」を止める。
+// 年ごとの所得は年を縦に並べる（スマホで横にはみ出さないように）。入力を変えている間は onLock(true) で「戻る」と「試算」を止める。
+// カードの下と設定画面の頭の右端に「試算」（税の試算 TaxSim.tsx へ）。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, putJson } from '../api.ts';
 import { Switch } from './Accounts.tsx';
@@ -32,7 +33,21 @@ import {
 } from './model.ts';
 import { ScreenHead } from './Money.tsx';
 
-export function TaxCard({ tax, today, busy, onOpen, onRecalc }: { tax: TaxSummary; today: string; busy: boolean; onOpen: () => void; onRecalc: () => void }) {
+export function TaxCard({
+  tax,
+  today,
+  busy,
+  onOpen,
+  onRecalc,
+  onSim,
+}: {
+  tax: TaxSummary;
+  today: string;
+  busy: boolean;
+  onOpen: () => void;
+  onRecalc: () => void;
+  onSim: () => void;
+}) {
   const unset = tax.missing.includes('profile');
   return (
     <section class="m-card m-pad12 m-gap6" aria-labelledby="m-tax">
@@ -59,6 +74,9 @@ export function TaxCard({ tax, today, busy, onOpen, onRecalc }: { tax: TaxSummar
           </div>
         </>
       )}
+      <button type="button" class="m-link" onClick={onSim}>
+        試算
+      </button>
     </section>
   );
 }
@@ -243,12 +261,14 @@ export function Tax({
   locked,
   onLock,
   onBack,
+  onSim,
 }: {
   today: string;
   accounts: Account[];
   locked: boolean;
   onLock: (locked: boolean) => void;
   onBack: () => void;
+  onSim: () => void;
 }) {
   const [data, setData] = useState<TaxProfileResponse | null>(null);
   const [draft, setDraft] = useState<TaxProfileDraft>(() => taxProfileDraft(null));
@@ -310,7 +330,11 @@ export function Tax({
 
   return (
     <>
-      <ScreenHead title="税・保険の見積もり" sub="概算（±1〜2 割）" backLabel="予定に戻る" locked={locked} onBack={onBack} />
+      <ScreenHead title="税・保険の見積もり" sub="概算（±1〜2 割）" backLabel="予定に戻る" locked={locked} onBack={onBack}>
+        <button type="button" class="m-btn m-btn-round" disabled={locked} onClick={onSim}>
+          試算
+        </button>
+      </ScreenHead>
       <div class="m-main">
         {msg && (
           <p class="m-msg" role="status">

@@ -15,9 +15,25 @@ import {
   candidateName,
   candidateNext,
   cardUsage,
+  ctaxReasonText,
+  ctaxRowLabel,
   categoryRows,
   countLabel,
   dateShort,
+  emptySimForm,
+  isBestRow,
+  marginalText,
+  parseMan,
+  seedSimForm,
+  simAmountRows,
+  simCompareRows,
+  simMan,
+  simNotices,
+  simPct,
+  simWarningText,
+  stepMan,
+  taxSimBody,
+  toManInput,
   dayLabel,
   dayOfMonth,
   daysBetween,
@@ -93,7 +109,9 @@ import {
   type MonthlySummary,
   type Overview,
   type ScheduledItem,
+  type CtaxCompareRow,
   type TaxProfileResponse,
+  type TaxSimResponse,
   type TaxYear,
   type Txn,
   type Upcoming,
@@ -753,6 +771,109 @@ const candidate: Candidate = {
   state: 'open',
 };
 
+// ---- 税の試算 ----
+
+const cmp = (mode: CtaxCompareRow['mode'], cls: number | null, o: Partial<CtaxCompareRow> = {}): CtaxCompareRow => ({
+  mode, simplified_class: cls, available: true, reason: null, tax: 100000, take_home: 5000000, notes: [], ...o,
+});
+const simCompare: CtaxCompareRow[] = [
+  cmp('exempt', null, { tax: 0, notes: ['exempt_requires_no_invoice'] }),
+  cmp('special20', null, { available: false, reason: 'special20_expired', tax: null, take_home: null }),
+  ...[1, 2, 3, 4, 5, 6].map((c) => cmp('simplified', c, { tax: 80000 * (7 - c) })),
+  cmp('standard', null, { tax: 640000, notes: ['standard_approx'] }),
+];
+const simRes: TaxSimResponse = {
+  year: 2027,
+  inputs: {
+    revenue: 8000000, expenses: 1000000, business_income: null, taxable_purchases: 1000000, ideco: 0, kyosai: 0, other_deductions: 0,
+    revenue_includes_tax: true, blue_return: '65', consumption_mode: 'simplified', simplified_class: 5, source: { revenue: 'tax_years:2026', expenses: 'tax_years:2026' },
+  },
+  income: { pre_blue: 7000000, business_income: 6350000 },
+  amounts: [
+    { kind: 'income_tax', year: 2027, basis: 'year', amount: 700000, lines: [] },
+    { kind: 'resident', year: 2028, basis: 'fiscal_year', amount: 600000, lines: [] },
+    { kind: 'nhi', year: 2028, basis: 'fiscal_year', amount: 800000, lines: [] },
+    { kind: 'pension', year: 2027, basis: 'fiscal_year', amount: 210000, lines: [] },
+    { kind: 'biz_tax', year: 2028, basis: 'fiscal_year', amount: 0, lines: [] },
+    { kind: 'ctax', year: 2027, basis: 'year', amount: 160000, lines: [] },
+  ],
+  total: 2470000, cash_profit: 7000000, take_home: 4530000, free_cash: 4530000, effective_rate: 0.3529,
+  marginal: { delta: 1000000, total_increase: 377000, take_home_increase: 623000, rate: 0.377 },
+  deductions: { ideco: 0, kyosai: 0, saving: 0 },
+  ctax_compare: simCompare,
+  best: { mode: 'simplified', simplified_class: 1 },
+  warnings: [],
+  assumptions: ['steady_state'],
+};
+
+describe('税の試算の純関数', () => {
+  test('万円 ↔ 円。「−100 万」で 0 未満にならない', () => {
+    assert.equal(toManInput(8000000), '800');
+    assert.equal(toManInput(8125000), '813', '整数に丸める');
+    assert.equal(parseMan('800'), 8000000);
+    assert.equal(parseMan('１,２００'), 12000000);
+    assert.equal(parseMan(''), null);
+    for (const x of ['-1', '1.5', 'x']) assert.equal(parseMan(x), undefined, x);
+    assert.equal(stepMan('800', 100), '900');
+    assert.equal(stepMan('50', -100), '0');
+    assert.equal(stepMan('', -100), '0');
+    assert.equal(stepMan('', 100), '100');
+    assert.equal(stepMan('x', 100), '100', '読めなければ 0 から');
+    assert.equal(simMan(1234567), '123.5万');
+    assert.equal(simMan(0), '0.0万');
+    assert.equal(simMan(-50000), '−5.0万');
+    assert.equal(simPct(0.3529), '35.3%');
+    assert.equal(simPct(0.4), '40.0%');
+    assert.equal(simPct(null), '—');
+  });
+  test('本文: 最初は空。空の欄は送らない（既定）。方式を選べば profile を上書き、区分は簡易課税のときだけ', () => {
+    assert.deepEqual(taxSimBody(emptySimForm()), {});
+    const f = seedSimForm(emptySimForm(), simRes);
+    assert.deepEqual(f, { year: '2027', revenue: '800', expenses: '100', purchases: '', ideco: '', kyosai: '', mode: 'simplified', cls: '5' });
+    assert.deepEqual(taxSimBody(f), { year: 2027, revenue: 8000000, expenses: 1000000, profile: { consumption_mode: 'simplified', simplified_class: 5 } });
+    assert.deepEqual(taxSimBody({ ...f, mode: 'standard', purchases: '60', ideco: '24', kyosai: '84' }), {
+      year: 2027, revenue: 8000000, expenses: 1000000, taxable_purchases: 600000, ideco: 240000, kyosai: 840000, profile: { consumption_mode: 'standard' },
+    });
+    assert.deepEqual((taxSimBody({ ...f, cls: '' }) as Record<string, unknown>).profile,{ consumption_mode: 'simplified' });
+    assert.equal(taxSimBody({ ...f, expenses: '-1' }), '「経費」は 0 以上の整数（万円）で入れてください。');
+    const other = { ...simRes, inputs: { ...simRes.inputs, taxable_purchases: 800000, ideco: 240000, simplified_class: null, revenue: null } };
+    assert.deepEqual(seedSimForm(emptySimForm(), other), { year: '2027', revenue: '', expenses: '100', purchases: '80', ideco: '24', kyosai: '', mode: 'simplified', cls: '' });
+    assert.equal(seedSimForm({ ...emptySimForm(), revenue: '500', mode: 'standard' }, simRes).revenue, '500', '入れてある欄は埋めない');
+  });
+  test('負担の表: 年分 / 年度の見出し、個人事業税は 0 なら出さない。限界の 1 行', () => {
+    assert.deepEqual(simAmountRows(simRes.amounts).map((r) => r.label), ['所得税（2027 年分）', '住民税（2028 年度）', '国保（2028 年度）', '国民年金（2027 年度）', '消費税（2027 年分）']);
+    const biz = simRes.amounts.map((a) => (a.kind === 'biz_tax' ? { ...a, amount: 50000 } : a));
+    assert.equal(simAmountRows(biz)[4]!.label, '個人事業税（2028 年度）');
+    assert.equal(marginalText(simRes.marginal), '+100万で手取り +62.3万（負担率 37.7%）');
+  });
+  test('比較表の 3 行: 2 割特例 / 簡易（入力 → プロファイル → 第 5 種）/ 本則。免税は出さない', () => {
+    const rows = (i: number | null, p: number | null) => simCompareRows(simCompare, i, p).map(ctaxRowLabel);
+    assert.deepEqual(rows(3, 2), ['2 割特例', '簡易（第 3 種）', '本則（概算）']);
+    assert.deepEqual(rows(null, 2), ['2 割特例', '簡易（第 2 種）', '本則（概算）']);
+    assert.deepEqual(rows(null, null), ['2 割特例', '簡易（第 5 種）', '本則（概算）']);
+    const shown = simCompareRows(simCompare, 1, null);
+    assert.deepEqual(shown.map((r) => isBestRow(r, simRes.best)), [false, true, false], '最安は区分まで一致した行だけ');
+    assert.equal(simCompareRows(simCompare, 2, null).some((r) => isBestRow(r, simRes.best)), false);
+    assert.equal(isBestRow(shown[2]!, { mode: 'standard', simplified_class: null }), true);
+    assert.equal(isBestRow(shown[2]!, null), false);
+  });
+  test('理由と警告の文言', () => {
+    assert.equal(ctaxReasonText('special20_expired'), '2026 年分まで');
+    assert.equal(ctaxReasonText('over_10m'), '売上 1,000 万超');
+    assert.equal(ctaxReasonText('over_50m'), '売上 5,000 万超');
+    assert.equal(ctaxReasonText('revenue_missing'), '売上が未入力');
+    assert.equal(simWarningText({ kind: 'consumption_tax_mode_unset' }), '消費税の方式が未設定なので、消費税は 0 円で計算しています。');
+    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }), '選んだ方式（2 割特例）は使えない条件です（2026 年分まで）。消費税はその方式のまま計算しています。');
+    assert.equal(simWarningText({ kind: 'rates_assumed', year: 2028, latest: 2026 }), '2028 年の税率・料率はまだ無いので、2026 年の値で計算しています。');
+    assert.equal(simWarningText({ kind: 'special20_expired', year: 2027 }), taxWarningText({ kind: 'special20_expired', year: 2027 }), '知らない kind は見積もりの文言');
+    assert.deepEqual(simNotices({ warnings: [{ kind: 'simplified_class_missing' }, { kind: 'simplified_class_missing' }], assumptions: ['steady_state', 'pension_prepay24_as_prepay12'] }), [
+      '簡易課税の事業区分が未選択なので、消費税は 0 円で計算しています。',
+      '国民年金の 2 年前納は、1 年前納として計算しています。',
+    ]);
+    assert.deepEqual(simNotices(simRes), []);
+  });
+});
+
 describe('SSR スナップショット', () => {
   let vite: ViteDevServer;
   const load = (p: string) => vite.ssrLoadModule(p) as Promise<Record<string, (props: any) => unknown>>;
@@ -1051,5 +1172,24 @@ describe('SSR スナップショット', () => {
     assert.match(cf, /税・保険の見積もりが未設定です/);
     const row = cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!;
     t.assert.snapshot(lines(`${out}\n${row}`));
+  });
+
+  test('税の試算: 入力（年・売上 ±100 万・方式と区分）、負担の表、方式の比較の 3 行（使えない方式は理由）', async (t) => {
+    const m = await load('/src/money/TaxSim.tsx');
+    const form = seedSimForm(emptySimForm(), simRes);
+    const input = html(m.SimForm!, { today: TODAY, form, includesTax: true, more: true, onForm: noop, onMore: noop });
+    assert.match(input, /売上（万円・税込）/);
+    assert.match(input, /<option value="2026">2026 年<\/option>[\s\S]*<option value="2028">2028 年<\/option>/);
+    assert.match(input, /第 5 種 サービス 50%/);
+    assert.match(input, /placeholder="経費と同じ"/);
+    const withSaving = { ...simRes, deductions: { ideco: 240000, kyosai: 0, saving: 72000 }, free_cash: 4290000, warnings: [{ kind: 'rates_assumed' as const, year: 2028, latest: 2026 }] };
+    const out = html(m.TaxSimResult!, { res: withSaving, inputClass: 5, profileClass: 5 });
+    assert.doesNotMatch(out, /個人事業税|免税/);
+    assert.match(out, /2026 年分まで/);
+    assert.match(out, /自由に使える額/);
+    assert.match(out, /2028 年の税率・料率はまだ無い/);
+    const best = html(m.TaxSimResult!, { res: simRes, inputClass: 1, profileClass: 5 });
+    assert.match(best, /簡易（第 1 種）<span class="m-badge b-income m-sim-best">最安<\/span>/);
+    t.assert.snapshot(lines(`${input}\n${out}`));
   });
 });
