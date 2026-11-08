@@ -1,7 +1,8 @@
 // 予定の台帳の API（docs/mvp-plan-v3.md T301。src/cashflow/schedule.ts）。認証は app.ts が全ルートの前に差し込む。
 //   GET  /api/scheduled_items?all=1            → 200 {items: [ScheduledItem]}（all=1 で止めた項目も含める。既定は active だけ）
 //   POST /api/scheduled_items                  body {name, amount, direction, category, recurrence, anchor_date,
-//        account_id?, end_date?, notify_days_before?（既定 14）, origin?（既定 manual）} → 201 ScheduledItem / 400 {error}
+//        account_id?, end_date?, notify_days_before?（既定 14）, origin?（既定 manual）, amount_kind?（fixed | variable、既定 fixed）}
+//        → 201 ScheduledItem / 400 {error}（amount_kind が不正なら invalid_amount_kind、savings を in にすると invalid_category_for_direction）
 //   PATCH /api/scheduled_items/:id             body は上の部分（origin は変えられない）→ 200 ScheduledItem / 400 / 404
 //   POST /api/scheduled_items/:id/deactivate   → 200 ScheduledItem（active = 0。既に止めてあればそのまま）/ 404
 //   POST /api/scheduled_items/:id/activate     → 200 ScheduledItem（active = 1 に戻す。既に有効ならそのまま）/ 404
@@ -10,9 +11,10 @@
 //        範囲は今日〜今日 + days 日で、両端を含む（今日は Asia/Tokyo の暦日）。期日順に並べる。days は 1〜UPCOMING_MAX_DAYS の整数。
 // 周期の検出の候補（T302。src/cashflow/detect.ts）:
 //   GET  /api/recurrence_candidates?state=open        → 200 {candidates: [RecurrenceCandidate + description・account_name]}（state を省くとすべて。description は最新の明細の正規化前の摘要）/ 400 {error}
+//        RecurrenceCandidate には amount_kind（fixed | variable）と dismissed_by（human | system | null）が付く。
 //   POST /api/recurrence_candidates/detect            → 200 {created, updated}（手動で検出する。updated は金額が変わって置き換えた open の候補の数。今日は Asia/Tokyo の暦日）
 //   POST /api/recurrence_candidates/:id/accept        body {category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 候補の金額）}
-//        → 200 {candidate, item}（台帳の項目を作って accepted にする）/ 400 {error}（open でない・値が不正）/ 404
+//        → 200 {candidate, item}（台帳の項目を作って accepted にする。item の amount_kind は候補のまま）/ 400 {error}（open でない・値が不正）/ 404
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 //   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。

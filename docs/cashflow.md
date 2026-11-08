@@ -35,7 +35,7 @@ V4・V5・V7・V8・V10・V11 は初期案のまま実装した（2026-11-06 暫
 | 残高 | 明細の後に `listWalletables` の last_balance を as_of_date=今日・source=freee_walletable で追記。カードと残高 null は追記しない。予算で止まった回は取らない |
 | 一部失敗 | 他の口座は続け、最後に例外を投げてジョブの再試行に回す |
 
-## 2. テーブル（0005_bank・0006_cashflow）
+## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2）
 日付は JST の暦日 `YYYY-MM-DD`、時刻は UTC ISO8601、金額は整数の円。追記専用・不変の列は SQLite のトリガで拒否する。
 mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにしたので 0006_cashflow に繰り上げた（`0006_cashflow.sql` 冒頭）。
 
@@ -51,8 +51,8 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | transfer_links | 振替・引き落とし・チャージの組。組ごとに seq 最大が有効。card_settlement は in_txn_id NULL | 追記専用 |
 | sync_status | 口座ごとの取得状況（A5） | 更新可 |
 | freee_rule_links | keihi が freee に作ったルール（act 4 / 12） | 追記専用（書く処理は T109 で未実装） |
-| scheduled_items | 予定の項目（direction in / out） | 更新可。id・origin・created_at は不変。削除禁止（active=0 にする）。変更は監査 |
-| recurrence_candidates | 周期の検出の候補 | state・scheduled_item_id・updated_at だけ更新可。削除禁止。accepted のときだけ scheduled_item_id を持つ |
+| scheduled_items | 予定の項目（direction in / out）。amount_kind（fixed / variable。既定 fixed）は金額が毎回変わるかの印（0009） | 更新可。id・origin・created_at・estimate_key は不変。削除禁止（active=0 にする）。変更は監査 |
+| recurrence_candidates | 周期の検出の候補。amount_kind（fixed / variable）、dismissed_by（human / system。dismissed のときだけ）を持つ（0009） | state・scheduled_item_id・dismissed_by・updated_at だけ更新可（amount_kind は不変）。削除禁止。accepted のときだけ scheduled_item_id を持つ |
 
 ## 3. 重複排除（`src/bank/dedup.ts`、T106）
 | 段 | 条件 | 結果 |
@@ -87,9 +87,9 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 
 学習: 人（human）の上書きで、同じ口座・同じ正規化摘要の**別々の明細 3 件**の最新の上書きがすべて同じ tag と category なら、match=exact・origin=learned のルールを作る。同じ口座・同じパターンの learned が既にあれば、同じ中身なら hit_count +1、違えば置き換える（2 件目は作らない）。agent の上書き・unset・空の摘要は数えない。監査に摘要は入れない。
 
-カテゴリ（固定 12 種 + 未分類 = null。DB に CHECK は無く、コードで検証）:
-food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / other その他。
-予定台帳の category（tax / insurance / car / other / income）はこれとは別の一覧。
+カテゴリ（固定 13 種 + 未分類 = null。DB に CHECK は無く、コードで検証）:
+food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / savings 積立 / other その他。
+予定台帳の category（tax / insurance / car / savings / other / income）はこれとは別の一覧。savings は direction=out だけ（in は 400 `invalid_category_for_direction`）。資金繰りの計算では他の支出と同じく残高から引く。
 
 ## 6. 月次集計（`src/bank/summary.ts`、T110）
 - その月の全明細から、§4 の除外（全口座の有効な組の両側）を除いて合計する。`include_in_cashflow` では絞らない。
@@ -116,15 +116,18 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 次の予定日 = 最後の枠に周期の月数を足した月に D を当てた日。止まったとみなす日数 = 月数 × 15 + 6。
 
 **2 段の判定**（摘要ごと）:
-1. 段 1: 金額を見ずに枠で列を作る。列の最初 −3 日〜最後 +6 日にある同じ摘要の明細のうち列に入った割合（純度）が 0.8 未満なら捨てる（買い物の多い店が毎月に化けないように）。金額の段（段の先頭の額と ±5% で合わなくなったら次の段）が 1 つ、または 2 つでどちらの段にも 2 件以上あれば定額の候補にする（金額は最新の明細の額。値上げ・増額を 1 本の列として扱う）。1 件だけの段がある列（1 年違いの金額の違う 2 件など）と、段が 3 つ以上の列は段 1 では捨て、段 2 に回す（不定額は次の版）。周期の中から 1 本だけ採り、その明細は段 2 で使わない。
-2. 段 2: 残りの明細を金額 ±5% でまとめ、まとまりごとに枠で列を作る（定期購読と単発の買い物が同じ摘要に混ざる場合）。純度はまとまりの中で測る（分母は同じまとまりで列の期間にある明細）。週 1 回の同額の買い物が毎月に化けないように。
+1. 段 1: 金額を見ずに枠で列を作る。列の最初 −3 日〜最後 +6 日にある同じ摘要の明細のうち列に入った割合（純度）が 0.8 未満なら捨てる（買い物の多い店が毎月に化けないように）。金額の段（段の先頭の額と ±5% で合わなくなったら次の段）が 1 つ、または 2 つでどちらの段にも 2 件以上あれば定額（amount_kind = fixed）の候補にする（金額は最新の明細の額。値上げ・増額を 1 本の列として扱う）。段が 3 つ以上で、周期が毎月なら 4 回以上・隔月なら 3 回以上あれば不定額（amount_kind = variable）の候補にする（3 か月ごと・毎年・隔年の不定額は作らない）。不定額の金額は直近 6 回（足りなければ全回）の中央値（偶数個は中央 2 つの平均）を 100 円単位に切り上げた額。どちらでもない列（1 件だけの段がある列、回数の足りない不定額）は段 1 では捨て、段 2 に回す。周期の中から 1 本だけ採り、その明細は段 2 で使わない（毎月の不定額の明細から「毎年」の定額は作られない）。
+2. 段 2: 残りの明細を金額 ±5% でまとめ、まとまりごとに枠で列を作る（定期購読と単発の買い物が同じ摘要に混ざる場合）。純度はまとまりの中で測る（分母は同じまとまりで列の期間にある明細）。週 1 回の同額の買い物が毎月に化けないように。段 2 の候補はすべて定額。
 - どちらの段も、最後の出現日が新しい列を採り、同じなら短い周期を採る。止まった列は採らない。
 
-- 作らない: 同じ口座・摘要・周期で金額 ±5% の候補が既にある（open / accepted / 人が dismissed にしたもの。system が superseded で dismissed にしたものは数えない）。同じ口座の active な予定に、同じ名前か「同じ周期で ±5%」のものがある。
-- 置き換え: 新しい候補を作ったとき、次の open の候補を dismissed にする（actor=system、`reason: superseded`、`by` = 新しい候補）。人が dismissed にしたもの・accepted のものには触らない。
-  - 同じ口座・摘要・周期で、今回のどの列とも金額が合わないもの（値上げ前など）。
-  - 周期によらず、occurrences の明細（bank_txn_id）が新しい候補と 1 件でも重なるもの。
-- 受け入れ: 台帳に direction=out・origin=detected で入れる。名前の既定は正規化摘要、category の既定は other、notify_days_before は 14。anchor_date は「出現日の『日』の最頻値（月末が多ければ月末）を最後の出現月に当て、周期を 1 回足した日」。
+- 作らない（同じ口座・摘要・周期の候補は状態を問わず数える。ただし system が置き換えで dismissed にしたもの〈dismissed_by = system〉は数えない）:
+  - 定額: amount_kind = fixed で金額 ±5% の候補が既にある。同じ口座の active な予定に、同じ名前か「同じ周期で ±5%」のものがある。
+  - 不定額: amount_kind = variable の候補が既にある（金額は問わない。代表値が毎月変わっても作り直さない）。同じ口座の active な予定に、同じ名前か「同じ周期で金額が代表値 ±5%」のもの（税の見積もり〈origin = estimate〉は除く）がある。
+- 置き換え: 新しい候補を作ったとき、次の open の候補を dismissed にする（actor=system、dismissed_by=system、`reason: superseded`、`by` = 新しい候補）。人が dismissed にしたもの・accepted のものには触らない。
+  - 同じ口座・摘要・周期で、今回のどの列とも合わないもの（値上げ前など）。定額は金額 ±5% で合わせ、不定額は今回も不定額の列があれば合うとみなす。
+  - 周期・amount_kind によらず、occurrences の明細（bank_txn_id）が新しい候補と 1 件でも重なるもの（例: 毎月の不定額が採った明細を含む「毎年」の open）。
+- 却下: 人（POST /api/recurrence_candidates/:id/dismiss）の却下は dismissed_by = human。0009 より前の dismissed は、監査ログに system の superseded があれば system、無ければ human で埋めた。
+- 受け入れ: 台帳に direction=out・origin=detected で入れる。名前の既定は正規化摘要、category の既定は other、notify_days_before は 14、amount_kind は候補のまま（amount は上書きできる）。anchor_date は「出現日の『日』の最頻値（月末が多ければ月末）を最後の出現月に当て、周期を 1 回足した日」。
 
 ## 8. 資金繰り表（`src/cashflow/forecast.ts`、T303・V11）
 対象口座 = `include_in_cashflow = 1` かつ `active = 1`。今月を 1 か月目として既定 36 か月（1〜60）。
@@ -132,7 +135,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | 項目 | 式 |
 |---|---|
 | 起点 opening_balance | 対象口座の最新残高の合計（as_of_date 最大 → seq 最大）。残高が無い口座は 0 |
-| 予定 planned_in / out | active な台帳の項目の期日を月に割り当てる。今月は**明日から**月末まで（今日の分は残高に反映済みとみなす） |
+| 予定 planned_in / out | active な台帳の項目の期日を月に割り当てる。今月は**明日から**月末まで（今日の分は残高に反映済みとみなす）。不定額（amount_kind = variable）も台帳の額をそのまま積む。months[].items の各項目に amount_kind |
 | 予定外 unplanned_out | 今月より前の直近 `unplanned_lookback_months` か月のうち「対象口座の最初の明細の月より後」の月について、(その月の対象口座の出金合計 − その月に期日があった予定の out) の中央値。負なら 0 |
 | 予定外から除く明細 | transfer / charge は**両側とも対象口座**のときだけ、card_settlement はパターンが合う**対象のカード口座**があるときだけ |
 | 履歴から引く予定 | 停止した項目も含め（期日は anchor_date・end_date から出す）、account_id が NULL か対象口座のもの |
@@ -167,16 +170,16 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
-| GET /api/categories | ― | 12 種と未分類のラベル |
-| GET /api/scheduled_items | `all=1` で停止中も | `{items}` |
-| POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category・recurrence（once/monthly/bimonthly/quarterly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14） | out に income は不可。origin は変えられない |
+| GET /api/categories | ― | 13 種と未分類のラベル |
+| GET /api/scheduled_items | `all=1` で停止中も | `{items}`。各項目に amount_kind |
+| POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category（tax/insurance/car/savings/other/income）・recurrence（once/monthly/bimonthly/quarterly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14）・amount_kind?（fixed/variable、既定 fixed。それ以外は 400 `invalid_amount_kind`） | out に income、in に savings は不可（`invalid_category_for_direction`）。origin は変えられない |
 | POST /api/scheduled_items/:id/deactivate・/activate | ― | active を切り替え |
-| GET /api/scheduled_items/upcoming | days（1〜1096、既定 30） | 今日〜今日 + days（両端を含む）の期日順 |
-| GET /api/recurrence_candidates | state? | `{candidates}`。各候補に description（occurrences_json の最後〈最新〉の明細の正規化前の摘要）・account_name（口座名）。見つからなければ null |
+| GET /api/scheduled_items/upcoming | days（1〜1096、既定 30） | 今日〜今日 + days（両端を含む）の期日順。各項目に amount_kind |
+| GET /api/recurrence_candidates | state? | `{candidates}`。各候補に amount_kind・dismissed_by、description（occurrences_json の最後〈最新〉の明細の正規化前の摘要）・account_name（口座名）。見つからなければ null |
 | POST /api/recurrence_candidates/detect | ― | `{created, updated}` |
 | POST /api/recurrence_candidates/:id/accept | category?・name?・amount? | `{candidate, item}` |
 | POST /api/recurrence_candidates/:id/dismiss | ― | 候補 |
-| GET /api/cashflow | months（1〜60、既定 36） | Forecast（§8 の各項目と months[]・warnings） |
+| GET /api/cashflow | months（1〜60、既定 36） | Forecast（§8 の各項目と months[]・warnings）。months[].items に amount_kind |
 | GET /api/status | ― | `bank: {accounts, last_ok_at, errors, latest_txn_date}` が増えた |
 | GET /api/documents/counts | ― | `upcoming` が増えた |
 

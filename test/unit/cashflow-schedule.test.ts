@@ -233,10 +233,10 @@ describe('0006_cashflow の制約', () => {
       ['created_at', 'x'],
       ['id', 'Z'],
     ] as [string, string | number][]) {
-      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET ${col} = ? WHERE id = ?`).run(v, c.id), /state・scheduled_item_id 以外/, col);
+      assert.throws(() => db.prepare(`UPDATE recurrence_candidates SET ${col} = ? WHERE id = ?`).run(v, c.id), /state・scheduled_item_id・dismissed_by 以外/, col);
     }
     const acc2 = insertAccount(db, { provider: 'freee', name: 'カード', kind: 'card', source: 'csv', now }).id;
-    assert.throws(() => db.prepare('UPDATE recurrence_candidates SET account_id = ? WHERE id = ?').run(acc2, c.id), /state・scheduled_item_id 以外/);
+    assert.throws(() => db.prepare('UPDATE recurrence_candidates SET account_id = ? WHERE id = ?').run(acc2, c.id), /state・scheduled_item_id・dismissed_by 以外/);
     assert.throws(() => db.prepare('DELETE FROM recurrence_candidates WHERE id = ?').run(c.id), /削除できない/);
 
     const item = createItem(db, base, by, T0);
@@ -452,8 +452,12 @@ describe('台帳の作成・更新・停止', () => {
 
   test('parseBody', () => {
     assert.deepEqual(parseBody({ name: 'x', amount: 1, direction: 'in', category: 'income', recurrence: 'monthly', anchor_date: '2026-11-25' }, 'create'), {
-      name: 'x', amount: 1, direction: 'in', category: 'income', recurrence: 'monthly', anchorDate: '2026-11-25', accountId: null, endDate: null, notifyDaysBefore: 14, origin: 'manual',
+      name: 'x', amount: 1, direction: 'in', category: 'income', recurrence: 'monthly', anchorDate: '2026-11-25', accountId: null, endDate: null, notifyDaysBefore: 14, origin: 'manual', amountKind: 'fixed',
     });
+    assert.deepEqual(parseBody({ amount_kind: 'variable' }, 'update'), { amountKind: 'variable' });
+    for (const bad of ['estimate', '', null, 1]) {
+      assert.throws(() => parseBody({ amount_kind: bad }, 'update'), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_amount_kind');
+    }
     assert.throws(() => parseBody({ name: 'x' }, 'create'), (e: unknown) => e instanceof ScheduleError && e.code === 'missing_amount');
     assert.throws(() => parseBody({ active: 1 }, 'update'), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field');
     assert.throws(() => parseBody({ origin: 'manual' }, 'update'), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field');
@@ -463,6 +467,26 @@ describe('台帳の作成・更新・停止', () => {
         assert.throws(() => parseBody(body, mode), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_field', `${JSON.stringify(body)} ${mode}`);
       }
     }
+  });
+
+  test('amount_kind: 既定 fixed、variable を作れて PATCH で戻せる。変更は監査に残る', () => {
+    assert.equal(createItem(db, { ...base, name: '定額' }, by, T0).amount_kind, 'fixed');
+    const v = createItem(db, { ...base, name: 'テストでんき', recurrence: 'monthly', amountKind: 'variable' }, by, T0);
+    assert.equal(v.amount_kind, 'variable');
+    assert.equal(JSON.parse(audits(db).find((x) => x.entity_id === v.id)!.payload_json).amount_kind, 'variable');
+    assert.equal(updateItem(db, v.id, { amountKind: 'fixed' }, by, T1).amount_kind, 'fixed');
+    const upd = audits(db).filter((x) => x.entity_id === v.id && x.action === 'scheduled_item.updated');
+    assert.deepEqual(JSON.parse(upd[0].payload_json).changes, { amount_kind: { from: 'variable', to: 'fixed' } });
+    assert.throws(() => createItem(db, { ...base, amountKind: 'x' as never }, by, T0), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_amount_kind');
+    assert.throws(() => updateItem(db, v.id, { amountKind: 'x' as never }, by, T1), (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_amount_kind');
+  });
+
+  test('savings（積立）は支出だけ。収入にすると invalid_category_for_direction', () => {
+    const s = createItem(db, { ...base, name: 'テスト積立A', category: 'savings', recurrence: 'monthly' }, by, T0);
+    assert.equal(s.category, 'savings');
+    const isDir = (e: unknown) => e instanceof ScheduleError && e.code === 'invalid_category_for_direction';
+    assert.throws(() => createItem(db, { ...base, direction: 'in', category: 'savings' }, by, T0), isDir);
+    assert.throws(() => updateItem(db, s.id, { direction: 'in' }, by, T1), isDir);
   });
 
   test('upcoming は期日順に、active だけ', () => {

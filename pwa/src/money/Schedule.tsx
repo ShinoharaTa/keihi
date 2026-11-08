@@ -1,5 +1,6 @@
 // 予定（モック Schedule。docs/mvp-plan-v3.md T301・T302。src/web/routes/cashflow.ts）。
 // 上に明細から見つけた定期の支払い（GET /api/recurrence_candidates?state=open）: 「予定にする（分類）」で accept（分類は摘要から推す）、「しない」で dismiss。
+// 金額が毎回変わる候補（amount_kind = variable）は「約」を付け、明細の金額の幅を小さく出す。台帳の行には「 · 概算」。
 // 次に この先 12 か月の山（GET /api/scheduled_items/upcoming の期日から、毎月の分を除いて分類別に積む）。
 // 下に台帳（GET /api/scheduled_items?all=1。分類で絞り、次の期日順。停止中は「停止中の n 件も表示」で出す）。
 // ヘッダの「追加」で POST、行を押すと同じフォームで PATCH と停止（deactivate）/ 再開（activate）。停止の後は「元に戻す」。
@@ -14,6 +15,7 @@ import { TaxCard } from './Tax.tsx';
 import {
   candidateName,
   candidateNext,
+  candidateRange,
   categoriesFor,
   dateShort,
   daysBetween,
@@ -66,15 +68,22 @@ export function CandidateList({ items, accounts, today, busy, onAccept, onDismis
         const last = lastOccurrence(c);
         const next = candidateNext(c);
         const n = occurrenceCount(c);
+        const range = c.amount_kind === 'variable' ? candidateRange(c) : null;
         return (
           <article key={c.id} class="m-card m-cand">
             <div class="m-row">
               <h3 class="m-h3">{candidateName(c)}</h3>
               <span class="m-h3 m-num">
+                {c.amount_kind === 'variable' ? '約 ' : ''}
                 {yen(c.amount)}
                 <span class="m-per"> / {PER[c.interval] ?? RECURRENCE_LABELS[c.interval]}</span>
               </span>
             </div>
+            {range && (
+              <p class="m-sub m-num">
+                {yen(range.min)}〜{yen(range.max)}
+              </p>
+            )}
             <p class="m-sub">
               {c.account_name || nameOf(c.account_id)}
               {last ? ` · 最後 ${dateShort(last, today)}${n > 0 ? `（${n} 回）` : ''}` : ''}
@@ -186,6 +195,7 @@ export function Ledger({
                       <span class={`m-badge b-${it.category}`}>{SCHEDULE_CATEGORY_LABELS[it.category]}</span>
                       {PER[it.recurrence] ?? RECURRENCE_LABELS[it.recurrence]}
                       {it.origin === 'detected' ? ' · 明細から' : ''}
+                      {it.amount_kind === 'variable' ? ' · 概算' : ''}
                       {it.origin === 'estimate' ? ' · 見積' : ''}
                       {it.pinned ? ' · 手直し' : ''}
                     </span>
@@ -241,7 +251,7 @@ export function ItemForm({
         <button type="button" aria-pressed={draft.direction === 'out'} onClick={() => onChange({ ...draft, direction: 'out', category: draft.category === 'income' ? 'other' : draft.category })}>
           支出
         </button>
-        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' ? 'income' : draft.category })}>
+        <button type="button" aria-pressed={draft.direction === 'in'} onClick={() => onChange({ ...draft, direction: 'in' as Direction, category: draft.category === 'other' || draft.category === 'savings' ? 'income' : draft.category })}>
           収入
         </button>
       </div>

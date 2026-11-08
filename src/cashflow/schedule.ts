@@ -8,6 +8,7 @@ import { appendAudit } from '../audit.ts';
 import { addDays, addMonths } from '../calendar/businessDays.ts';
 import { tx, type Db } from '../db/index.ts';
 import {
+  AMOUNT_KINDS,
   CATEGORIES,
   DIRECTIONS,
   ORIGINS,
@@ -16,6 +17,7 @@ import {
   insertScheduledItem,
   listScheduledItems,
   updateScheduledItem,
+  type AmountKind,
   type Category,
   type Direction,
   type Origin,
@@ -70,6 +72,7 @@ export type ItemInput = {
   notifyDaysBefore: number;
   origin: Origin;
   estimateKey?: string | null; // 見積もりの項目だけ（API からは受けない）
+  amountKind?: AmountKind; // 既定 fixed。variable は金額が毎回変わる（額は概算）
 };
 
 // 更新で渡せるもの。pinned は見積もりの項目だけ。
@@ -87,6 +90,7 @@ const BODY_KEYS = {
   end_date: 'endDate',
   notify_days_before: 'notifyDaysBefore',
   origin: 'origin',
+  amount_kind: 'amountKind',
 } as const satisfies Record<string, keyof ItemInput>;
 
 // 作成のときだけ受ける（origin は作った経路の記録なので更新では変えない）。
@@ -121,6 +125,8 @@ function checkField(key: keyof ItemInput, v: unknown): unknown {
         return Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= NOTIFY_DAYS_MAX;
       case 'origin':
         return isEnum(ORIGINS, v);
+      case 'amountKind':
+        return isEnum(AMOUNT_KINDS, v);
     }
   })();
   if (!ok) throw new ScheduleError(`invalid_${snake(key)}`);
@@ -147,6 +153,7 @@ export function parseBody(body: Record<string, unknown>, mode: 'create' | 'updat
     out.endDate ??= null;
     out.notifyDaysBefore ??= DEFAULT_NOTIFY_DAYS_BEFORE;
     out.origin ??= 'manual';
+    out.amountKind ??= 'fixed';
     for (const k of ['name', 'amount', 'direction', 'category', 'recurrence', 'anchorDate'] as const) {
       if (out[k] === undefined) throw new ScheduleError(`missing_${snake(k)}`);
     }
@@ -156,6 +163,7 @@ export function parseBody(body: Record<string, unknown>, mode: 'create' | 'updat
 
 function checkConsistent(db: Db, v: { direction: Direction; category: Category; accountId: string | null; anchorDate: string; endDate: string | null }): void {
   if (v.direction === 'out' && v.category === 'income') throw new ScheduleError('invalid_category_for_direction');
+  if (v.direction === 'in' && v.category === 'savings') throw new ScheduleError('invalid_category_for_direction');
   if (v.endDate !== null && v.endDate < v.anchorDate) throw new ScheduleError('end_before_anchor');
   if (v.accountId !== null && !db.prepare('SELECT 1 FROM money_accounts WHERE id = ?').get(v.accountId)) throw new ScheduleError('unknown_account');
 }
@@ -163,7 +171,7 @@ function checkConsistent(db: Db, v: { direction: Direction; category: Category; 
 // ---- 作成・更新・停止・再開 ----
 
 export function createItem(db: Db, input: ItemInput, by: By, now: Date = new Date()): ScheduledItemRow {
-  input = { ...input };
+  input = { ...input, amountKind: input.amountKind ?? 'fixed' };
   for (const k of Object.values(BODY_KEYS)) (input as Record<string, unknown>)[k] = checkField(k, input[k]);
   const key = input.estimateKey ?? null;
   if (key !== null && (typeof key !== 'string' || key === '' || input.origin !== 'estimate')) throw new ScheduleError('invalid_estimate_key');
@@ -276,6 +284,7 @@ function rowPayload(r: ScheduledItemRow) {
     end_date: r.end_date,
     notify_days_before: r.notify_days_before,
     origin: r.origin,
+    amount_kind: r.amount_kind,
   };
 }
 

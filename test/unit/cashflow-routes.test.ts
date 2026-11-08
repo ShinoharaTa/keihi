@@ -57,6 +57,7 @@ describe('POST /api/scheduled_items', () => {
     assert.equal(it.name, '国民年金');
     assert.equal(it.notify_days_before, 14);
     assert.equal(it.origin, 'manual');
+    assert.equal(it.amount_kind, 'fixed');
     assert.equal(it.active, 1);
     assert.equal(it.account_id, null);
     assert.equal(it.end_date, null);
@@ -98,6 +99,9 @@ describe('POST /api/scheduled_items', () => {
       [{ ...item, name: 'x'.repeat(201) }, 'invalid_name'],
       [{ ...item, notify_days_before: 366 }, 'invalid_notify_days_before'],
       [{ ...item, category: 'income' }, 'invalid_category_for_direction'],
+      [{ ...item, direction: 'in', category: 'savings' }, 'invalid_category_for_direction'],
+      [{ ...item, amount_kind: 'estimate' }, 'invalid_amount_kind'],
+      [{ ...item, amount_kind: null }, 'invalid_amount_kind'],
     ];
     for (const [body, code] of cases) {
       const res = await send('POST', '/api/scheduled_items', body);
@@ -148,6 +152,8 @@ describe('PATCH /api/scheduled_items/:id', () => {
     for (const [body, code] of [
       [{ amount: -1 }, 'invalid_amount'],
       [{ origin: 'estimate' }, 'invalid_field'],
+      [{ amount_kind: 'x' }, 'invalid_amount_kind'],
+      [{ category: 'savings', direction: 'in' }, 'invalid_category_for_direction'],
       [{ anchor_date: '2027-01-01', end_date: '2026-12-31' }, 'end_before_anchor'],
       ['nope', 'invalid_json'],
     ] as [unknown, string][]) {
@@ -158,6 +164,25 @@ describe('PATCH /api/scheduled_items/:id', () => {
     const res = await send('PATCH', '/api/scheduled_items/NOPE', { amount: 1 });
     assert.equal(res.status, 404);
     assert.deepEqual(await res.json(), { error: 'not_found' });
+  });
+});
+
+describe('amount_kind と積立（savings）', () => {
+  test('POST・PATCH で amount_kind を受け、一覧・upcoming・/api/cashflow の items に amount_kind が付く', async () => {
+    const v = await create({ name: 'テストでんき', category: 'savings', amount_kind: 'variable' });
+    assert.deepEqual([v.amount_kind, v.category], ['variable', 'savings']);
+    const f = await create({ name: '定額' });
+    const list = (await (await get('/api/scheduled_items')).json()) as { items: { id: string; amount_kind: string }[] };
+    assert.deepEqual(Object.fromEntries(list.items.map((x) => [x.id, x.amount_kind])), { [v.id as string]: 'variable', [f.id as string]: 'fixed' });
+    const up = (await (await get('/api/scheduled_items/upcoming')).json()) as { items: { id: string; amount_kind: string }[] };
+    assert.equal(up.items.find((x) => x.id === v.id)!.amount_kind, 'variable');
+    const cf = (await (await get('/api/cashflow?months=2')).json()) as { months: { items: { id: string; amount_kind: string }[] }[] };
+    const items = cf.months.flatMap((m) => m.items);
+    assert.ok(items.length > 0);
+    assert.ok(items.every((x) => x.amount_kind === (x.id === v.id ? 'variable' : 'fixed')));
+    const res = await send('PATCH', `/api/scheduled_items/${v.id}`, { amount_kind: 'fixed' });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { amount_kind: string }).amount_kind, 'fixed');
   });
 });
 

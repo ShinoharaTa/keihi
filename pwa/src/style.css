@@ -2001,6 +2001,10 @@ button:disabled {
   background: var(--m-car-soft);
   color: var(--m-car);
 }
+.b-savings {
+  background: var(--m-accent-soft);
+  color: var(--m-accent);
+}
 .b-other {
   background: var(--m-chip);
   color: var(--m-fg2);
