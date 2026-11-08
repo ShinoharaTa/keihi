@@ -115,12 +115,13 @@ describe('定常状態の 1 年分', () => {
   });
 
   test('エンジンの警告は year = Y の分だけ（year を持たない警告はそのまま）', () => {
-    const s20 = sim({ consumption_mode: 'special20', simplified_class: null }, { year: 2026 });
-    assert.ok(!s20.warnings.some((w) => w.kind === 'special20_expired'));
-    assert.deepEqual(
-      sim({ consumption_mode: 'special20', simplified_class: null }, { year: 2027 }).warnings.filter((w) => w.kind === 'special20_expired'),
-      [{ kind: 'special20_expired', year: 2027 }],
-    );
+    // special20_expired は台帳向けの文なので、試算では年によらず出さない。
+    for (const year of [2026, 2027]) {
+      for (const consumption_mode of ['profile', 'body'] as const) {
+        const r = sim({ consumption_mode: 'special20', simplified_class: null }, { year, source: { revenue: 'body', expenses: 'body', consumption_mode } });
+        assert.ok(!r.warnings.some((w) => w.kind === 'special20_expired'), `${year} ${consumption_mode}`);
+      }
+    }
     const bi = sim({}, { year: 2026, revenue: null, business_income: 6_000_000 });
     assert.ok(bi.warnings.filter((w) => w.kind === 'revenue_missing').length <= 1);
     assert.ok(bi.warnings.filter((w) => 'year' in w && w.kind !== 'rates_assumed').every((w) => 'year' in w && w.year === 2026));
@@ -184,6 +185,46 @@ describe('消費税の方式の比較', () => {
     assert.equal(amt(m, 'ctax'), 0);
     assert.equal(m.warnings.filter((w) => w.kind === 'simplified_class_missing').length, 1);
     assert.ok(!m.warnings.some((w) => w.kind === 'selected_mode_unavailable'));
+  });
+});
+
+describe('既定の方式の補正（mode_defaulted）', () => {
+  const src = (consumption_mode: 'profile' | 'body') => ({ source: { revenue: 'body' as const, expenses: 'body' as const, consumption_mode } });
+
+  test('profile が 2 割特例・Y = 2027・body に方式なし: profile の区分の簡易課税で計算する', () => {
+    const r = sim({ consumption_mode: 'special20', simplified_class: 5 }, { year: 2027, ...src('profile') });
+    const s5 = sim({ consumption_mode: 'simplified', simplified_class: 5 }, { year: 2027 });
+    assert.equal(amt(r, 'ctax'), amt(s5, 'ctax'));
+    assert.ok(amt(r, 'ctax') > 0);
+    assert.deepEqual([r.inputs.consumption_mode, r.inputs.simplified_class, r.inputs.source.consumption_mode], ['simplified', 5, 'defaulted']);
+    assert.deepEqual(r.warnings.filter((w) => w.kind === 'mode_defaulted'), [{ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }]);
+    assert.ok(!r.warnings.some((w) => w.kind === 'selected_mode_unavailable' || w.kind === 'special20_expired'));
+    // source が無いとき（純関数の直接呼び出し）も profile 扱い。
+    assert.equal(sim({ consumption_mode: 'special20', simplified_class: 5 }, { year: 2027 }).inputs.source.consumption_mode, 'defaulted');
+  });
+
+  test('区分が無ければ本則、売上 1,000 万超（免税・2 割特例）も補正する', () => {
+    const r = sim({ consumption_mode: 'special20', simplified_class: null }, { year: 2027 });
+    assert.deepEqual([r.inputs.consumption_mode, r.inputs.source.consumption_mode], ['standard', 'defaulted']);
+    assert.equal(amt(r, 'ctax'), amt(sim({ consumption_mode: 'standard', simplified_class: null }, { year: 2027 }), 'ctax'));
+    assert.deepEqual(r.warnings.filter((w) => w.kind === 'mode_defaulted'), [{ kind: 'mode_defaulted', from: 'special20', to: 'standard', simplified_class: null }]);
+    const big = sim({ consumption_mode: 'exempt', simplified_class: 3 }, { year: 2026, revenue: 12_000_000 });
+    assert.deepEqual(big.warnings.filter((w) => w.kind === 'mode_defaulted'), [{ kind: 'mode_defaulted', from: 'exempt', to: 'simplified', simplified_class: 3 }]);
+  });
+
+  test('Y = 2026 なら補正しない', () => {
+    const r = sim({ consumption_mode: 'special20', simplified_class: 5 }, { year: 2026, ...src('profile') });
+    assert.deepEqual([r.inputs.consumption_mode, r.inputs.source.consumption_mode], ['special20', 'profile']);
+    assert.equal(amt(r, 'ctax'), row(r, 'special20').tax);
+    assert.ok(!r.warnings.some((w) => w.kind === 'mode_defaulted' || w.kind === 'selected_mode_unavailable'));
+  });
+
+  test('body で 2 割特例を明示したら補正せず selected_mode_unavailable のまま', () => {
+    const r = sim({ consumption_mode: 'special20', simplified_class: 5 }, { year: 2027, ...src('body') });
+    assert.deepEqual([r.inputs.consumption_mode, r.inputs.source.consumption_mode], ['special20', 'body']);
+    assert.equal(amt(r, 'ctax'), 0);
+    assert.deepEqual(r.warnings.filter((w) => w.kind === 'selected_mode_unavailable'), [{ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }]);
+    assert.ok(!r.warnings.some((w) => w.kind === 'mode_defaulted' || w.kind === 'special20_expired'));
   });
 });
 

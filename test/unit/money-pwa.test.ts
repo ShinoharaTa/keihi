@@ -839,6 +839,10 @@ describe('税の試算の純関数', () => {
     const other = { ...simRes, inputs: { ...simRes.inputs, taxable_purchases: 800000, ideco: 240000, simplified_class: null, revenue: null } };
     assert.deepEqual(seedSimForm(emptySimForm(), other), { year: '2027', revenue: '', expenses: '100', purchases: '80', ideco: '24', kyosai: '', mode: 'simplified', cls: '' });
     assert.equal(seedSimForm({ ...emptySimForm(), revenue: '500', mode: 'standard' }, simRes).revenue, '500', '入れてある欄は埋めない');
+    // 方式を補正した応答（2 割特例 → 本則）なら、方式のセレクトは補正後の方式になる。
+    const defaulted = { ...simRes, inputs: { ...simRes.inputs, consumption_mode: 'standard' as const, simplified_class: null, source: { ...simRes.inputs.source, consumption_mode: 'defaulted' } } };
+    const d = seedSimForm(emptySimForm(), defaulted);
+    assert.deepEqual([d.mode, d.cls], ['standard', '']);
   });
   test('負担の表: 年分 / 年度の見出し、個人事業税は 0 なら出さない。限界の 1 行', () => {
     assert.deepEqual(simAmountRows(simRes.amounts).map((r) => r.label), ['所得税（2027 年分）', '住民税（2028 年度）', '国保（2028 年度）', '国民年金（2027 年度）', '消費税（2027 年分）']);
@@ -874,7 +878,14 @@ describe('税の試算の純関数', () => {
     assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'over_10m' }), '選んだ方式（2 割特例）は使えない条件です（売上 1,000 万超）。消費税はその方式のまま計算しています。');
     assert.equal(simWarningText({ kind: 'rates_assumed', year: 2028, latest: 2026 }), '2028 年の税率・料率はまだ無いので、2026 年の値で計算しています。');
     assert.equal(simWarningText({ kind: 'special20_expired', year: 2027 }), taxWarningText({ kind: 'special20_expired', year: 2027 }), '知らない kind は見積もりの文言');
-    assert.deepEqual(simNotices({ warnings: [{ kind: 'simplified_class_missing' }, { kind: 'simplified_class_missing' }], assumptions: ['steady_state', 'pension_prepay24_as_prepay12'] }), [
+    assert.equal(
+      simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }, 2027),
+      '2 割特例は 2027 年分から使えないため、簡易課税（第 5 種）で計算しています。',
+    );
+    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'standard', simplified_class: null }, 2028), '2 割特例は 2027 年分から使えないため、本則（概算）で計算しています。');
+    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 3 }, 2026), '売上 1,000 万円超のため、簡易課税（第 3 種）で計算しています。');
+    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'exempt', to: 'standard', simplified_class: null }, 2027), '売上 1,000 万円超のため、本則（概算）で計算しています。');
+    assert.deepEqual(simNotices({ year: 2027, warnings: [{ kind: 'simplified_class_missing' }, { kind: 'simplified_class_missing' }], assumptions: ['steady_state', 'pension_prepay24_as_prepay12'] }), [
       '簡易課税の事業区分が未選択なので、消費税は 0 円で計算しています。',
       '国民年金の 2 年前納は、1 年前納として計算しています。',
     ]);

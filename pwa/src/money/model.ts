@@ -1196,6 +1196,8 @@ export type CtaxCompareRow = {
 export type TaxSimWarning =
   | TaxWarning
   | { kind: 'selected_mode_unavailable'; mode: Exclude<ConsumptionMode, 'unset'>; reason: CtaxReason }
+  // プロファイルの方式がその年に使えないので、既定の方式（簡易課税 or 本則）で計算した。方式を選べば出ない。
+  | { kind: 'mode_defaulted'; from: Exclude<ConsumptionMode, 'unset'>; to: 'simplified' | 'standard'; simplified_class: number | null }
   | { kind: 'rates_assumed'; year: number; latest: number };
 export type TaxSimResponse = {
   year: number;
@@ -1211,7 +1213,7 @@ export type TaxSimResponse = {
     blue_return: BlueReturn;
     consumption_mode: ConsumptionMode;
     simplified_class: number | null;
-    // 'body' / 'tax_years:<年>' / 'default'。
+    // revenue・expenses は 'body' / 'tax_years:<年>' / 'default'。consumption_mode は 'profile' / 'body' / 'defaulted'。
     source: Record<string, string>;
   };
   income: { pre_blue: number; business_income: number };
@@ -1357,8 +1359,11 @@ export const CTAX_REASON_TEXT: Record<CtaxReason, string> = {
   revenue_missing: '売上が未入力',
 };
 export const ctaxReasonText = (r: CtaxReason) => CTAX_REASON_TEXT[r] ?? r;
+// 2 割特例の最後の年分（src/cashflow/tax/rates.ts の CTAX_SPECIAL20_LAST_YEAR）。
+const SPECIAL20_LAST_YEAR = 2026;
 
-export function simWarningText(w: TaxSimWarning): string {
+// year は試算の年（mode_defaulted の理由を分けるのに使う）。
+export function simWarningText(w: TaxSimWarning, year?: number): string {
   switch (w.kind) {
     case 'consumption_tax_mode_unset':
       return '消費税の方式が未設定なので、消費税は 0 円で計算しています。';
@@ -1371,6 +1376,14 @@ export function simWarningText(w: TaxSimWarning): string {
       return `選んだ方式（${CONSUMPTION_LABELS[w.mode] ?? w.mode}）は使えない条件です（${ctaxReasonText(w.reason)}）。${
         w.reason === 'special20_expired' ? '消費税は 0 円で計算しています。' : '消費税はその方式のまま計算しています。'
       }`;
+    case 'mode_defaulted': {
+      // 2 割特例は期限切れか売上 1,000 万超、免税は売上 1,000 万超。
+      const why =
+        w.from === 'special20' && (year === undefined || year > SPECIAL20_LAST_YEAR)
+          ? `2 割特例は ${SPECIAL20_LAST_YEAR + 1} 年分から使えないため`
+          : '売上 1,000 万円超のため';
+      return `${why}、${w.to === 'simplified' ? `簡易課税（第 ${w.simplified_class} 種）` : '本則（概算）'}で計算しています。`;
+    }
     case 'rates_assumed':
       return `${w.year} 年の税率・料率はまだ無いので、${w.latest} 年の値で計算しています。`;
     default:
@@ -1379,6 +1392,6 @@ export function simWarningText(w: TaxSimWarning): string {
 }
 const ASSUMPTION_TEXT: Record<string, string> = { pension_prepay24_as_prepay12: '国民年金の 2 年前納は、1 年前納として計算しています。' };
 // 結果の上に 1 行ずつ出す文（警告と、該当する前提。同じ文はまとめる）。
-export function simNotices(r: Pick<TaxSimResponse, 'warnings' | 'assumptions'>): string[] {
-  return [...new Set([...r.warnings.map(simWarningText), ...r.assumptions.flatMap((a) => (ASSUMPTION_TEXT[a] ? [ASSUMPTION_TEXT[a]] : []))])];
+export function simNotices(r: Pick<TaxSimResponse, 'year' | 'warnings' | 'assumptions'>): string[] {
+  return [...new Set([...r.warnings.map((w) => simWarningText(w, r.year)), ...r.assumptions.flatMap((a) => (ASSUMPTION_TEXT[a] ? [ASSUMPTION_TEXT[a]] : []))])];
 }

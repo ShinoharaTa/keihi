@@ -18,6 +18,8 @@ import { DEFAULT_PROFILE, TaxError, YEAR_MAX, YEAR_MIN, parseProfileBody } from 
 export const SIM_MARGINAL_DELTA = 1_000_000;
 
 export type SimSource = 'body' | 'default' | `tax_years:${number}`;
+// 消費税の方式の出どころ。defaulted は profile の方式が Y 年に使えないので既定の方式に代えたもの。
+export type SimModeSource = 'profile' | 'body' | 'defaulted';
 
 // 円・整数。revenue と business_income の少なくとも一方が要る。
 export type SimInput = {
@@ -29,7 +31,7 @@ export type SimInput = {
   ideco: number; // 年額。profile.other_deductions に足す
   kyosai: number;
   marginal_delta: number;
-  source?: { revenue: SimSource; expenses: SimSource }; // 無ければ body
+  source?: { revenue: SimSource; expenses: SimSource; consumption_mode?: 'profile' | 'body' }; // 無ければ body（consumption_mode は profile）
 };
 
 export type SimAmount = { kind: EstimateKind; year: number; basis: 'year' | 'fiscal_year'; amount: number; lines: BreakdownLine[] };
@@ -49,6 +51,7 @@ export type CtaxCompareRow = {
 export type SimWarning =
   | EstimateWarning
   | { kind: 'selected_mode_unavailable'; mode: CompareMode; reason: CtaxUnavailable }
+  | { kind: 'mode_defaulted'; from: CompareMode; to: 'simplified' | 'standard'; simplified_class: number | null }
   | { kind: 'rates_assumed'; year: number; latest: number; table: keyof ReturnType<typeof ratesLatestYears> }; // year はその表を引く年
 
 export type SimResult = {
@@ -65,7 +68,7 @@ export type SimResult = {
     blue_return: BlueReturn;
     consumption_mode: ConsumptionMode;
     simplified_class: number | null;
-    source: { revenue: SimSource; expenses: SimSource };
+    source: { revenue: SimSource; expenses: SimSource; consumption_mode: SimModeSource };
   };
   income: { pre_blue: number; business_income: number };
   amounts: SimAmount[];
@@ -146,8 +149,23 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   if (input.revenue === null && input.business_income === null) throw new TaxError('income_required');
   const assumptions: SimResult['assumptions'] = ['steady_state'];
   // 2 年前納は年額と社会保険料控除が年ごとに振れるので、試算では 1 年前納で代える。
-  const prof: TaxProfileValues = profile.pension_mode === 'prepay24' ? { ...profile, pension_mode: 'prepay12' } : profile;
+  let prof: TaxProfileValues = profile.pension_mode === 'prepay24' ? { ...profile, pension_mode: 'prepay12' } : profile;
   if (profile.pension_mode === 'prepay24') assumptions.push('pension_prepay24_as_prepay12');
+  // body で方式を指定せず、profile の方式が Y 年に使えない（2 割特例の期限切れ・売上 1,000 万超）なら、
+  // 区分があれば簡易課税（その区分）、無ければ本則で計算する。簡易も使えない（5,000 万超）なら本則。
+  let modeSource: SimModeSource = input.source?.consumption_mode ?? 'profile';
+  let defaulted: SimWarning | null = null;
+  const from = profile.consumption_mode;
+  if (modeSource === 'profile' && from !== 'unset' && from !== 'simplified' && from !== 'standard') {
+    const reason = unavailable(profile, input, from);
+    if (reason === 'special20_expired' || reason === 'over_10m') {
+      const cls = profile.simplified_class;
+      const to = cls !== null && unavailable(profile, input, 'simplified') === null ? 'simplified' : 'standard';
+      prof = { ...prof, consumption_mode: to };
+      modeSource = 'defaulted';
+      defaulted = { kind: 'mode_defaulted', from, to, simplified_class: to === 'simplified' ? cls : null };
+    }
+  }
 
   const main = annual(prof, input);
   const cash = cashProfit(prof, input);
@@ -177,7 +195,9 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   for (const r of compare) if (r.mode !== 'exempt' && r.available && (best === null || r.tax! < best.tax!)) best = r;
 
   // エンジンは期間の中の他の年の分も警告するので、year を持つものは Y の分だけ残す。
-  const warnings: SimWarning[] = main.warnings.filter((w) => !('year' in w) || w.year === input.year);
+  // special20_expired は台帳向けの文なので落とす（試算では比較表の reason と selected_mode_unavailable / mode_defaulted で伝える）。
+  const warnings: SimWarning[] = main.warnings.filter((w) => w.kind !== 'special20_expired' && (!('year' in w) || w.year === input.year));
+  if (defaulted) warnings.push(defaulted);
   const has = (kind: string) => warnings.some((w) => w.kind === kind);
   const mode = prof.consumption_mode;
   if (mode === 'unset' && !has('consumption_tax_mode_unset')) warnings.push({ kind: 'consumption_tax_mode_unset' });
@@ -207,9 +227,9 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
       other_deductions: profile.other_deductions,
       revenue_includes_tax: profile.revenue_includes_tax === 1,
       blue_return: profile.blue_return,
-      consumption_mode: profile.consumption_mode,
-      simplified_class: profile.simplified_class,
-      source: input.source ?? { revenue: 'body', expenses: 'body' },
+      consumption_mode: prof.consumption_mode,
+      simplified_class: prof.simplified_class,
+      source: { revenue: input.source?.revenue ?? 'body', expenses: input.source?.expenses ?? 'body', consumption_mode: modeSource },
     },
     income: { pre_blue: preBlue, business_income: input.business_income ?? Math.max(0, preBlue - blue) },
     amounts: main.amounts,
@@ -263,7 +283,11 @@ export function parseSimBody(db: Db, body: unknown, today: string): { profile: T
 
   // 売上の既定: year の行 → 無ければ year 以前で最も新しい revenue の行。経費はその行のもの（無ければ 0）。
   let revenue = intOrNull('revenue');
-  const source: { revenue: SimSource; expenses: SimSource } = { revenue: 'body', expenses: 'body' };
+  const source: { revenue: SimSource; expenses: SimSource; consumption_mode: 'profile' | 'body' } = {
+    revenue: 'body',
+    expenses: 'body',
+    consumption_mode: isObject(body.profile) && body.profile.consumption_mode !== undefined ? 'body' : 'profile',
+  };
   let row: { year: number; expenses: number | null } | null = null;
   if (revenue === undefined) {
     const r = listTaxYears(db).filter((y) => y.year <= year && y.revenue !== null).at(-1) ?? null;

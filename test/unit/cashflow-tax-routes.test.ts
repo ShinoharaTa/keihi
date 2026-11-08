@@ -227,14 +227,26 @@ describe('POST /api/tax/simulate', () => {
       [r.body.inputs.revenue, r.body.inputs.expenses, r.body.inputs.taxable_purchases, r.body.inputs.consumption_mode, r.body.inputs.simplified_class],
       [6_000_000, 1_000_000, 1_000_000, 'simplified', 5],
     );
-    assert.deepEqual(r.body.inputs.source, { revenue: 'tax_years:2026', expenses: 'tax_years:2026' });
+    assert.deepEqual(r.body.inputs.source, { revenue: 'tax_years:2026', expenses: 'tax_years:2026', consumption_mode: 'profile' });
     // body の値と profile の上書きが勝つ（DB の profile は変わらない）。
     const o = await send('POST', '/api/tax/simulate', { year: 2026, expenses: 2_000_000, profile: { consumption_mode: 'special20' } });
     assert.equal(o.status, 200);
-    assert.deepEqual(o.body.inputs.source, { revenue: 'tax_years:2026', expenses: 'body' });
+    assert.deepEqual(o.body.inputs.source, { revenue: 'tax_years:2026', expenses: 'body', consumption_mode: 'body' });
     assert.equal(o.body.inputs.consumption_mode, 'special20');
     assert.deepEqual(counts(), before);
     assert.equal((await get('/api/tax/profile')).body.profile.consumption_mode, 'simplified');
+  });
+
+  test('profile の 2 割特例が Y 年に使えなければ簡易課税に補正、body で明示したら補正しない', async () => {
+    assert.equal((await send('PUT', '/api/tax/profile', { consumption_mode: 'special20', simplified_class: 5 })).status, 200);
+    const r = await send('POST', '/api/tax/simulate', { revenue: 6_000_000 });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.year, r.body.inputs.consumption_mode, r.body.inputs.simplified_class, r.body.inputs.source.consumption_mode], [2027, 'simplified', 5, 'defaulted']);
+    assert.deepEqual(r.body.warnings.filter((w: { kind: string }) => w.kind === 'mode_defaulted'), [{ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }]);
+    const b = await send('POST', '/api/tax/simulate', { revenue: 6_000_000, profile: { consumption_mode: 'special20' } });
+    assert.deepEqual([b.body.inputs.consumption_mode, b.body.inputs.source.consumption_mode], ['special20', 'body']);
+    assert.ok(b.body.warnings.some((w: { kind: string }) => w.kind === 'selected_mode_unavailable'));
+    assert.ok(!b.body.warnings.some((w: { kind: string }) => w.kind === 'mode_defaulted' || w.kind === 'special20_expired'));
   });
 
   test('profile も tax_years も無ければ 400 income_required、revenue だけなら DEFAULT_PROFILE で 200', async () => {
@@ -242,7 +254,7 @@ describe('POST /api/tax/simulate', () => {
     const r = await send('POST', '/api/tax/simulate', { revenue: 6_000_000 });
     assert.equal(r.status, 200);
     assert.deepEqual([r.body.inputs.blue_return, r.body.inputs.consumption_mode, r.body.inputs.expenses], ['65', 'unset', 0]);
-    assert.deepEqual(r.body.inputs.source, { revenue: 'body', expenses: 'default' });
+    assert.deepEqual(r.body.inputs.source, { revenue: 'body', expenses: 'default', consumption_mode: 'profile' });
     assert.ok(r.body.warnings.some((w: { kind: string }) => w.kind === 'consumption_tax_mode_unset'));
     assert.deepEqual(counts(), [0, 0, 0, 0, 0]);
   });
