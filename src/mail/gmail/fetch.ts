@@ -5,9 +5,12 @@
 //   古い順に [mail] max_messages_per_run 通まで処理する。残りは次回（after は取り込んだ最後のメールから決まるので取りこぼさない）。
 // - 1 通ずつ src/mail/ingest.ts の ingestMessage（1 通 1 トランザクション）。1 通の失敗は他の通を止めない。
 //   認可（GmailAuthError）と一時的な失敗（GmailRetryableError）は投げ直す（それまでに取り込んだ通は記録済み）。
+// - 手がかりの抽出（deps.hints）があれば、新しい通の前に、前回までに抜き出せなかった body_only を最大 20 通取り直す
+//   （src/mail/hints.ts の retryPendingHints）。
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import type { MailAccount } from '../../config.ts';
 import type { Db } from '../../db/index.ts';
+import { retryPendingHints } from '../hints.ts';
 import { ingestMessage, MAIL_PROVIDER, type MailIngestDeps, type MailState } from '../ingest.ts';
 import { getMailStatus, MAX_ATTEMPTS, updateMailStatus } from '../status.ts';
 import type { GmailClient } from './client.ts';
@@ -24,6 +27,8 @@ export type FetchMailResult = {
   remaining: number;
   states: Partial<Record<MailState, number>>;
   documents: number;
+  // 取り直した手がかりの通数。
+  hint_retries: number;
 };
 
 function quoteLabel(label: string): string {
@@ -92,7 +97,9 @@ export async function fetchMailForAccount(
   }
   for (const [id, k] of known) if (!seen.has(id) && k.state === 'error' && k.attempts < MAX_ATTEMPTS) todo.unshift(id);
 
-  const result: FetchMailResult = { account_id: account.id, query, listed: ids.length, processed: 0, remaining: 0, states: {}, documents: 0 };
+  const result: FetchMailResult = { account_id: account.id, query, listed: ids.length, processed: 0, remaining: 0, states: {}, documents: 0, hint_retries: 0 };
+  // この回で取り込む通は ingestMessage の中で 1 回だけ呼ぶので、取り直しは先に済ませる。
+  if (deps.hints) result.hint_retries = await retryPendingHints(db, deps.hints, client, account.id, MAIL_PROVIDER, deps.now);
   const batch = todo.slice(0, deps.maxMessages);
   result.remaining = todo.length - batch.length;
   for (const id of batch) {

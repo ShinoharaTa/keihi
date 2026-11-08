@@ -10,6 +10,9 @@ export type MockMessageInput = {
   subject?: string;
   messageId?: string | null;
   attachments?: MockAttachment[];
+  // 本文。text が null なら text/plain を入れない（既定は短い定型文）。html があれば text/html の part を足す。
+  text?: string | null;
+  html?: string;
 };
 
 export const pdf = (tag: string) => new Uint8Array(Buffer.from(`%PDF-1.4\n% keihi test ${tag}\n%%EOF\n`, 'latin1'));
@@ -23,7 +26,10 @@ export function buildMessage(m: MockMessageInput): { full: GmailMessage; raw: Ui
   ];
   if (m.messageId !== null) headers.push({ name: 'Message-ID', value: m.messageId ?? `<${m.id}@mail.example.com>` });
   const attachments = new Map<string, Uint8Array>();
-  const parts: GmailPart[] = [{ partId: '0', mimeType: 'text/plain', filename: '', headers: [], body: { size: 12, data: Buffer.from('ご利用ありがとうございます').toString('base64url') } }];
+  const parts: GmailPart[] = [];
+  const text = m.text === undefined ? 'ご利用ありがとうございます' : m.text;
+  if (text !== null) parts.push({ partId: '0', mimeType: 'text/plain', filename: '', headers: [], body: { size: text.length, data: Buffer.from(text).toString('base64url') } });
+  if (m.html !== undefined) parts.push({ partId: '0.1', mimeType: 'text/html', filename: '', headers: [], body: { size: m.html.length, data: Buffer.from(m.html).toString('base64url') } });
   for (const [i, a] of (m.attachments ?? []).entries()) {
     const h = [{ name: 'Content-Disposition', value: `${a.inline ? 'inline' : 'attachment'}; filename="${a.filename}"` }];
     if (a.cid) h.push({ name: 'Content-ID', value: `<${a.cid}>` });

@@ -15,6 +15,7 @@ import {
   docLine,
   expenseFilterText,
   linkedText,
+  mailHintText,
   receiptMark,
   countLabel,
   applyTag,
@@ -44,6 +45,7 @@ import {
   yen,
   type Account,
   type Categories,
+  type MailHint,
   type Matches,
   type Tag,
   type TagResult,
@@ -268,15 +270,17 @@ function DocRow({ d }: { d: Matches['links'][number]['document'] }) {
   );
 }
 
-// シートの「証憑」の段。紐付いた証憑（外す）→ 候補（押すと紐付け）→ 撮影タブへ。
+// シートの「証憑」の段。紐付いた証憑（外す）→ 候補（押すと紐付け）→ 注文の確認メールの手がかり（mail_hint）→ 撮影タブへ。
 function ReceiptSection({
   matches,
+  mailHint,
   busy,
   onLink,
   onUnlink,
   onCapture,
 }: {
   matches: Matches | 'error' | null;
+  mailHint?: MailHint | null;
   busy: boolean;
   onLink?: (documentId: string) => void;
   onUnlink?: (documentId: string) => void;
@@ -306,6 +310,7 @@ function ReceiptSection({
           </button>
         ))}
       {m && m.links.length === 0 && m.candidates.length === 0 && <p class="m-sub13">紐付いた証憑も候補もありません。</p>}
+      {mailHint && <p class="m-sub13">{mailHintText(mailHint)}</p>}
       {onCapture && (
         <button type="button" class="m-btn m-btn-start" onClick={onCapture}>
           領収書を撮る・共有で入れる
@@ -418,7 +423,7 @@ export function TagSheet({
             <span class="m-knob" aria-hidden="true" />
           </label>
           {matches !== undefined && (
-            <ReceiptSection matches={matches} busy={matchBusy === true} onLink={onLink} onUnlink={onUnlink} onCapture={onCapture} />
+            <ReceiptSection matches={matches} mailHint={txn.mail_hint} busy={matchBusy === true} onLink={onLink} onUnlink={onUnlink} onCapture={onCapture} />
           )}
           {error && <p class="m-msg">{error}</p>}
         </div>

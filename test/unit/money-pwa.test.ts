@@ -42,6 +42,7 @@ import {
   itemInfoMap,
   lastOccurrence,
   linkedText,
+  mailHintText,
   ledgerRows,
   man,
   markSize,
@@ -1148,6 +1149,22 @@ describe('SSR スナップショット', () => {
     const plain = html(m.TagSheet!, { txn: rows[0], draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', onDraft: noop, onSave: noop, onClose: noop });
     assert.doesNotMatch(plain, /証憑<\/legend>/, '照合を渡さなければ段を出さない');
     t.assert.snapshot(lines(out));
+  });
+  test('「証憑」の段に注文の確認メールの手がかり（mail_hint）の 1 行。行の印は変えない', async () => {
+    const m = await load('/src/money/Txns.tsx');
+    const hint = { mail_message_id: 'M1', account_id: 'personal', received_on: '2026-11-03', from_domain: 'example.com', subject: 'ご注文の確認', order_ref: '123-0000000' };
+    const row = txn({ id: 'R4', receipt: 'waiting', mail_hint: hint });
+    const out = html(m.TagSheet!, { txn: row, draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', matches: { links: [], candidates: [] }, matchBusy: false, onDraft: noop, onSave: noop, onClose: noop, onCapture: noop });
+    assert.match(out, /注文 #123-0000000 の確認メールあり（11\/3、example\.com）→ 注文履歴から領収書を保存して共有シートで入れてください/);
+    const none = html(m.TagSheet!, { txn: txn({ id: 'R4', receipt: 'waiting' }), draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', matches: { links: [], candidates: [] }, matchBusy: false, onDraft: noop, onSave: noop, onClose: noop });
+    assert.doesNotMatch(none, /確認メールあり/);
+    const list = html(m.TxnList!, { items: [row], f: { period: 'this', accountId: '', tag: '', category: '', q: '' }, today: TODAY, more: false, cats, busyIds: [], hint: false, onHint: noop, onOpen: noop, onToggle: noop });
+    assert.match(list, /m-rc m-rc-waiting">待ち</);
+    assert.doesNotMatch(list, /確認メール/);
+    assert.equal(mailHintText({ ...hint, order_ref: null, received_on: null, from_domain: null }), '注文の確認メールあり→ 注文履歴から領収書を保存して共有シートで入れてください');
+    // 紐付けたら消える（待ち・候補の明細だけに付く）。
+    assert.equal(applyMatches(row, { links: [link(doc())], candidates: [] }).mail_hint, null);
+    assert.deepEqual(applyMatches(row, { links: [], candidates: [] }).mail_hint, hint);
   });
 
   test('ホーム: 経費の入口に領収書待ちの件数（0 なら件数を出さない）', async () => {

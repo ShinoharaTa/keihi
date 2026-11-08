@@ -133,7 +133,7 @@ export const HANDLERS: Handlers = {
   }),
   fetch_mail: createFetchMailHandler(() => {
     const rt = runtime();
-    return { mail: rt.cfg.mail, config: rt.cfg, objectsDir: rt.cfg.objectsDir, client: rt.gmail };
+    return { mail: rt.cfg.mail, config: rt.cfg, objectsDir: rt.cfg.objectsDir, client: rt.gmail, gemini: rt.gemini };
   }),
   daily: createDailyHandler(() => {
     const rt = runtime();

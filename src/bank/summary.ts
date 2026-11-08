@@ -4,7 +4,7 @@
 //   摘要の絞り込み（q）は normalizeVendor で揃えて description_norm への部分一致にする（揃えて空になる q は 400）。
 //   category=none は未分類（category が null）。
 //   excluded（0 = 振替の除外を外す / 1 = 除外だけ）と receipt（match.ts の receipt）も同じく JS 側で絞る。vendor_key は
-//   description_norm の完全一致（SQL）。各行に receipt・receipt_hint（match.ts の createReceiptResolver）を付ける。
+//   description_norm の完全一致（SQL）。各行に receipt・receipt_hint・mail_hint（match.ts の createReceiptResolver）を付ける。
 // - 月次: その月の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
@@ -21,7 +21,7 @@ import {
   type Tag,
   type TxnSide,
 } from './repo.ts';
-import { createReceiptResolver, DEFAULT_MATCH_WINDOWS, isReceiptStatus, type MatchWindows, type ReceiptInfo, type ReceiptStatus } from './match.ts';
+import { createReceiptResolver, DEFAULT_MATCH_WINDOWS, isReceiptStatus, type MailHintView, type MatchWindows, type ReceiptInfo, type ReceiptStatus } from './match.ts';
 import { CATEGORIES, isCategory, isTag, resolveTagsBulk, type ResolvedTag, type TagDecisionSource } from './tags.ts';
 import { listActiveTransfers } from './transfers.ts';
 import type { TransferKind } from './transferRepo.ts';
@@ -74,6 +74,8 @@ export type TxnView = {
   // 照合（match.ts）。receipt は経費の明細のときだけ。
   receipt: ReceiptStatus | null;
   receipt_hint: { document_id: string; status: string } | null;
+  // 本文だけのメールの手がかり（receipt が candidate / waiting のときだけ。match.ts）。
+  mail_hint: MailHintView | null;
 };
 
 export type TxnPage = { items: TxnView[]; next_cursor: string | null };
@@ -192,6 +194,7 @@ function view(r: BankTxnListRow, t: ResolvedTag, kinds: Map<string, TransferKind
     transfer_kind: kinds.get(r.id) ?? null,
     receipt: m.receipt,
     receipt_hint: m.receipt_hint,
+    mail_hint: m.mail_hint,
   };
 }
 
