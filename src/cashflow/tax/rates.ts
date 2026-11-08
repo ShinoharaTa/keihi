@@ -153,7 +153,7 @@ export function latestYear(table: Readonly<Record<number, unknown>>): number {
   return Math.max(...Object.keys(table).map(Number));
 }
 
-// 年をキーにした表（所得税の基礎控除・住民税・国民年金）の最新年のうち最も新しいもの。これより先の年は前の年の値で計算する（試算の rates_assumed）。
-export function latestRatesYear(): number {
-  return Math.max(latestYear(INCOME_TAX_BASIC_DEDUCTION), latestYear(RESIDENT_RATES), latestYear(PENSION_RATES));
+// 年をキーにした表の最新年（試算の rates_assumed）。これより先の年は前の年の値で計算する。国保のプリセットは年のキーを持たないので入らない。
+export function ratesLatestYears(): { income_tax_basic_deduction: number; resident: number; pension: number } {
+  return { income_tax_basic_deduction: latestYear(INCOME_TAX_BASIC_DEDUCTION), resident: latestYear(RESIDENT_RATES), pension: latestYear(PENSION_RATES) };
 }

@@ -10,7 +10,7 @@ import {
   CTAX_EXEMPT_THRESHOLD,
   CTAX_SIMPLIFIED_THRESHOLD,
   CTAX_SPECIAL20_LAST_YEAR,
-  latestRatesYear,
+  ratesLatestYears,
 } from './rates.ts';
 import { getTaxProfile, listTaxYears, type BlueReturn, type ConsumptionMode, type TaxProfileRow, type TaxProfileValues } from './repo.ts';
 import { DEFAULT_PROFILE, TaxError, YEAR_MAX, YEAR_MIN, parseProfileBody } from './sync.ts';
@@ -49,7 +49,7 @@ export type CtaxCompareRow = {
 export type SimWarning =
   | EstimateWarning
   | { kind: 'selected_mode_unavailable'; mode: CompareMode; reason: CtaxUnavailable }
-  | { kind: 'rates_assumed'; year: number; latest: number };
+  | { kind: 'rates_assumed'; year: number; latest: number; table: keyof ReturnType<typeof ratesLatestYears> }; // year はその表を引く年
 
 export type SimResult = {
   year: number;
@@ -176,7 +176,8 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   let best: CtaxCompareRow | null = null;
   for (const r of compare) if (r.mode !== 'exempt' && r.available && (best === null || r.tax! < best.tax!)) best = r;
 
-  const warnings: SimWarning[] = [...main.warnings];
+  // エンジンは期間の中の他の年の分も警告するので、year を持つものは Y の分だけ残す。
+  const warnings: SimWarning[] = main.warnings.filter((w) => !('year' in w) || w.year === input.year);
   const has = (kind: string) => warnings.some((w) => w.kind === kind);
   const mode = prof.consumption_mode;
   if (mode === 'unset' && !has('consumption_tax_mode_unset')) warnings.push({ kind: 'consumption_tax_mode_unset' });
@@ -185,8 +186,12 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
     const row = compare.find((r) => r.mode === mode && (mode !== 'simplified' || r.simplified_class === prof.simplified_class))!;
     if (row.reason) warnings.push({ kind: 'selected_mode_unavailable', mode, reason: row.reason });
   }
-  const latest = latestRatesYear();
-  if (input.year > latest) warnings.push({ kind: 'rates_assumed', year: input.year, latest });
+  // 表ごとに、その表を引く年（住民税は Y+1 年度、それ以外は Y）が表の最新年より先なら 1 件。
+  const latest = ratesLatestYears();
+  const lookup = { income_tax_basic_deduction: input.year, resident: input.year + 1, pension: input.year };
+  for (const table of ['income_tax_basic_deduction', 'resident', 'pension'] as const) {
+    if (lookup[table] > latest[table]) warnings.push({ kind: 'rates_assumed', year: lookup[table], latest: latest[table], table });
+  }
 
   const blue = BLUE_RETURN_DEDUCTION[prof.blue_return];
   const preBlue = input.business_income !== null ? input.business_income + blue : input.revenue! - input.expenses;

@@ -3,7 +3,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { estimate, type EstimateYear } from '../../src/cashflow/tax/engine.ts';
-import { BIZ_TAX_DEDUCTION, latestRatesYear } from '../../src/cashflow/tax/rates.ts';
+import { BIZ_TAX_DEDUCTION, ratesLatestYears } from '../../src/cashflow/tax/rates.ts';
 import type { TaxProfileValues } from '../../src/cashflow/tax/repo.ts';
 import { simulate, type SimInput, type SimResult } from '../../src/cashflow/tax/simulate.ts';
 import { DEFAULT_PROFILE } from '../../src/cashflow/tax/sync.ts';
@@ -45,7 +45,7 @@ describe('定常状態の 1 年分', () => {
     assert.deepEqual(r.income, { pre_blue: 7_000_000, business_income: income });
     assert.equal(r.cash_profit, 7_000_000);
     assert.equal(r.take_home, 7_000_000 - r.total);
-    assert.deepEqual(r.warnings, []);
+    assert.deepEqual(r.warnings.map((w) => w.kind), ['rates_assumed']); // 住民税 2028 年度だけ（下のテスト）
     assert.deepEqual(r.assumptions, ['steady_state']);
   });
 
@@ -100,13 +100,31 @@ describe('定常状態の 1 年分', () => {
     assert.equal(sim({}, { revenue: 1_000_000, expenses: 1_200_000 }).effective_rate, null);
   });
 
-  test('rates の最新年より先の year で rates_assumed', () => {
-    const latest = latestRatesYear();
-    assert.ok(!sim({}, { year: latest }).warnings.some((w) => w.kind === 'rates_assumed'));
+  test('rates_assumed: 表ごとに、引く年（住民税は Y+1）が表の最新年より先なら 1 件', () => {
+    const l = ratesLatestYears();
+    const ra = (year: number) => sim({}, { year }).warnings.filter((w) => w.kind === 'rates_assumed');
+    // 既定の翌年（2027）: 住民税（2028 年度）だけ。
+    assert.deepEqual(ra(2027), [{ kind: 'rates_assumed', year: 2028, latest: l.resident, table: 'resident' }]);
+    assert.deepEqual(ra(l.resident - 1), []);
+    const far = l.income_tax_basic_deduction + 1;
+    assert.deepEqual(ra(far), [
+      { kind: 'rates_assumed', year: far, latest: l.income_tax_basic_deduction, table: 'income_tax_basic_deduction' },
+      { kind: 'rates_assumed', year: far + 1, latest: l.resident, table: 'resident' },
+      { kind: 'rates_assumed', year: far, latest: l.pension, table: 'pension' },
+    ]);
+  });
+
+  test('エンジンの警告は year = Y の分だけ（year を持たない警告はそのまま）', () => {
+    const s20 = sim({ consumption_mode: 'special20', simplified_class: null }, { year: 2026 });
+    assert.ok(!s20.warnings.some((w) => w.kind === 'special20_expired'));
     assert.deepEqual(
-      sim({}, { year: latest + 1 }).warnings.filter((w) => w.kind === 'rates_assumed'),
-      [{ kind: 'rates_assumed', year: latest + 1, latest }],
+      sim({ consumption_mode: 'special20', simplified_class: null }, { year: 2027 }).warnings.filter((w) => w.kind === 'special20_expired'),
+      [{ kind: 'special20_expired', year: 2027 }],
     );
+    const bi = sim({}, { year: 2026, revenue: null, business_income: 6_000_000 });
+    assert.ok(bi.warnings.filter((w) => w.kind === 'revenue_missing').length <= 1);
+    assert.ok(bi.warnings.filter((w) => 'year' in w && w.kind !== 'rates_assumed').every((w) => 'year' in w && w.year === 2026));
+    assert.equal(sim({ consumption_mode: 'unset', simplified_class: null }).warnings.filter((w) => w.kind === 'consumption_tax_mode_unset').length, 1);
   });
 });
 
