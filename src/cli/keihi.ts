@@ -31,6 +31,7 @@ import {
   exchangeCode as exchangeGmailCode,
   gmailTokenPaths,
   parseAuthResponse,
+  SCOPE as GMAIL_SCOPE,
   setGmailReauthRequired,
   type GmailToken,
 } from '../mail/gmail/auth.ts';
@@ -185,6 +186,7 @@ async function gmailAuth(argv: string[], deps: CliDeps): Promise<number> {
     secrets.push(code, pasted);
     const token = await exchangeGmailCode({ clientId, clientSecret }, code, pkce.verifier, { fetch: doFetch });
     secrets.push(token.access_token, token.refresh_token);
+    if (!token.scope.split(/\s+/).includes(GMAIL_SCOPE)) throw new Error('権限のチェックが外されています。やり直してください（「Gmail のメールの閲覧」にチェックを入れて許可する）。保存しない');
     const { tokenPath, lockPath } = gmailTokenPaths(cfg.dataDir, accountId);
     const store = new TokenStore<GmailToken>(tokenPath, lockPath);
     await store.withLock(() => store.write(token));

@@ -96,21 +96,25 @@ export function buildAuthorizeUrl(clientId: string, pkce: Pkce): string {
   return `${AUTHORIZE_URL}?${q.toString()}`;
 }
 
-// 貼り付けられた文字列（止まった URL 全体か code だけ）から code を取り出す。URL に state があれば一致を確かめる。
+// 貼り付けられた文字列（止まった URL 全体か code だけ）から code を取り出す。URL なら host が 127.0.0.1:8797 で、state があり一致することを確かめる。
 export function parseAuthResponse(input: string, expectedState: string): string {
   const s = input.trim();
   if (!s) throw new Error('貼り付けが空');
-  if (!/^https?:\/\//i.test(s)) return s;
+  // http:// が欠けた「127.0.0.1:8797/?code=…」も URL として扱う。それ以外（code だけ）はそのまま返す。
+  const looksUrl = /^https?:\/\//i.test(s) || /^127\.0\.0\.1:8797(?:[/?]|$)/.test(s);
+  if (!looksUrl) return s;
   let u: URL;
   try {
-    u = new URL(s);
+    u = new URL(/^https?:\/\//i.test(s) ? s : `http://${s}`);
   } catch {
     throw new Error('URL を解釈できない');
   }
+  if (u.host !== new URL(REDIRECT_URI).host) throw new Error(`URL のホストが ${new URL(REDIRECT_URI).host} でない（止まったページの URL を貼る）`);
   const err = u.searchParams.get('error');
   if (err) throw new Error(`認可が拒否された（${err}）`);
   const state = u.searchParams.get('state');
-  if (state !== null && state !== expectedState) throw new Error('URL の state が一致しない（別の認可の URL を貼っていないか確かめる）');
+  if (state === null) throw new Error('URL に state が無い（止まったページの URL をまるごと貼る）');
+  if (state !== expectedState) throw new Error('URL の state が一致しない（別の認可の URL を貼っていないか確かめる）');
   const code = u.searchParams.get('code');
   if (!code) throw new Error('URL に code が無い');
   return code;

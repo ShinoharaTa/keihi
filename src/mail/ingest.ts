@@ -8,7 +8,8 @@
 //   Content-ID のある image/*。ロゴなど）は添付として扱わない。
 // - [ingest] max_upload_bytes を超える添付は取らずに too_large。PDF / JPEG / PNG 以外は unsupported。
 //   同じ内容の証憑が既にあれば duplicate（document_id は既存の証憑）。
-// - メールの状態: 証憑にした（か既にある）添付が 1 つでもあれば ingested、無ければ too_large → unsupported → body_only の順。
+// - メールの状態: too_large の添付が 1 つでもあれば too_large（証憑にした添付はそのまま残す）、無ければ証憑にした（か既にある）添付が
+//   あれば ingested、無ければ unsupported → body_only の順。
 // - 1 通の取得（4xx）・解析の失敗は state = error（fetch_failed / parse_failed）、attempts + 1 にして投げない（他の通を止めない）。
 //   認可（GmailAuthError）と一時的な失敗（GmailRetryableError）は投げ直す（ジョブの側で扱う）。
 import { appendAudit } from '../audit.ts';
@@ -16,7 +17,7 @@ import { todayInTokyo } from '../calendar/businessDays.ts';
 import type { Config } from '../config.ts';
 import { tx, type Db } from '../db/index.ts';
 import { ulid } from '../db/ids.ts';
-import { insertDocument, prepareDocument, type PreparedDocument } from '../ingest/document.ts';
+import { insertDocument, prepareDocument, sanitizeFileName, type PreparedDocument } from '../ingest/document.ts';
 import { sniffMime } from '../ingest/validate.ts';
 import { putObject } from '../storage/objects.ts';
 import { GmailApiError, decodeBase64Url, type GmailClient, type GmailMessage, type GmailPart } from './gmail/client.ts';
@@ -101,7 +102,7 @@ export function parseGmailMessage(m: GmailMessage): ParsedMessage {
     if (filename && (attachmentId || data !== null) && !isEmbeddedImage(p)) {
       attachments.push({
         index: attachments.length,
-        filename: filename.slice(0, 500),
+        filename: sanitizeFileName(filename) ?? '',
         declaredMime: typeof p.mimeType === 'string' ? p.mimeType.slice(0, 200) : null,
         size: typeof body.size === 'number' && Number.isSafeInteger(body.size) ? body.size : null,
         attachmentId,
@@ -248,7 +249,8 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
     }
     duplicates = planned.filter((p) => p.result === 'duplicate').length;
     const has = (r: AttachmentResult) => planned.some((p) => p.result === r);
-    const state: MailState = has('ingested') || has('duplicate') ? 'ingested' : has('too_large') ? 'too_large' : has('unsupported') ? 'unsupported' : 'body_only';
+    // too_large は取り込めた添付があっても優先する（取り込めなかった証憑を要対応に出す）。unsupported は署名の zip などがあるので優先しない。
+    const state: MailState = has('too_large') ? 'too_large' : has('ingested') || has('duplicate') ? 'ingested' : has('unsupported') ? 'unsupported' : 'body_only';
 
     const cur = findMessage(db, accountId, remoteId);
     let id: string;

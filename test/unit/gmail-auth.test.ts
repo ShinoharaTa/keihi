@@ -59,6 +59,17 @@ describe('PKCE と認可 URL', () => {
     assert.throws(() => parseAuthResponse(`${REDIRECT_URI}?state=s1`, 's1'), /code/);
     assert.throws(() => parseAuthResponse('', 's1'), /空/);
   });
+
+  test('URL なら state は必須、host は 127.0.0.1:8797', () => {
+    assert.throws(() => parseAuthResponse(`${REDIRECT_URI}?code=x`, 's1'), /state が無い/);
+    assert.throws(() => parseAuthResponse('http://127.0.0.1:9999/?state=s1&code=x', 's1'), /ホスト/);
+    assert.throws(() => parseAuthResponse('https://evil.example.com/?state=s1&code=x', 's1'), /ホスト/);
+  });
+
+  test('http:// が欠けた 127.0.0.1:8797/?… も URL として扱う', () => {
+    assert.equal(parseAuthResponse('127.0.0.1:8797/?state=s1&code=4%2Fabc', 's1'), '4/abc');
+    assert.throws(() => parseAuthResponse('127.0.0.1:8797/?state=s2&code=x', 's1'), /state/);
+  });
 });
 
 describe('トークンの更新', () => {
@@ -154,6 +165,18 @@ describe('keihi gmail auth <id>', () => {
     await assert.rejects(stat(gmailTokenPaths(s.dataDir, 'work').tokenPath));
     assert.equal(gm.calls.length, 0);
     assert.equal(await cli(['gmail', 'auth', ...s.args], { ...s.deps, fetch: gm.fetch }), 2);
+  });
+
+  test('応答の scope に gmail.readonly が無ければ（権限のチェックを外した）保存しない', async () => {
+    const s = await setup();
+    const gm = createGmailMock();
+    gm.setToken(200, { access_token: 'a', refresh_token: 'r', expires_in: 3599, token_type: 'Bearer', scope: 'openid' });
+    assert.equal(await cli(['gmail', 'auth', 'work', ...s.args], { ...s.deps, fetch: gm.fetch }), 1);
+    assert.match(s.out.join('\n'), /権限のチェックが外されています。やり直してください/);
+    await assert.rejects(stat(gmailTokenPaths(s.dataDir, 'work').tokenPath));
+    const db = openDb(path.join(s.dataDir, 'keihi.db'));
+    assert.equal(isGmailReauthRequired(db, 'work'), true);
+    db.close();
   });
 
   test('invalid_grant（code の使い回しなど）は失敗し、保存しない', async () => {

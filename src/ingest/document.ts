@@ -61,6 +61,18 @@ export type PreparedDocument = {
 export type IngestOk = { ok: true; id: string; sha256: string; deadline_on: string; warnings: string[] };
 export type IngestResult = IngestOk | ({ ok: false } & IngestRejection);
 
+export const MAX_ORIG_NAME_LENGTH = 500;
+
+// 元のファイル名の整形（POST /api/documents とメールの添付で共通）: 制御文字（NUL・CR・LF など）を除き、パス区切り（/ と \）の
+// 後ろだけを残して 500 字に切る。空になれば null。
+export function sanitizeFileName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const noCtl = name.replace(/[\u0000-\u001f\u007f]/g, '');
+  const base = noCtl.split(/[/\\]/).pop() ?? '';
+  const out = base.trim().slice(0, MAX_ORIG_NAME_LENGTH);
+  return out || null;
+}
+
 function findBySha(db: Db, sha256: string): string | null {
   return (db.prepare('SELECT id FROM documents WHERE sha256 = ?').get(sha256) as { id: string } | undefined)?.id ?? null;
 }
@@ -140,7 +152,7 @@ export function insertDocument(db: Db, p: PreparedDocument, at: Date): IngestOk 
           storage_key, no_ai, status, paper_status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)`,
       ).run(
-        id, p.sha256, input.bytes.length, p.mime, input.origName || null, input.source, input.sourceRef ?? null, input.kind, input.sizePreset,
+        id, p.sha256, input.bytes.length, p.mime, sanitizeFileName(input.origName), input.source, input.sourceRef ?? null, input.kind, input.sizePreset,
         p.width, p.height, b(p.resolutionOk), b(p.colorOk), p.paperRequired ? 1 : 0, iso, input.receivedOn, input.receivedOnSource,
         p.deadlineOn, p.deadlineMode, p.storageKey, input.noAi ? 1 : 0, p.paperRequired ? 'keep_required' : 'unknown', iso,
       );

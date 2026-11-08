@@ -273,6 +273,25 @@ describe('1 通の取り込み', () => {
   });
 });
 
+test('取り込めた添付と too_large が混ざったら too_large（証憑は作ったまま、要対応に出す）。unsupported は ingested のまま', async () => {
+  gm.add({ id: 'm1', internalMs: T_EARLY, attachments: [{ filename: 'ok.pdf', mime: 'application/pdf', bytes: pdf('ok') }, { filename: 'big.pdf', mime: 'application/pdf', bytes: pdf('big'), declaredSize: 5000 }] });
+  gm.add({ id: 'm2', internalMs: T_LATE, attachments: [{ filename: 'ok2.pdf', mime: 'application/pdf', bytes: pdf('ok2') }, { filename: 'sig.zip', mime: 'application/zip', bytes: zip('sig') }] });
+  await fetchOnce();
+  const [m1, m2] = msgs();
+  assert.equal(m1!.state, 'too_large');
+  assert.deepEqual(atts(m1!.id).map((x) => x.result), ['ingested', 'too_large']);
+  assert.equal(m2!.state, 'ingested');
+  assert.equal(one<{ n: number }>('SELECT count(*) n FROM documents').n, 2);
+  assert.equal(attentionCount(db, 'personal'), 1);
+});
+
+test('添付のファイル名は制御文字を除き、パス区切りの後ろだけを残す', async () => {
+  gm.add({ id: 'm1', internalMs: T_LATE, attachments: [{ filename: '..\\dir/sub/inv\u0000oi\r\nce.pdf', mime: 'application/pdf', bytes: pdf('n') }] });
+  await fetchOnce();
+  assert.equal(atts(msgs()[0]!.id)[0]!.filename, 'invoice.pdf');
+  assert.equal(one<{ orig_name: string }>('SELECT orig_name FROM documents').orig_name, 'invoice.pdf');
+});
+
 describe('検索式', () => {
   test('label と after（since の JST 0 時）、query は括弧で AND', async () => {
     assert.equal(buildQuery({ ...ACCOUNT, query: 'has:attachment OR from:example.net' }, 100), 'label:keihi after:100 (has:attachment OR from:example.net)');
@@ -322,19 +341,21 @@ describe('fetch_mail ジョブ', () => {
     await runHandler('personal');
     assert.equal(isGmailReauthRequired(db, 'personal'), true);
     assert.equal(isGmailReauthRequired(db, 'work'), false);
-    assert.equal(getMailStatus(db, 'personal').last_error, 'reauth_required');
+    assert.equal(getMailStatus(db, 'personal').last_error, 'invalid_grant');
     assert.equal(one<{ n: number }>(`SELECT count(*) n FROM audit_log WHERE action = 'mail.reauth_required'`).n, 1);
     // refresh_token は例外にもログにも出ない。
     assert.ok(!JSON.stringify(getMailStatus(db, 'personal')).includes('refresh-SECRET'));
     const before = gm.calls.length;
     await runHandler('personal');
     assert.equal(gm.calls.length, before, '再認可待ちでは呼ばない');
+    assert.equal(getMailStatus(db, 'personal').last_error, 'reauth_required');
   });
 
   test('401 が続いたら（強制更新の後も）再認可が要る', async () => {
     gm.fail('/messages?', { status: 401 });
     await runHandler('personal');
     assert.equal(isGmailReauthRequired(db, 'personal'), true);
+    assert.equal(getMailStatus(db, 'personal').last_error, 'http_401');
     assert.equal(gm.calls.filter((c) => c.url.includes('oauth2')).length, 1, '1 回だけ強制更新する');
   });
 
@@ -342,6 +363,7 @@ describe('fetch_mail ジョブ', () => {
     await rm(gmailTokenPaths(dataDir, 'personal').tokenPath);
     await runHandler('personal');
     assert.equal(isGmailReauthRequired(db, 'personal'), true);
+    assert.equal(getMailStatus(db, 'personal').last_error, 'token_missing', 'ファイルパスは入れない');
   });
 
   test('500・429・ネットワークの失敗はジョブの再試行（取れた通は残る）', async () => {
@@ -357,7 +379,7 @@ describe('fetch_mail ジョブ', () => {
     assert.equal(j.attempts, 1);
     assert.match(j.last_error!, /HTTP 500/);
     assert.equal(msgs().length, 1, 'm1 は取り込み済み');
-    assert.match(getMailStatus(db, 'personal').last_error!, /HTTP 500/);
+    assert.equal(getMailStatus(db, 'personal').last_error, 'http_500');
     assert.equal(isGmailReauthRequired(db, 'personal'), false);
     // 429 とネットワークも同じ。
     for (const res of [{ status: 429 }, 'network' as const]) {

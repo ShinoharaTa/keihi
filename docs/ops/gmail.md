@@ -134,9 +134,9 @@ curl -s -H "$H" 'http://127.0.0.1:8795/api/mail/messages?account_id=personal&lim
 | 見えたもの | 意味と対処 |
 |---|---|
 | `409 {"reason":"mail_disabled"}` | `[mail] enabled = true` になっていない。直して web と worker を再起動する |
-| `reauth_required: true`、`last_error: "reauth_required"` | トークンが失効・取り消された（テストのままで 7 日経った、など）。§6 をやり直す |
-| `last_error` に `HTTP 429` / `HTTP 5xx` | 一時的な失敗。ジョブが自動で再試行する |
-| `last_error` に `GMAIL_CLIENT_ID が無い` | §4 の secrets.env |
+| `reauth_required: true`（`last_error` は `invalid_grant` / `http_401` / `token_missing`、再認可待ちの回は `reauth_required`） | トークンが失効・取り消された（テストのままで 7 日経った、など）。§6 をやり直す |
+| `last_error` が `http_429` / `http_5xx` / `network` | 一時的な失敗。ジョブが自動で再試行する |
+| `last_error` が `config_error` | §4 の secrets.env（GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET）を確かめる。詳細は `journalctl --user -u keihi-worker.service -n 50` |
 | `attention_count` が増えた | `messages?state=attention` を見る。`unsupported`（zip 等）・`too_large`（`[ingest] max_upload_bytes` 超え）・`error`（3 回失敗）・`body_only`（本文だけ）は手で証憑を入れる |
 
 取り込んだ添付は通常の証憑と同じく抽出 → 確認カードに出る（source は `imap`）。

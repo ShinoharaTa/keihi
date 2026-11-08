@@ -9,6 +9,7 @@
 // bank は使っている口座の数・最後にうまくいった明細の同期・last_error がある口座の数（src/bank/sync.ts bankSummary）と、
 // 使っている口座の明細の最新の日付（latest_txn_date。無ければ null）。
 // mail はメールの取り込みのアカウントごとの状態（src/mail/status.ts。[mail] が無ければ enabled = false・accounts = []）。
+// mail の last_error は種別の文字列だけ（token_missing / invalid_grant / http_401 / http_429 / network など。src/worker/handlers/fetchMail.ts errorKind）。
 // retention は最も古い受領日の保持期限（src/retention.ts。期限は受領日の年で決まるので最小の received_on で足りる）。
 import { Hono } from 'hono';
 import { getSetting } from '../../attention.ts';

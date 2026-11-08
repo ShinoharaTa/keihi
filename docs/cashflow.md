@@ -341,13 +341,13 @@ Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `ke
 
 | メールの state | 条件 |
 |---|---|
-| ingested | 証憑にした（か、同じ内容の証憑が既にある）添付が 1 つ以上 |
-| too_large | `[ingest] max_upload_bytes` を超える添付だけ（宣言の size で超えていれば取らない） |
+| ingested | 証憑にした（か、同じ内容の証憑が既にある）添付が 1 つ以上で、too_large が無い |
+| too_large | `[ingest] max_upload_bytes` を超える添付が 1 つでもある（取り込めた添付があっても優先。証憑はそのまま。宣言の size で超えていれば取らない） |
 | unsupported | PDF / JPEG / PNG 以外の添付だけ（zip 等） |
 | body_only | 添付が無い（`.eml` だけ残す。手がかりの抽出は後の版） |
 | error | 1 通の取得（4xx）・解析に失敗。error_reason = fetch_failed / parse_failed、attempts + 1。3 回で止める |
 
-- 添付の判定: filename と本文のある part。HTML に埋め込まれた画像（inline + Content-ID の image/*。ロゴなど）は添付にしない。
+- 添付の判定: filename と本文のある part。ファイル名は制御文字を除いてパス区切りの後ろだけ（POST /api/documents と共通の sanitizeFileName）。HTML に埋め込まれた画像（inline + Content-ID の image/*。ロゴなど）は添付にしない。
 - 重複: メールは `UNIQUE(account_id, provider, remote_id)`。添付は documents の sha256（同じ PDF が別のメールで来ても証憑は 1 つ。mail_attachments.result = duplicate、document_id は既存）。
 - 表: mail_messages は削除不可、更新は state・error_reason・attempts・hint_*・updated_at と、error の行の中身の列を NULL から 1 回だけ埋めることだけ。mail_attachments は追記専用。件名・送信元のドメインは DB にだけ置き、監査（`mail.ingested`・`mail.failed`・`mail.reauth_required`）には mail_message_id・account_id・件数だけ。
 - 要対応のメール: error（attempts ≥ 3）・unsupported・too_large・手がかりの無い body_only。添付を取り込んだ後の要対応は既存の理由（upload_* / ai_* / extract_*）のまま。
@@ -357,7 +357,7 @@ Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `ke
 | `fetch_mail`（ref_id = アカウント id） | daily の段 `mail` がアカウントごとに 1 件（未完了があれば積まない。`enabled = false` なら積まない）。手動は `POST /api/mail/sync`（10 分以内は積まない）。専用の timer は無い |
 | invalid_grant・401（強制更新の後も）・トークンが無い | settings `gmail_reauth_required_<id>` = 1、ジョブは完了。以降そのアカウントは Gmail を呼ばない。`keihi gmail auth <id>` で 0 |
 | 429・5xx・ネットワーク・403 rateLimitExceeded | ジョブの再試行（既存のバックオフ）。それまでに取り込んだ通は記録済み |
-| 状態 | settings `mail_status_<id>` = `{last_run_at, last_ok_at, last_error, last_internal_at, first_run_on}` |
+| 状態 | settings `mail_status_<id>` = `{last_run_at, last_ok_at, last_error, last_internal_at, first_run_on}`。last_error は種別だけ（token_missing / invalid_grant / http_<status> / network / config_error / reauth_required） |
 
 | メソッド・パス | 引数 | 応答の要点 |
 |---|---|---|
