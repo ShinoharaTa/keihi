@@ -18,6 +18,7 @@ import {
   listExpenseTxnsForDetect,
   listRecurrenceCandidates,
   listRecurrenceCandidatesFor,
+  listSupersededCandidateIds,
   setRecurrenceCandidateState,
   type Category,
   type DetectTxnRow,
@@ -133,17 +134,25 @@ function purity(run: DetectTxnRow[], seq: DetectTxnRow[]): number {
   return run.length / seq.filter((t) => dayNumber(t.txn_date) >= from && dayNumber(t.txn_date) <= to).length;
 }
 
-// 金額の段の数: 日付順に見て、段の先頭の額と ±5% で合わなくなったら次の段。
-function countLevels(run: DetectTxnRow[]): number {
-  let levels = 1;
+// 金額の段ごとの件数: 日付順に見て、段の先頭の額と ±5% で合わなくなったら次の段。
+function levelSizes(run: DetectTxnRow[]): number[] {
+  const sizes = [0];
   let head = run[0].amount;
   for (const t of run) {
-    if (sameAmount(head, t.amount)) continue;
-    levels++;
-    head = t.amount;
+    if (!sameAmount(head, t.amount)) {
+      sizes.push(0);
+      head = t.amount;
+    }
+    sizes[sizes.length - 1]++;
   }
-  return levels;
+  return sizes;
 }
+
+// 定額とみなせる段: 1 つ、または 2 つでどちらも 2 件以上（1 件だけの段は値上げとみなさない）。
+const fixedLevels = (run: DetectTxnRow[]) => {
+  const sizes = levelSizes(run);
+  return sizes.length === 1 || (sizes.length === 2 && sizes.every((n) => n >= 2));
+};
 
 // 周期ごとに列を作り、ok を満たすもののうち最後の出現日が最も新しい列（同じなら短い周期）。止まった列は採らない。
 function bestRun(seq: DetectTxnRow[], today: string, ok: (run: DetectTxnRow[]) => boolean): { rule: Rule; run: DetectTxnRow[] } | null {
@@ -206,17 +215,17 @@ export function findRecurrences(db: Db, opts: { today: string; lookbackMonths?: 
     const seq = [...txns]
       .sort((a, b) => (a.txn_date < b.txn_date ? -1 : a.txn_date > b.txn_date ? 1 : a.amount - b.amount || cmpDate(a, b)))
       .filter((t, i, xs) => i === 0 || xs[i - 1].txn_date !== t.txn_date || xs[i - 1].amount !== t.amount);
-    // 段 1: 金額を見ずに枠で列を作る。金額の段が 3 つ以上（不定額）の列は今は出さない。
-    const first = bestRun(seq, opts.today, (run) => purity(run, seq) >= PURITY_MIN && countLevels(run) <= 2);
+    // 段 1: 金額を見ずに枠で列を作る。定額とみなせない段の列（段が 3 つ以上の不定額など）は今は出さず、段 2 に回す。
+    const first = bestRun(seq, opts.today, (run) => purity(run, seq) >= PURITY_MIN && fixedLevels(run));
     let rest = seq;
     if (first) {
       out.push(toDetected(first.rule, first.run));
       const taken = new Set(first.run.map((t) => t.id));
       rest = seq.filter((t) => !taken.has(t.id));
     }
-    // 段 2: 残りを金額でまとめ、まとまりごとに枠で列を作る。純度は見ない。
+    // 段 2: 残りを金額でまとめ、まとまりごとに枠で列を作る。純度はまとまりの中で測る（週 1 回の同額の買い物が毎月に化けないように）。
     for (const cluster of clusterByAmount(rest)) {
-      const best = bestRun(cluster, opts.today, () => true);
+      const best = bestRun(cluster, opts.today, (run) => purity(run, cluster) >= PURITY_MIN);
       if (best) out.push(toDetected(best.rule, best.run));
     }
   }
@@ -226,7 +235,8 @@ export function findRecurrences(db: Db, opts: { today: string; lookbackMonths?: 
 const SUPERSEDE_ACTOR = 'system';
 
 // 検出して候補にする。daily から呼ぶ口。
-// 作らないもの: 同じ口座・摘要・周期で金額が ±5% 以内の候補がある（open / accepted、または dismissed）、
+// 作らないもの: 同じ口座・摘要・周期で金額が ±5% 以内の候補がある（open / accepted、または人が dismissed にしたもの。
+// system が superseded で dismissed にしたものは数えない）、
 // 同じ口座の active な予定項目に、同じ名前（= 正規化摘要）か、同じ周期で金額が ±5% 以内のものがある。
 // 新しい候補を作ったとき、次の open の候補を dismissed にする（actor = system、payload {reason: 'superseded', by}）。updated はその件数。
 //   - 同じ口座・摘要・周期で、今回の検出のどの列とも金額が合わないもの（値上げ前など）
@@ -242,9 +252,10 @@ export function detectRecurrences(db: Db, opts: { today: string; lookbackMonths?
     const keyOf = (d: { accountId: string; descriptionNorm: string; interval: Interval }) => JSON.stringify([d.accountId, d.descriptionNorm, d.interval]);
     const foundByKey = new Map<string, Detected[]>();
     for (const d of found) foundByKey.set(keyOf(d), [...(foundByKey.get(keyOf(d)) ?? []), d]);
+    const bySystem = listSupersededCandidateIds(db, SUPERSEDE_ACTOR);
     for (const d of found) {
       const existing = listRecurrenceCandidatesFor(db, d.accountId, d.descriptionNorm, d.interval);
-      if (existing.some((c) => sameAmount(c.amount, d.amount))) continue;
+      if (existing.some((c) => !bySystem.has(c.id) && sameAmount(c.amount, d.amount))) continue;
       if (hasActiveScheduledItemLike(db, { accountId: d.accountId, name: d.descriptionNorm, recurrence: d.interval, amount: d.amount, tolerancePct: AMOUNT_TOLERANCE_PCT })) {
         continue;
       }
@@ -258,6 +269,7 @@ export function detectRecurrences(db: Db, opts: { today: string; lookbackMonths?
       }
       for (const id of superseded) {
         setRecurrenceCandidateState(db, id, 'dismissed', null, now);
+        bySystem.add(id);
         appendAudit(
           db,
           { actor: SUPERSEDE_ACTOR, action: 'recurrence_candidate.dismissed', entity: 'recurrence_candidate', entityId: id, payload: { reason: 'superseded', by: row.id } },
