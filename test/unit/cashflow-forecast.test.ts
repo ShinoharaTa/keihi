@@ -371,6 +371,21 @@ describe('buildForecast: 履歴から引く予定項目と履歴の長さ', () =
     assert.ok(f.months.every((m) => m.items.length === 0));
   });
 
+  test('止めた見積もりの項目（再計算で置き換えたもの）は履歴から引かない（新しい項目と二重に引かない）', () => {
+    const { db, deactivate } = mini();
+    const est = (name: string, recurrence: Recurrence, anchor: string, key: string, endDate: string | null = null) =>
+      insertScheduledItem(db, {
+        name, amount: 3_000, direction: 'out', category: 'insurance', accountId: null, recurrence, anchorDate: anchor, endDate,
+        notifyDaysBefore: 30, origin: 'estimate', estimateKey: key, now,
+      }).id;
+    // 第 1 版の月ごとの once（止めた）と、置き換えた第 2 版の monthly（有効）が同じ月に重なる。
+    for (const m of ['05', '06', '07', '08', '09', '10']) deactivate(est(`旧 ${m}`, 'once', `2026-${m}-25`, `pension:2026:${m}`));
+    est('新 月払い', 'monthly', '2026-05-31', 'pension:2026:monthly', '2027-04-30');
+    const f = buildForecast(db, { today: TODAY });
+    // 毎月 10,000 − 3,000（1 回分だけ）= 7,000
+    assert.equal(f.unplanned_out_per_month, 7_000);
+  });
+
   test('対象外の口座を指す予定は履歴から引かないが、予定の表には入れる', () => {
     const { db, mk, item } = mini();
     const P = mk('私用', 'bank');

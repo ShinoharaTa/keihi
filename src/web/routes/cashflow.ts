@@ -18,8 +18,7 @@
 //   POST /api/recurrence_candidates/:id/dismiss       → 200 RecurrenceCandidate（既に dismissed ならそのまま）/ 400（accepted）/ 404
 //   GET  /api/cashflow?months=36               → 200 Forecast（src/cashflow/forecast.ts。今月から months か月分）/ 400 {error: invalid_months}
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。
-//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）・
-//        consumption_tax_not_implemented（方式は設定済みだが PR1 は消費税を作らない）を足す。
+//        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）を足す。
 // 大きな出費（src/cashflow/large.ts。docs/cashflow.md §15）:
 //   GET  /api/large_expenses                          → 200 {items: [LargeExpense]}（5 万円以上の支出を口座・摘要ごとに 1 行。最新の明細日の新しい順、50 行まで。今日は Asia/Tokyo の暦日）
 //   POST /api/large_expenses/:bank_txn_id/schedule    body {recurrence（monthly | yearly | biennial | once）, category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 明細の額）, anchor_date?}

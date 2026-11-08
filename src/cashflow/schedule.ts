@@ -49,7 +49,7 @@ export type By = { actor: string; user?: string | null; payload?: Record<string,
 // これ以外の actor が見積もりの項目を手直しすると pinned = 1 にする。
 export const SYSTEM_ACTOR = 'system';
 // 手直しとみなす列（docs/cashflow.md §14.2）。
-const PIN_ON_CHANGE = new Set<string>(['name', 'amount', 'anchor_date']);
+const PIN_ON_CHANGE = new Set<string>(['name', 'amount', 'anchor_date', 'end_date']);
 
 // ---- 値の検査 ----
 

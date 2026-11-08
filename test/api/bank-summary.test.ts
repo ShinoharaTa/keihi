@@ -172,9 +172,21 @@ describe('GET /api/summary/monthly', () => {
   });
 
   test('by_account に include_in_cashflow と active が出る', async () => {
-    updateAccountSettings(db, fx.b, { includeInCashflow: false, active: false }, NOW);
+    updateAccountSettings(db, fx.b, { includeInCashflow: false }, NOW);
     const s = await getJson<Summary>('/api/summary/monthly?month=2026-10');
-    assert.deepEqual(s.by_account.map((a) => [a.account_id, a.include_in_cashflow, a.active]), [[fx.a, true, true], [fx.b, false, false]]);
+    assert.deepEqual(s.by_account.map((a) => [a.account_id, a.include_in_cashflow, a.active]), [[fx.a, true, true], [fx.b, false, true]]);
+  });
+
+  test('active = 0 の口座の明細は total・by_account・by_category・by_tag・excluded に入らない', async () => {
+    const before = await getJson<Summary>('/api/summary/monthly?month=2026-10');
+    const old = insertAccount(db, { provider: 'fake', name: '旧銀行', kind: 'bank', source: 'csv', now: NOW }).id;
+    for (const [d, amt, side] of [['2026-10-05', 12345, 'expense'], ['2026-10-06', 23456, 'income']] as const) {
+      insertBankTxn(db, { accountId: old, txnDate: d, amount: amt, side, description: 'ﾐｾ ｷｭｳ', descriptionNorm: normalizeVendor('ﾐｾ ｷｭｳ'), now: NOW });
+    }
+    updateAccountSettings(db, old, { active: false }, NOW);
+    const s = await getJson<Summary>('/api/summary/monthly?month=2026-10');
+    assert.deepEqual(s, before);
+    assert.ok(!s.by_account.some((a) => a.account_id === old));
   });
 
   test('from〜to で複数月を返す。単月と同じ中身', async () => {
@@ -304,8 +316,25 @@ describe('GET /api/bank_txns', () => {
     assert.ok(items.some((x) => x.id === fx.transferOut));
   });
 
+  test('既定では active = 0 の口座の明細を出さず、include_inactive=1 で出す', async () => {
+    const old = insertAccount(db, { provider: 'fake', name: '旧銀行', kind: 'bank', source: 'csv', now: NOW }).id;
+    const t = insertBankTxn(db, { accountId: old, txnDate: '2026-10-05', amount: 12345, side: 'expense', description: 'ﾐｾ ｷｭｳ', descriptionNorm: normalizeVendor('ﾐｾ ｷｭｳ'), now: NOW });
+    updateAccountSettings(db, old, { active: false }, NOW);
+    const ids = async (q: string) => (await getJson<Page>(`/api/bank_txns?limit=100${q}`)).items.map((x) => x.id);
+    const def = await ids('');
+    assert.equal(def.length, 50);
+    assert.ok(!def.includes(t.id));
+    assert.deepEqual(await ids('&include_inactive=0'), def);
+    assert.deepEqual(await ids(`&account_id=${old}`), []);
+    const all = await ids('&include_inactive=1');
+    assert.equal(all.length, 51);
+    assert.ok(all.includes(t.id));
+    assert.deepEqual(await ids(`&account_id=${old}&include_inactive=1`), [t.id]);
+  });
+
   test('不正な引数は 400', async () => {
     const bad = async (q: string, error: string) => assert.deepEqual(await getJson(`/api/bank_txns?${q}`, 400), { error });
+    await bad('include_inactive=true', 'invalid_include_inactive');
     await bad('from=2026-10', 'invalid_from');
     await bad('tag=biz', 'invalid_tag');
     await bad('category=xxx', 'invalid_category');

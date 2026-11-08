@@ -2197,3 +2197,24 @@ button:disabled {
   outline: 2px solid var(--m-accent);
   outline-offset: -2px;
 }
+/* 税の試算 */
+.m-sim-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.m-sim-step .m-btn {
+  padding: 0 10px;
+  white-space: nowrap;
+}
+.m-sim-off {
+  color: var(--m-sub);
+}
+.m-dl3 .m-sim-span {
+  grid-column: span 2;
+  color: var(--m-sub);
+}
+.m-sim-best {
+  margin-left: 6px;
+  font-size: 12px;
+}

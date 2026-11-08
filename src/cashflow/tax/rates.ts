@@ -119,10 +119,41 @@ export const PENSION_RATES: Readonly<Record<number, PensionRates>> = {
 };
 export const PENSION_ADDON_MONTHLY = 400;
 
+// ---- 消費税（国税 7.8% + 地方消費税 2.2% = 10%） ----
+
+// 簡易課税のみなし仕入率（第 1 種 卸売 90% 〜 第 6 種 不動産 40%）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6509.htm
+export const CTAX_DEEMED_PURCHASE_PCT: Readonly<Record<number, number>> = { 1: 90, 2: 80, 3: 70, 4: 60, 5: 50, 6: 40 };
+
+// 2 割特例（売上税額 × 20%）はインボイス登録で課税事業者になった人の令和 5〜8 年分（2026 年分）まで。
+// 2027 年分以降は作らず special20_expired の警告。
+// https://www.nta.go.jp/publication/pamph/shohi/kaisei/202304/01.htm
+export const CTAX_SPECIAL20_LAST_YEAR = 2026;
+
+// 免税事業者の判定（基準期間の課税売上高 1,000 万円以下）と簡易課税を選べる上限（同 5,000 万円以下）。試算（simulate.ts）の方式の比較だけで使う。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6501.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6505.htm
+export const CTAX_EXEMPT_THRESHOLD = 10_000_000;
+export const CTAX_SIMPLIFIED_THRESHOLD = 50_000_000;
+
+// 中間申告。前年の確定消費税額（国税分）が 48 万円超〜400 万円以下なら年 1 回、前年の国税分 × 6/12。
+// 地方消費税の中間分は国税分 × 22/78。期限は中間期間（1〜6 月）の末日の翌日から 2 か月（8/31）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6609.htm
+export const CTAX_INTERIM_THRESHOLD = 480_000;
+
 // year 以前で最も新しい年の値。year がどの年より前なら最も古い年の値。
 export function ratesFor<T>(table: Readonly<Record<number, T>>, year: number): T {
   const years = Object.keys(table).map(Number).sort((a, b) => a - b);
   let pick = years[0];
   for (const y of years) if (y <= year) pick = y;
   return table[pick];
+}
+
+// 表の最も新しい年。
+export function latestYear(table: Readonly<Record<number, unknown>>): number {
+  return Math.max(...Object.keys(table).map(Number));
+}
+
+// 年をキーにした表の最新年（試算の rates_assumed）。これより先の年は前の年の値で計算する。国保のプリセットは年のキーを持たないので入らない。
+export function ratesLatestYears(): { income_tax_basic_deduction: number; resident: number; pension: number } {
+  return { income_tax_basic_deduction: latestYear(INCOME_TAX_BASIC_DEDUCTION), resident: latestYear(RESIDENT_RATES), pension: latestYear(PENSION_RATES) };
 }
