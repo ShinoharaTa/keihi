@@ -173,7 +173,7 @@ function App() {
         {tab === 'review' && <ReviewList onChanged={() => void reloadCounts()} />}
         {tab === 'queue' && <QueueList items={items} today={today} onSave={save} onRemove={remove} onRetry={() => void flush()} />}
         {tab === 'sent' && <SentList reloadKey={sentKey} />}
-        {tab === 'money' && (typeof money === 'function' ? h(money, { today }) : <p class="empty">{money === 'error' ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>)}
+        {tab === 'money' && (typeof money === 'function' ? h(money, { today, onCapture: () => setTab('capture') }) : <p class="empty">{money === 'error' ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>)}
       </main>
       <nav class="tabs" aria-label="メイン">
         <TabButton on={tab === 'capture'} icon="capture" label="撮影" onClick={() => setTab('capture')} />
