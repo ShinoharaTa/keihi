@@ -322,6 +322,7 @@ export function Schedule({
   onLock,
   onBack,
   onTax,
+  onTaxSim,
 }: {
   today: string;
   accounts: Account[];
@@ -332,6 +333,8 @@ export function Schedule({
   onBack: () => void;
   // 税・保険の見積もりの設定画面へ。
   onTax: () => void;
+  // 税の試算へ。
+  onTaxSim: () => void;
 }) {
   const [tax, setTax] = useState<TaxSummary | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
@@ -444,6 +447,7 @@ export function Schedule({
                 today={today}
                 busy={busy}
                 onOpen={onTax}
+                onSim={onTaxSim}
                 onRecalc={() => void run(postJson('/api/tax/recalculate', {}), (b) => runText(b as RunSummary, '再計算しました。'))}
               />
             )}

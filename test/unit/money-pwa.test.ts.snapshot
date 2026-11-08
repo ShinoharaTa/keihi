@@ -369,20 +369,62 @@ exports[`SSR スナップショット > 画面の上の帯（戻る・題・右�
 ]
 `;
 
+exports[`SSR スナップショット > 税の試算: 入力（年・売上 ±100 万・方式と区分）、負担の表、方式の比較の 3 行（使えない方式は理由） 1`] = `
+[
+  "<section class=\\"m-card m-form\\" aria-labelledby=\\"m-sim-in\\"><h2 id=\\"m-sim-in\\" class=\\"m-h2\\">条件</h2><label class=\\"m-field-wrap\\" for=\\"m-sim-year\\"><span class=\\"m-label\\">年</span><select id=\\"m-sim-year\\" class=\\"m-field\\" value=\\"2027\\"><option value=\\"2026\\">2026 年</option><option value=\\"2027\\">2027 年</option><option value=\\"2028\\">2028 年</option></select>",
+  "</label>",
+  "<div class=\\"m-field-wrap\\"><label class=\\"m-label\\" for=\\"m-sim-rev\\">売上（万円・税込）</label>",
+  "<div class=\\"m-sim-step\\"><button type=\\"button\\" class=\\"m-btn\\">−100 万</button>",
+  "<input id=\\"m-sim-rev\\" class=\\"m-field\\" inputMode=\\"numeric\\" value=\\"800\\"><button type=\\"button\\" class=\\"m-btn\\">+100 万</button>",
+  "</div>",
+  "</div>",
+  "<div class=\\"m-field-wrap\\"><label class=\\"m-label\\" for=\\"m-sim-exp\\">経費（万円・税込）</label>",
+  "<div class=\\"m-sim-step\\"><button type=\\"button\\" class=\\"m-btn\\">−100 万</button>",
+  "<input id=\\"m-sim-exp\\" class=\\"m-field\\" inputMode=\\"numeric\\" value=\\"100\\"><button type=\\"button\\" class=\\"m-btn\\">+100 万</button>",
+  "</div>",
+  "</div>",
+  "<label class=\\"m-field-wrap\\" for=\\"m-sim-mode\\"><span class=\\"m-label\\">消費税の方式</span><select id=\\"m-sim-mode\\" class=\\"m-field\\" value=\\"simplified\\"><option value=\\"exempt\\">免税</option><option value=\\"special20\\">2 割特例</option><option value=\\"simplified\\">簡易課税</option><option value=\\"standard\\">本則</option></select>",
+  "</label>",
+  "<label class=\\"m-field-wrap\\" for=\\"m-sim-class\\"><span class=\\"m-label\\">事業区分</span><select id=\\"m-sim-class\\" class=\\"m-field\\" value=\\"5\\"><option value=\\"1\\">第 1 種 卸売 90%</option><option value=\\"2\\">第 2 種 小売 80%</option><option value=\\"3\\">第 3 種 製造 70%</option><option value=\\"4\\">第 4 種 その他 60%</option><option value=\\"5\\">第 5 種 サービス 50%</option><option value=\\"6\\">第 6 種 不動産 40%</option></select>",
+  "</label>",
+  "<button type=\\"button\\" class=\\"m-link\\" aria-expanded=\\"true\\" aria-controls=\\"m-sim-more\\">詳しく</button>",
+  "<div id=\\"m-sim-more\\" class=\\"m-form-2\\"><div class=\\"m-field-wrap\\"><label class=\\"m-label\\" for=\\"m-sim-pur\\">本則の課税仕入（万円・税込）</label>",
+  "<input id=\\"m-sim-pur\\" class=\\"m-field\\" inputMode=\\"numeric\\" placeholder=\\"経費と同じ\\" value=\\"\\"></div>",
+  "<div class=\\"m-field-wrap\\"><label class=\\"m-label\\" for=\\"m-sim-ideco\\">iDeCo（万円/年）</label>",
+  "<input id=\\"m-sim-ideco\\" class=\\"m-field\\" inputMode=\\"numeric\\" placeholder=\\"0\\" value=\\"\\"></div>",
+  "<div class=\\"m-field-wrap\\"><label class=\\"m-label\\" for=\\"m-sim-kyosai\\">小規模企業共済（万円/年）</label>",
+  "<input id=\\"m-sim-kyosai\\" class=\\"m-field\\" inputMode=\\"numeric\\" placeholder=\\"0\\" value=\\"\\"></div>",
+  "</div>",
+  "</section>",
+  "<div class=\\"m-note m-col m-gap2\\" role=\\"status\\"><p>2028 年の税率・料率はまだ無いので、2026 年の値で計算しています。</p>",
+  "</div>",
+  "<section class=\\"m-card m-pad12 m-gap8\\" aria-labelledby=\\"m-sim-burden\\"><h2 id=\\"m-sim-burden\\" class=\\"m-h2\\">2027 年の売上での負担</h2><dl class=\\"m-dl\\"><dt>所得税（2027 年分）</dt><dd>70.0万</dd><dt>住民税（2028 年度）</dt><dd>60.0万</dd><dt>国保（2028 年度）</dt><dd>80.0万</dd><dt>国民年金（2027 年度）</dt><dd>21.0万</dd><dt>消費税（2027 年分）</dt><dd>16.0万</dd></dl>",
+  "<div class=\\"m-total\\"><span>合計</span><b>247.0万</b></div>",
+  "<div class=\\"m-total\\"><span>手取り</span><b>453.0万</b></div>",
+  "<dl class=\\"m-dl m-dl-sm\\"><dt>実効負担率</dt><dd>35.3%</dd><dt>掛金で</dt><dd>−7.2万</dd><dt>自由に使える額</dt><dd>429.0万</dd></dl>",
+  "<p class=\\"m-sub13\\">+100万で手取り +62.3万（負担率 37.7%）</p>",
+  "</section><section class=\\"m-card m-pad12 m-gap8\\" aria-labelledby=\\"m-sim-ctax\\"><h2 id=\\"m-sim-ctax\\" class=\\"m-h2\\">消費税の方式の比較</h2><dl class=\\"m-dl3\\"><dt class=\\"m-sub\\">方式</dt><dd class=\\"m-sub\\">消費税</dd><dd class=\\"m-sub\\">手取り</dd><dt class=\\"m-sim-off\\">2 割特例</dt><dd class=\\"m-sim-off m-sim-span\\">2026 年分まで</dd><dt>簡易（第 5 種）<span class=\\"m-badge b-income m-sim-best\\">最安</span></dt><dd>16.0万</dd><dd>500.0万</dd><dt>本則（概算）</dt><dd>64.0万</dd><dd>500.0万</dd></dl>",
+  "</section><p class=\\"m-sub13 m-px4\\">同じ売上が続いた年の概算。給与など他の所得・医療費控除等は入れていない。</p>"
+]
+`;
+
 exports[`SSR スナップショット > 税・保険の見積もり: カード（未設定 / 設定済み）と設定画面（年は縦に並べる） 1`] = `
 [
   "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-tax\\"><h2 id=\\"m-tax\\" class=\\"m-h2\\">税・保険の見積もり</h2><p class=\\"m-sub13\\">所得と前年の確定値から、税金と保険料の予定を自動で入れます。</p>",
   "<button type=\\"button\\" class=\\"m-btn m-btn-primary m-btn-start\\">設定する</button>",
+  "<button type=\\"button\\" class=\\"m-link\\">試算</button>",
   "</section>",
   "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-tax\\"><h2 id=\\"m-tax\\" class=\\"m-h2\\">税・保険の見積もり</h2><p class=\\"m-sub13\\">2026 年分 所得 400万円 · 消費税 未設定 / 最終計算 11/7</p>",
   "<div class=\\"m-grid2\\"><button type=\\"button\\" class=\\"m-btn\\">設定を開く</button>",
   "<button type=\\"button\\" class=\\"m-btn m-btn-accent\\">再計算</button>",
   "</div>",
+  "<button type=\\"button\\" class=\\"m-link\\">試算</button>",
   "</section>",
   "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-tax\\"><h2 id=\\"m-tax\\" class=\\"m-h2\\">税・保険の見積もり</h2><p class=\\"m-sub13\\">2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7</p>",
   "<div class=\\"m-grid2\\"><button type=\\"button\\" class=\\"m-btn\\">設定を開く</button>",
   "<button type=\\"button\\" class=\\"m-btn m-btn-accent\\">再計算</button>",
   "</div>",
+  "<button type=\\"button\\" class=\\"m-link\\">試算</button>",
   "</section>",
   "<section class=\\"m-card m-form\\" aria-labelledby=\\"m-tax-basic\\"><h2 id=\\"m-tax-basic\\" class=\\"m-h2\\">申告と控除</h2><fieldset class=\\"m-fs m-fs-sm\\"><legend>青色申告特別控除</legend><div class=\\"m-seg m-seg-4\\"><button type=\\"button\\" aria-pressed=\\"true\\">65 万</button>",
   "<button type=\\"button\\" aria-pressed=\\"false\\">55 万</button>",
