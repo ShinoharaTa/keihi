@@ -2,6 +2,7 @@
 // → 残高の推移（直近 12 か月の折れ線）→ 確認すること（引落元が未設定のカード・提案・未設定の明細・収入の予定なし）→ 各画面への入口（状態を 1 行）。
 // GET /api/bank/overview と /api/balance_history は追加中: overview が無ければ資金繰り・月次・口座から代わりを作り（overviewFallback）、推移が無ければ隠す。
 // ヘッダの同期ボタンは POST /api/bank/sync（created:false は 10 分以内に実行済み）。
+// メールの取り込み（GET /api/mail/status）に要対応があれば、入口に「メールの要対応 n 件」の行（無効・0 件・読めないときは出さない）。
 import { useEffect, useState } from 'preact/hooks';
 import { getJson, postJson } from '../api.ts';
 import { BalanceTrend, StackBar } from './Charts.tsx';
@@ -14,6 +15,8 @@ import {
   failText,
   incomeAhead,
   incomePct,
+  mailAttention,
+  mailAttentionText,
   md,
   monthlyLine,
   notices,
@@ -23,6 +26,7 @@ import {
   syncErrorCount,
   syncText,
   verdict,
+  waitingText,
   yen,
   type Account,
   type BalanceHistory,
@@ -30,6 +34,7 @@ import {
   type Candidate,
   type Categories,
   type Forecast,
+  type MailStatus,
   type MonthlySummary,
   type Notice,
   type Overview,
@@ -46,6 +51,8 @@ export type HomeData = {
   months: MonthlySummary[];
   upcoming: Upcoming[];
   status: BankStatus[];
+  // GET /api/mail/status（無い・読めなければ null）。
+  mail?: MailStatus | null;
 };
 
 const Chev = () => <Icon name="next" size={18} class="m-chev" />;
@@ -126,6 +133,8 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
     .join('・');
   const untagged = o?.untagged_count ?? 0;
   const untaggedText = `${untagged}${o?.untagged_more ? '+' : ''}`;
+  const waiting = o?.receipt_waiting_count ?? 0;
+  const mailN = mailAttention(d.mail);
   const trend = d.history ? balanceSeries(d.history.months) : [];
   return (
     <>
@@ -255,6 +264,14 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
           count={untagged > 0 ? untaggedText : undefined}
           onClick={() => go('txns', untagged > 0 ? { filter: { period: 'all', tag: 'unset' } } : {})}
         />
+        <NavRow
+          title="経費"
+          sub={waiting > 0 ? waitingText(waiting) : '事業の支出を相手ごとに'}
+          warn={waiting > 0}
+          count={waiting > 0 ? String(waiting) : undefined}
+          onClick={() => go('expenses', waiting > 0 ? { receipt: 'waiting' } : {})}
+        />
+        {mailN > 0 && <NavRow title="メール" sub={mailAttentionText(mailN)} warn count={String(mailN)} onClick={() => go('mail')} />}
         <NavRow title="見通し" sub={cf && v ? (cf.first_shortfall_month ? `${cf.first_shortfall_month} に残す額を下回る見込み` : v.title) : '36 か月の残高の見通し'} warn={v?.short} onClick={() => go('forecast')} />
         <NavRow title="予定" sub={next ? `次: ${md(next.due_date)} ${next.name} ${yen(next.amount)}` : '税金・保険などの予定'} onClick={() => go('schedule')} />
         <NavRow title="口座" sub={acctLine} warn={errors > 0} onClick={() => go('accounts')} />
@@ -274,13 +291,14 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
     let live = true;
     void (async () => {
       const month = today.slice(0, 7);
-      const [o, h, cf, m, up, st] = await Promise.all([
+      const [o, h, cf, m, up, st, ml] = await Promise.all([
         getJson<Overview>('/api/bank/overview'),
         getJson<BalanceHistory>('/api/balance_history?months=12'),
         getJson<Forecast>('/api/cashflow?months=36'),
         getJson<{ months: MonthlySummary[] }>(`/api/summary/monthly?from=${addMonth(month, -6)}&to=${month}`),
         getJson<{ items: Upcoming[] }>('/api/scheduled_items/upcoming?days=60'),
         getJson<{ accounts: BankStatus[] }>('/api/bank/status'),
+        getJson<MailStatus>('/api/mail/status'),
       ]);
       // overview が無い古いサーバー（404）だけ、未設定の明細と提案の数を別に読み、描画のときに代わりを作る。
       // それ以外の失敗は代わりを作らず、理由を出す（残高を間違って見せないため）。
@@ -298,6 +316,7 @@ export function Home({ today, accounts, cats, go }: { today: string; accounts: A
         months: m.ok ? m.data.months : [],
         upcoming: up.ok ? up.data.items : [],
         status: st.ok ? st.data.accounts : [],
+        mail: ml.ok ? ml.data : null,
         fallback,
         untagged: u?.ok ? pageCount(u.data, 100) : { n: 0, more: false },
         candidates: c?.ok ? c.data.candidates.length : 0,

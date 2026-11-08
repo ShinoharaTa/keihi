@@ -20,7 +20,13 @@ export type Txn = {
   tag_source: string;
   excluded: boolean;
   transfer_kind: TransferKind | null;
+  // 照合（src/bank/match.ts。古いサーバーには無い）。receipt は経費の明細のときだけ。
+  receipt?: ReceiptStatus | null;
+  receipt_hint?: { document_id: string; status: string } | null;
+  // 本文だけのメールの手がかり（receipt が candidate / waiting のときだけ。古いサーバーには無い）。
+  mail_hint?: MailHint | null;
 };
+export type MailHint = { mail_message_id: string; account_id: string; received_on: string | null; from_domain: string | null; subject: string | null; order_ref: string | null };
 export type TxnPage = { items: Txn[]; next_cursor: string | null };
 
 export type MonthlySummary = {
@@ -170,6 +176,8 @@ export type Overview = {
   untagged_count: number;
   // クライアントだけの印: 代わりの計算で未設定が 100 件を超えた（「100+」と出す）。
   untagged_more?: boolean;
+  // 領収書待ちの経費の明細の件数（今日の 12 か月前の月初〜今日。古いサーバーには無い）。
+  receipt_waiting_count?: number;
   cards_without_settlement: { account_id: string; name: string }[];
   open_candidates: number;
   upcoming_due?: unknown;
@@ -259,6 +267,10 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_taxable_purchases: '課税仕入は 0 以上の整数で入れてください。',
   invalid_ideco: 'iDeCo は 0 以上の整数で入れてください。',
   invalid_kyosai: '小規模企業共済は 0 以上の整数で入れてください。',
+  already_linked: 'この証憑はもう紐付いています。',
+  not_linked: 'この証憑は紐付いていません。読み直してください。',
+  document_not_found: '証憑が見つかりませんでした。',
+  document_not_matchable: 'この証憑は却下・重複・私用のため紐付けられません。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -314,10 +326,10 @@ export const CSV_ACCOUNT_KINDS: readonly { kind: AccountKind; label: string }[] 
 
 // ---- 明細の絞り込み ----
 
-// month は月次から来たときの「その月」（TxnFilter.month）。
-export type Period = 'this' | 'last' | 'three' | 'all' | 'month';
-export const PERIOD_LABELS: Record<Exclude<Period, 'month'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
-export const PERIODS: readonly Exclude<Period, 'month'>[] = ['this', 'last', 'three', 'all'];
+// month は月次から来たときの「その月」（TxnFilter.month）。year は経費の「直近 12 か月」から来たとき（今月を含む 12 か月）。
+export type Period = 'this' | 'last' | 'three' | 'all' | 'month' | 'year';
+export const PERIOD_LABELS: Record<Exclude<Period, 'month' | 'year'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
+export const PERIODS: readonly Exclude<Period, 'month' | 'year'>[] = ['this', 'last', 'three', 'all'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
 // YYYY-MM に n か月足す（負も可）。
@@ -342,10 +354,24 @@ export function periodRange(p: Period, today: string, month?: string): { from?: 
     return { from: `${l}-01`, to: lastDay(l) };
   }
   if (p === 'three') return { from: `${addMonth(m, -2)}-01`, to: today };
+  if (p === 'year') return { from: `${addMonth(m, -(EXPENSES_YEAR_MONTHS - 1))}-01`, to: today };
   return {};
 }
 
-export type TxnFilter = { period: Period; month?: string; accountId: string; tag: '' | Tag; category: string; q: string };
+// side・excluded・vendorKey・receipt は経費の一覧から来たときだけ（vendorLabel は表示だけで送らない）。
+export type TxnFilter = {
+  period: Period;
+  month?: string;
+  accountId: string;
+  tag: '' | Tag;
+  category: string;
+  q: string;
+  side?: Txn['side'];
+  excluded?: '0' | '1';
+  vendorKey?: string;
+  vendorLabel?: string;
+  receipt?: ReceiptStatus;
+};
 export const emptyFilter = (): TxnFilter => ({ period: 'this', accountId: '', tag: '', category: '', q: '' });
 // 「絞り込み（n）」の n（期間は数えない）。
 export const filterCount = (f: TxnFilter) => [f.accountId, f.tag, f.category, f.q.trim()].filter((x) => x !== '').length;
@@ -363,14 +389,23 @@ export function txnsUrl(f: TxnFilter, today: string, cursor: string | null, limi
   if (f.category) p.set('category', f.category);
   const q = f.q.trim();
   if (q) p.set('q', q);
+  if (f.side) p.set('side', f.side);
+  if (f.excluded) p.set('excluded', f.excluded);
+  if (f.vendorKey) p.set('vendor_key', f.vendorKey);
+  if (f.receipt) p.set('receipt', f.receipt);
   if (cursor) p.set('cursor', cursor);
   return `/api/bank_txns?${p.toString()}`;
 }
 
 // タグを付けた結果（POST /api/bank_txns/:id/tag の effective）で行を差し替える。
 export type TagResult = { effective: { tag: Tag; category: string | null; source: string } };
+// 事業でなくなったら receipt（経費の明細だけに付く）を外す。事業になったときの receipt は次の読み込みから。
 export function applyTag(items: Txn[], id: string, r: TagResult): Txn[] {
-  return items.map((t) => (t.id === id ? { ...t, tag: r.effective.tag, category: r.effective.category, tag_source: r.effective.source } : t));
+  return items.map((t) => {
+    if (t.id !== id) return t;
+    const out = { ...t, tag: r.effective.tag, category: r.effective.category, tag_source: r.effective.source };
+    return t.receipt && r.effective.tag !== 'business' ? { ...out, receipt: null } : out;
+  });
 }
 
 // 読み込んだ明細の件数と、集計から除く分を除いた支出の合計。
@@ -1441,4 +1476,130 @@ const ASSUMPTION_TEXT: Record<string, string> = { pension_prepay24_as_prepay12: 
 // 結果の上に 1 行ずつ出す文（警告と、該当する前提。同じ文はまとめる）。
 export function simNotices(r: Pick<TaxSimResponse, 'year' | 'warnings' | 'assumptions'>): string[] {
   return [...new Set([...r.warnings.map((w) => simWarningText(w, r.year)), ...r.assumptions.flatMap((a) => (ASSUMPTION_TEXT[a] ? [ASSUMPTION_TEXT[a]] : []))])];
+}
+
+// ---- 照合・経費の一覧（docs/cashflow.md §16・§16.1。src/bank/match.ts・src/expenses/summary.ts） ----
+
+export type ReceiptStatus = 'matched' | 'pending_review' | 'candidate' | 'waiting';
+export const RECEIPT_LABELS: Record<ReceiptStatus, string> = { matched: '証憑', pending_review: '確認待ち', candidate: '候補', waiting: '待ち' };
+// 明細の行の右の印。経費でなく未設定で、証憑が紐付いていれば「証憑あり・未タグ」。どれでもなければ出さない。
+export function receiptMark(t: Txn): { kind: ReceiptStatus | 'hint'; label: string } | null {
+  if (t.receipt) return { kind: t.receipt, label: RECEIPT_LABELS[t.receipt] };
+  if (t.tag === 'unset' && t.receipt_hint) return { kind: 'hint', label: '証憑あり・未タグ' };
+  return null;
+}
+
+// GET /api/bank_txns/:id/matches
+export type DocBrief = { id: string; status: string; kind: string; source: string; txn_date: string | null; amount: number | null; vendor: string | null; thumbnail_url: string | null };
+export type MatchLink = { bank_txn_id: string; document_id: string; state: string; actor: string; score: number | null; created_at: string; document: DocBrief };
+export type MatchCandidate = { document_id: string; score: number; date_diff: number; vendor_match: 0 | 1; document: DocBrief };
+export type Matches = { links: MatchLink[]; candidates: MatchCandidate[] };
+const DOC_DONE = ['approved', 'sent', 'verified'];
+// 証憑の 1 行の文「相手 · 11/3 · 1,234 円」（無い値は飛ばす）と、確認前なら「確認前」。
+export function docLine(d: DocBrief): string {
+  return [d.vendor || '相手名なし', d.txn_date ? md(d.txn_date) : null, d.amount === null ? null : `${yen(d.amount)} 円`, DOC_DONE.includes(d.status) ? null : '確認前'].filter(Boolean).join(' · ');
+}
+
+// GET /api/expenses
+export type ExpenseVendor = { vendor_key: string | null; label: string; count: number; amount: number; waiting_count: number; category: string | null };
+export type Expenses = {
+  from: string;
+  to: string;
+  total: { amount: number; count: number; waiting_count: number; waiting_amount: number };
+  months: { month: string; amount: number; count: number; waiting_count: number }[];
+  vendors: ExpenseVendor[];
+};
+// 領収書待ちで開いたときの期間（ホームの件数と同じ、今月を含む直近 12 か月）。YYYY-MM。
+export const EXPENSES_YEAR_MONTHS = 12;
+export const expensesYear = (today: string) => ({ from: addMonth(today.slice(0, 7), -(EXPENSES_YEAR_MONTHS - 1)), to: today.slice(0, 7) });
+// month が null なら直近 12 か月。
+export const expensesUrl = (month: string | null, today = '') => {
+  if (month) return `/api/expenses?month=${month}`;
+  const y = expensesYear(today);
+  return `/api/expenses?from=${y.from}&to=${y.to}`;
+};
+export const waitingText = (n: number, amount?: number) => (n > 0 ? `領収書待ち ${n} 件${amount === undefined ? '' : ` / ${yen(amount)} 円`}` : '領収書待ちはありません');
+// 「領収書待ちだけ」なら待ちのある相手だけ。
+export const expenseVendors = (vs: ExpenseVendor[], waitingOnly: boolean) => (waitingOnly ? vs.filter((v) => v.waiting_count > 0) : vs);
+// 相手の行から明細へ移るときの絞り込み（month が null なら直近 12 か月）。「その他」（vendor_key = null）は相手で絞れないので null。
+export function vendorFilter(v: ExpenseVendor, month: string | null, waitingOnly: boolean): Partial<TxnFilter> | null {
+  if (v.vendor_key === null) return null;
+  return { ...(month ? { period: 'month' as const, month } : { period: 'year' as const }), tag: 'business', side: 'expense', excluded: '0', vendorKey: v.vendor_key, vendorLabel: v.label, ...(waitingOnly ? { receipt: 'waiting' as const } : {}) };
+}
+// 「未設定だけ」に切り替えたときの絞り込み。未設定の明細には receipt が無いので、経費の絞り込み（receipt・vendor_key・excluded・side）も外す。
+export const toggleUnset = (f: TxnFilter): TxnFilter =>
+  f.tag === 'unset' ? { ...f, tag: '' } : { ...f, tag: 'unset', side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined };
+// 経費の一覧から来た絞り込みの見出し「経費 · 相手 · 待ちだけ」。経費の絞り込みでなければ null。
+export function expenseFilterText(f: TxnFilter): string | null {
+  if (!f.vendorKey && !f.receipt && !f.side && !f.excluded) return null;
+  return ['経費', f.vendorLabel || f.vendorKey || null, f.receipt ? `${f.receipt === 'waiting' ? '領収書待ち' : RECEIPT_LABELS[f.receipt]}だけ` : null].filter(Boolean).join(' · ');
+}
+// 紐付け・解除の後に読み直した照合（GET /api/bank_txns/:id/matches）で行の receipt・receipt_hint を差し替える（match.ts と同じ決め方）。
+// receipt の無い明細（経費でない・古いサーバー）は receipt_hint だけ。
+export function applyMatches(t: Txn, m: Matches): Txn {
+  const last = m.links.reduce<MatchLink | null>((a, l) => (!a || l.created_at > a.created_at ? l : a), null);
+  const receipt_hint = last && t.tag !== 'private' ? { document_id: last.document_id, status: last.document.status } : null;
+  if (!t.receipt) return { ...t, receipt_hint };
+  const receipt: ReceiptStatus = m.links.length
+    ? m.links.some((l) => DOC_DONE.includes(l.document.status))
+      ? 'matched'
+      : 'pending_review'
+    : m.candidates.length
+      ? 'candidate'
+      : 'waiting';
+  // mail_hint は待ち・候補の明細だけに付く（match.ts）。紐付いたら消す。
+  const mail_hint = receipt === 'candidate' || receipt === 'waiting' ? (t.mail_hint ?? null) : null;
+  return { ...t, receipt, receipt_hint, mail_hint };
+}
+// シートの「証憑」の段の 1 行（mail_hint）。「注文 #… の確認メールあり（11/3、example.com）→ …」。
+export function mailHintText(h: MailHint): string {
+  const meta = [h.received_on ? md(h.received_on) : null, h.from_domain].filter(Boolean).join('、');
+  return `${h.order_ref ? `注文 #${h.order_ref} の` : '注文の'}確認メールあり${meta ? `（${meta}）` : ''}→ 注文履歴から領収書を保存して共有シートで入れてください`;
+}
+// 紐付けの警告（POST /api/bank_txns/:id/matches の warnings。拒否はされない）。
+export const MATCH_WARNINGS: Record<string, string> = { amount_mismatch: '金額が明細と違います', date_out_of_window: '日付が離れています' };
+export const linkedText = (warnings: string[]) => (warnings.length ? `紐付けました（${warnings.map((w) => MATCH_WARNINGS[w] ?? w).join('・')}）。` : '');
+
+// ---- メールの取り込み（docs/cashflow.md §17。GET /api/mail/status・GET /api/mail/messages・POST /api/mail/sync、src/web/routes/mail.ts） ----
+
+export type MailAccount = { id: string; label: string; last_run_at: string | null; last_ok_at: string | null; last_error: string | null; reauth_required: boolean; attention_count: number };
+export type MailStatus = { enabled: boolean; provider: string; accounts: MailAccount[] };
+export type MailState = 'ingested' | 'body_only' | 'unsupported' | 'too_large' | 'error';
+export type MailAttachmentResult = 'ingested' | 'duplicate' | 'unsupported' | 'too_large';
+export type MailAttachment = { filename: string | null; result: MailAttachmentResult; document_id: string | null };
+export type MailMessage = {
+  id: string;
+  account_id: string;
+  received_on: string | null;
+  from_domain: string | null;
+  subject: string | null;
+  state: MailState;
+  error_reason: 'fetch_failed' | 'parse_failed' | null;
+  attempts: number;
+  attachments: MailAttachment[];
+  hint: { txn_date: string | null; amount: number | null; vendor: string | null; order_ref: string | null } | null;
+};
+export type MailPage = { items: MailMessage[]; next_cursor: string | null };
+
+// 要対応のメール（src/mail/status.ts の ATTENTION_SQL）。1 回に読む上限は API の最大（100）。
+export const MAIL_ATTENTION_URL = '/api/mail/messages?state=attention&limit=100';
+export const MAIL_STATE_LABELS: Record<MailState, string> = { ingested: '取り込み済み', body_only: '添付なし', unsupported: '未対応の形式', too_large: '大きすぎる', error: '失敗' };
+export const MAIL_ERROR_LABELS: Record<NonNullable<MailMessage['error_reason']>, string> = { fetch_failed: '取得に失敗', parse_failed: '解析に失敗' };
+export const MAIL_ATTACHMENT_LABELS: Record<MailAttachmentResult, string> = { ingested: '取り込み済み', duplicate: '取り込み済み（重複）', unsupported: '未対応の形式', too_large: '大きすぎる' };
+// 要対応の件数の合計。取り込みが無効（enabled = false）か、読めなければ 0（何も出さない）。
+export const mailAttention = (s: MailStatus | null | undefined) => (s?.enabled ? s.accounts.reduce((n, a) => n + a.attention_count, 0) : 0);
+export const mailAttentionText = (n: number) => `メールの要対応 ${n} 件`;
+// 行の状態の文。error は理由と試した回数（「取得に失敗（3 回）」）。
+export function mailStateText(m: MailMessage): string {
+  if (m.state !== 'error') return MAIL_STATE_LABELS[m.state];
+  return `${m.error_reason ? MAIL_ERROR_LABELS[m.error_reason] : MAIL_STATE_LABELS.error}（${m.attempts} 回）`;
+}
+// 添付の 1 行「invoice.pdf: 未対応の形式」。
+export const mailAttachmentText = (a: MailAttachment) => `${a.filename || '名前なし'}: ${MAIL_ATTACHMENT_LABELS[a.result] ?? a.result}`;
+// POST /api/mail/sync の結果の文。どのアカウントも積まなければ「実行中か、10 分以内に実行済み」。409 は取り込みが無効。
+export function mailSyncText(status: number, body: unknown): string {
+  if (status === 409) return 'メールの取り込みは無効です（config.toml の [mail] enabled）。';
+  if (status !== 200) return failText(status, body);
+  const accounts = (body as { accounts?: { created?: boolean }[] } | null)?.accounts ?? [];
+  return accounts.some((a) => a.created === true) ? '取り込みを始めました。しばらくしてから読み直してください。' : '実行中か、10 分以内に実行済みです。';
 }

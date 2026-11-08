@@ -9,8 +9,10 @@
 //   範囲は「今回取った明細の最小の日付 − 2 × transferWindowDays 〜 今日」。取った明細が 0 件なら呼ばない。
 //   作った組があれば数を監査ログ（transfers.detected）に残す（0 件なら書かない）。検出が失敗しても同期の結果は変えず、
 //   ログと監査ログ（transfers.detect_failed。エラーの文だけで、摘要は入れない）に残す。
+// - 振替の検出の後に明細 ⇔ 証憑の照合を動かす（src/bank/match.ts の runMatchingSafe。失敗しても同期の結果は変えない）。
 import { appendAudit } from '../../audit.ts';
 import { syncBank, type SyncBankProvider, type SyncBankResult } from '../../bank/sync.ts';
+import { runMatchingSafe, type MatchWindows } from '../../bank/match.ts';
 import { minTxnDateSeenAt, type AccountProvider } from '../../bank/repo.ts';
 import { detectTransfers } from '../../bank/transfers.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
@@ -28,6 +30,8 @@ export type SyncBankDeps = {
   backfillFrom: string;
   // [bank] transfer_window_days。
   transferWindowDays: number;
+  // [bank] match_date_window_days・match_card_date_window_days（省略時は既定値）。
+  matchWindows?: MatchWindows;
 };
 
 export type DetectAfterSyncResult = { from: string; to: string; created: number } | { error: string };
@@ -74,6 +78,7 @@ export function createSyncBankHandler(getDeps: () => SyncBankDeps): Handler {
       const deps = getDeps();
       const r = await syncBank(db, { provider: deps.provider, providerKind: deps.providerKind, backfillFrom: deps.backfillFrom, now });
       detectTransfersAfterSync(db, r, deps.transferWindowDays, now);
+      runMatchingSafe(db, now, { windows: deps.matchWindows });
       if (r.errors.length) throw new Error(`sync_bank の一部が失敗: ${r.errors.map((x) => `${x.account_id ?? 'balances'}: ${x.error}`).join(' / ')}`);
     } catch (e) {
       if (e instanceof ProviderError && e.kind === 'auth_invalid_grant') {

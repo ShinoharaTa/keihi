@@ -12,7 +12,11 @@ const TABLES = ['documents', 'reviews', 'deals', 'audit_log', 'extractions', 'cl
   // 0006_cashflow（docs/mvp-plan-v3.md T301）
   'scheduled_items', 'recurrence_candidates',
   // 0010_large_expenses（docs/cashflow.md §15）
-  'large_expense_decisions'];
+  'large_expense_decisions',
+  // 0011_matches（docs/cashflow.md §16）
+  'txn_matches',
+  // 0012_mail（docs/cashflow.md §17）
+  'mail_messages', 'mail_attachments'];
 // 表名の前の `main.` と、" ` ' [ の引用にも当たる。
 const DELETE_RE = new RegExp(`DELETE\\s+FROM\\s+(?:main\\.)?["\`'\\[]?(${TABLES.join('|')})\\b`, 'i');
 

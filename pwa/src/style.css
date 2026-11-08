@@ -1521,6 +1521,71 @@ button:disabled {
   border: 1px dashed var(--m-sub);
   color: var(--m-fg2);
 }
+.m-rc {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.m-rc-matched {
+  color: var(--m-ins);
+  background: var(--m-ins-soft);
+}
+.m-rc-pending_review {
+  color: var(--m-tax);
+  background: var(--m-tax-soft);
+}
+.m-rc-candidate {
+  color: var(--m-accent);
+  background: var(--m-accent-soft);
+}
+.m-rc-waiting {
+  color: var(--m-out-text);
+  background: var(--m-out-soft);
+}
+.m-rc-hint {
+  color: var(--m-car);
+  background: var(--m-car-soft);
+}
+.m-doc {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--m-line3);
+  border-radius: 10px;
+  background: var(--m-card);
+  text-align: left;
+  font-size: 14px;
+}
+.m-doc-cand {
+  border-style: dashed;
+  color: var(--m-accent);
+}
+.m-doc-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--m-fg);
+  overflow-wrap: anywhere;
+}
+.m-doc-thumb {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--m-chip);
+  font-size: 11px;
+  color: var(--m-sub);
+}
 .m-more {
   padding: 12px 16px 20px;
   display: flex;

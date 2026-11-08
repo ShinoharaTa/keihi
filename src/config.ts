@@ -46,11 +46,21 @@ export const DEFAULT_BACKFILL_FROM = '2025-01-01';
 export const DEFAULT_DEDUP_DATE_WINDOW_DAYS = 0;
 export const DEFAULT_TRANSFER_WINDOW_DAYS = 3;
 export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
+// カードの口座の照合の幅（Amazon は注文日と請求日がずれる。docs/cashflow.md §16）。
+export const DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS = 10;
+export const MAX_MATCH_CARD_DATE_WINDOW_DAYS = 31;
 // [cashflow]（docs/mvp-plan-v3.md T303、V11 の初期案）。予定外の支出の目安は直近 6 か月の中央値、残す額は今後 3 か月分の予定支出。
 export const DEFAULT_UNPLANNED_LOOKBACK_MONTHS = 6;
 export const DEFAULT_RESERVE_MONTHS = 3;
 export const MAX_UNPLANNED_LOOKBACK_MONTHS = 24;
 export const MAX_RESERVE_MONTHS = 12;
+// [mail]（docs/cashflow.md §17、src/mail/）。
+export const DEFAULT_MAIL_LABEL = 'keihi';
+export const DEFAULT_MAIL_MAX_MESSAGES_PER_RUN = 100;
+export const MAX_MAIL_MAX_MESSAGES_PER_RUN = 500;
+export const MAX_MAIL_LABEL_LENGTH = 100;
+export const MAX_MAIL_QUERY_LENGTH = 500;
+export const MAIL_ACCOUNT_ID_RE = /^[A-Za-z0-9-]{1,32}$/;
 
 export type DeadlineMode = 'early' | 'cycle';
 export type CountFrom = 'receipt_day' | 'next_day';
@@ -64,11 +74,17 @@ const LEVELS = ['low', 'medium', 'high'] as const;
 export type RemoteVerifyMode = 'sha256' | 'download_only';
 // 起算日の規則。next_year_0316 = 受領日の年分の翌年 3/16（国税庁: 保存期間は確定申告期限の翌日から起算。docs/legal.md §1.5）。
 export type RetentionStart = 'next_year_0316';
+// "imap" は予約（実装していない。指定したら起動時エラー）。
+export type MailProvider = 'gmail_api';
+// since: 取り始める日。null なら初回実行日の 30 日前（src/mail/fetch.ts）。
+export type MailAccount = { id: string; label: string; query: string; since: string | null };
 
 export type Secrets = {
   geminiApiKey: string | null;
   freeeClientId: string | null;
   freeeClientSecret: string | null;
+  gmailClientId: string | null;
+  gmailClientSecret: string | null;
 };
 
 export type Config = {
@@ -109,11 +125,13 @@ export type Config = {
   reconcile: { verifiedLookbackDays: number; maxListPages: number };
   // 明細（R-A）。backfillFrom: 過去の明細を取り始める日（YYYY-MM-DD）。
   // dedupDateWindowDays: API と CSV の重複を照合する日付の幅。transferWindowDays: 振替の入出金の日付差の上限。
-  // matchDateWindowDays: 領収書の日付から明細の日付までの幅。
-  bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number };
+  // matchDateWindowDays: 領収書の日付から明細の日付までの幅。matchCardDateWindowDays: 同じくカードの口座の幅。
+  bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number; matchCardDateWindowDays: number };
   // 資金繰り表（src/cashflow/forecast.ts）。unplannedLookbackMonths: 予定外の収支の目安を出すのに見る月数。
   // reserveMonths: 「月末に残す額」に積む予定支出の月数。includeUnplannedIncome: 予定外の収入の目安を残高に足すか（既定 false）。
   cashflow: { unplannedLookbackMonths: number; reserveMonths: number; includeUnplannedIncome: boolean };
+  // メールからの証憑の取り込み。enabled = false なら daily も手動も積まない。accounts は [[mail.accounts]]（トークンはアカウントごと）。
+  mail: { enabled: boolean; provider: MailProvider; maxMessagesPerRun: number; extractHints: boolean; accounts: MailAccount[] };
   secrets: Secrets;
 };
 
@@ -157,9 +175,11 @@ const KNOWN: Record<string, string[]> = {
   retention: ['years', 'extra_years', 'start'],
   worker: ['linger_ms', 'reauth_wait_days'],
   reconcile: ['verified_lookback_days', 'max_list_pages'],
-  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days'],
+  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days', 'match_card_date_window_days'],
   cashflow: ['unplanned_lookback_months', 'reserve_months', 'include_unplanned_income'],
+  mail: ['enabled', 'provider', 'max_messages_per_run', 'extract_hints', 'accounts'],
 };
+const MAIL_ACCOUNT_KEYS = ['id', 'label', 'query', 'since'];
 
 function readConfigToml(file: string): Table {
   let src: string;
@@ -231,6 +251,12 @@ function optNonNegativeInt(t: Table, sec: string, key: string): number | null {
   return v;
 }
 
+function optNonNegativeIntUpTo(t: Table, sec: string, key: string, max: number): number | null {
+  const v = optNonNegativeInt(t, sec, key);
+  if (v !== null && v > max) throw new ConfigError(`config.toml の ${sec}.${key} は 0〜${max} で指定する`);
+  return v;
+}
+
 function optStringArray(t: Table, sec: string, key: string): string[] | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
@@ -257,12 +283,44 @@ function optDate(t: Table, sec: string, key: string): string | null {
   return v;
 }
 
+// [mail] と [[mail.accounts]]。
+function readMail(t: Table): Config['mail'] {
+  const provider = optString(t, 'mail', 'provider') ?? 'gmail_api';
+  if (provider === 'imap') throw new ConfigError('config.toml の mail.provider = "imap" はまだ実装していない（mail_provider_not_implemented）。"gmail_api" を使う');
+  if (provider !== 'gmail_api') throw new ConfigError('config.toml の mail.provider は "gmail_api"');
+  const raw = section(t, 'mail').accounts;
+  if (raw !== undefined && (!Array.isArray(raw) || !raw.every((a) => typeof a === 'object' && a !== null && !Array.isArray(a)))) {
+    throw new ConfigError('config.toml の mail.accounts は [[mail.accounts]] の表の配列で書く');
+  }
+  const accounts: MailAccount[] = [];
+  for (const [i, a] of ((raw ?? []) as Table[]).entries()) {
+    const where = `mail.accounts[${i}]`;
+    for (const k of Object.keys(a)) if (!MAIL_ACCOUNT_KEYS.includes(k)) throw new ConfigError(`config.toml の ${where}.${k} は知らないキー`);
+    const sub: Table = { [where]: a };
+    const id = optString(sub, where, 'id');
+    if (id === null || !MAIL_ACCOUNT_ID_RE.test(id)) throw new ConfigError(`config.toml の ${where}.id は英数字と - の 1〜32 字で指定する`);
+    if (accounts.some((x) => x.id === id)) throw new ConfigError(`config.toml の mail.accounts の id "${id}" が重複している`);
+    const label = optString(sub, where, 'label') ?? DEFAULT_MAIL_LABEL;
+    if (label.length > MAX_MAIL_LABEL_LENGTH) throw new ConfigError(`config.toml の ${where}.label は 1〜${MAX_MAIL_LABEL_LENGTH} 字で指定する`);
+    const query = a.query ?? '';
+    if (typeof query !== 'string' || query.length > MAX_MAIL_QUERY_LENGTH) throw new ConfigError(`config.toml の ${where}.query は 0〜${MAX_MAIL_QUERY_LENGTH} 字の文字列で指定する`);
+    accounts.push({ id, label, query, since: optDate(sub, where, 'since') });
+  }
+  return {
+    enabled: optBool(t, 'mail', 'enabled') ?? false,
+    provider,
+    maxMessagesPerRun: optIntUpTo(t, 'mail', 'max_messages_per_run', MAX_MAIL_MAX_MESSAGES_PER_RUN) ?? DEFAULT_MAIL_MAX_MESSAGES_PER_RUN,
+    extractHints: optBool(t, 'mail', 'extract_hints') ?? true,
+    accounts,
+  };
+}
+
 function readSecrets(file: string): Secrets {
   let st;
   try {
     st = statSync(file);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { geminiApiKey: null, freeeClientId: null, freeeClientSecret: null };
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { geminiApiKey: null, freeeClientId: null, freeeClientSecret: null, gmailClientId: null, gmailClientSecret: null };
     throw e;
   }
   if (!st.isFile()) throw new ConfigError(`${file} が通常のファイルではない`);
@@ -273,6 +331,8 @@ function readSecrets(file: string): Secrets {
     geminiApiKey: env.GEMINI_API_KEY || null,
     freeeClientId: env.FREEE_CLIENT_ID || null,
     freeeClientSecret: env.FREEE_CLIENT_SECRET || null,
+    gmailClientId: env.GMAIL_CLIENT_ID || null,
+    gmailClientSecret: env.GMAIL_CLIENT_SECRET || null,
   };
 }
 
@@ -353,12 +413,14 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       dedupDateWindowDays: optNonNegativeInt(t, 'bank', 'dedup_date_window_days') ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
       transferWindowDays: optNonNegativeInt(t, 'bank', 'transfer_window_days') ?? DEFAULT_TRANSFER_WINDOW_DAYS,
       matchDateWindowDays: optNonNegativeInt(t, 'bank', 'match_date_window_days') ?? DEFAULT_MATCH_DATE_WINDOW_DAYS,
+      matchCardDateWindowDays: optNonNegativeIntUpTo(t, 'bank', 'match_card_date_window_days', MAX_MATCH_CARD_DATE_WINDOW_DAYS) ?? DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS,
     },
     cashflow: {
       unplannedLookbackMonths: optIntUpTo(t, 'cashflow', 'unplanned_lookback_months', MAX_UNPLANNED_LOOKBACK_MONTHS) ?? DEFAULT_UNPLANNED_LOOKBACK_MONTHS,
       reserveMonths: optIntUpTo(t, 'cashflow', 'reserve_months', MAX_RESERVE_MONTHS) ?? DEFAULT_RESERVE_MONTHS,
       includeUnplannedIncome: optBool(t, 'cashflow', 'include_unplanned_income') ?? false,
     },
+    mail: readMail(t),
     secrets: readSecrets(path.join(configDir, 'secrets.env')),
   };
 }
@@ -386,6 +448,14 @@ export function requireFreee(cfg: Config, target: FreeeTarget): { companyId: num
   return { companyId, clientId: cfg.secrets.freeeClientId, clientSecret: cfg.secrets.freeeClientSecret };
 }
 
+// Gmail を呼ぶ処理の起動時に呼ぶ（client_id / secret は全アカウントで 1 組）。
+export function requireGmail(cfg: Config): { clientId: string; clientSecret: string } {
+  const secretsPath = path.join(cfg.configDir, 'secrets.env');
+  if (!cfg.secrets.gmailClientId) throw new ConfigError(`${secretsPath} に GMAIL_CLIENT_ID が無い`);
+  if (!cfg.secrets.gmailClientSecret) throw new ConfigError(`${secretsPath} に GMAIL_CLIENT_SECRET が無い`);
+  return { clientId: cfg.secrets.gmailClientId, clientSecret: cfg.secrets.gmailClientSecret };
+}
+
 const mask = (v: string | null) => (v === null ? null : '***');
 
 // 設定値のダンプ（ログ・CLI 表示用）。シークレットは *** にする。トークンは設定に持たないのでパスだけ出す。
@@ -396,6 +466,8 @@ export function dumpConfig(cfg: Config): string {
       geminiApiKey: mask(cfg.secrets.geminiApiKey),
       freeeClientId: mask(cfg.secrets.freeeClientId),
       freeeClientSecret: mask(cfg.secrets.freeeClientSecret),
+      gmailClientId: mask(cfg.secrets.gmailClientId),
+      gmailClientSecret: mask(cfg.secrets.gmailClientSecret),
     },
   };
   return JSON.stringify(safe, null, 2);

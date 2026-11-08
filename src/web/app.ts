@@ -9,8 +9,10 @@ import { attentionRoutes } from './routes/attention.ts';
 import { bankRoutes } from './routes/bank.ts';
 import { cashflowRoutes } from './routes/cashflow.ts';
 import { documentsRoutes } from './routes/documents.ts';
+import { expensesRoutes } from './routes/expenses.ts';
 import { exportRoutes } from './routes/export.ts';
 import { ingestRoutes } from './routes/ingest.ts';
+import { mailRoutes } from './routes/mail.ts';
 import { reviewRoutes } from './routes/review.ts';
 import { staticRoutes } from './routes/static.ts';
 import { statusRoutes } from './routes/status.ts';
@@ -21,7 +23,8 @@ export type AppDeps = {
   db: Db;
   objectsDir: string;
   // provider は口座（money_accounts.provider）に使う。省略時は freee。bank は CSV の取り込み（重複排除・振替の日付幅）に使う。省略時は既定値。
-  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention' | 'cashflow'> & Partial<Pick<Config, 'provider' | 'bank'>>;
+  // mail はメールの取り込み（省略時は enabled = false・アカウント 0 件）。
+  config: Pick<Config, 'ingest' | 'calendar' | 'deadline' | 'retention' | 'cashflow'> & Partial<Pick<Config, 'provider' | 'bank' | 'mail'>>;
   auth: MiddlewareHandler;
   triggerWorker: () => void;
   now?: () => Date;
@@ -40,8 +43,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', cashflowRoutes(deps));
   app.route('/api', exportRoutes(deps));
   app.route('/api', bankRoutes(deps));
+  app.route('/api', expensesRoutes(deps));
   app.route('/api', tagRoutes(deps));
   app.route('/api', taxRoutes(deps));
+  app.route('/api', mailRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
   return app;
 }

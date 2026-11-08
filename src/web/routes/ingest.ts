@@ -7,16 +7,12 @@
 //   scan の PDF は画素を判定できないので R2・R3 を満たさない扱い（force が無ければ 422）。
 // - 受領日はクライアントが送る（撮影日 / 受領日）。無ければ Asia/Tokyo の受信日（R5）。未来日は 422。
 // - documents 行 + audit（document.received）+ jobs（upload_receipt、extract。no_ai でも extract は積む）を 1 トランザクションで記録し、
-//   コミット後に worker を起動する。
+//   コミット後に worker を起動する。本体は src/ingest/document.ts の ingestDocument()（メールの添付の取り込みと共用）。
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { appendAudit } from '../../audit.ts';
-import { deadline, todayInTokyo } from '../../calendar/businessDays.ts';
-import { tx } from '../../db/index.ts';
-import { ulid } from '../../db/ids.ts';
-import { checkScanImage, SIZE_PRESETS, sniffMime } from '../../ingest/validate.ts';
-import { enqueue } from '../../jobs/queue.ts';
-import { putObject, sha256Hex } from '../../storage/objects.ts';
+import { todayInTokyo } from '../../calendar/businessDays.ts';
+import { ingestDocument } from '../../ingest/document.ts';
+import { SIZE_PRESETS } from '../../ingest/validate.ts';
 import type { AppDeps } from '../app.ts';
 
 // multipart の境界やほかのフィールドの分の余裕。ファイル本体の上限は別に確かめる。
@@ -98,103 +94,23 @@ export function ingestRoutes(deps: AppDeps): Hono {
       }
 
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const mime = sniffMime(bytes);
-      if (!mime) return c.json({ reason: 'unsupported_media_type' }, 415);
-
-      const sha256 = sha256Hex(bytes);
-      const dup = deps.db.prepare('SELECT id FROM documents WHERE sha256 = ?').get(sha256) as { id: string } | undefined;
-      if (dup) return c.json({ reason: 'duplicate', id: dup.id, sha256 }, 409);
-
-      // R2・R3（scan のみ）。
-      let width: number | null = null;
-      let height: number | null = null;
-      let resolutionOk: boolean | null = null;
-      let colorOk: boolean | null = null;
-      const warnings: string[] = [];
-      if (kind === 'scan') {
-        if (mime === 'application/pdf') {
-          if (!force) return bad('scan_requires_image');
-          resolutionOk = false;
-          colorOk = false;
-          warnings.push('scan_requires_image');
-        } else {
-          let chk;
-          try {
-            chk = await checkScanImage(bytes, sizePreset!);
-          } catch {
-            return bad('invalid_image');
-          }
-          width = chk.width;
-          height = chk.height;
-          resolutionOk = chk.resolutionOk;
-          colorOk = chk.colorOk;
-          if (!resolutionOk && !force) return bad('resolution_too_low', { width, height, required: chk.required });
-          if (!colorOk && !force) return bad('grayscale_or_low_bit_depth');
-          if (!resolutionOk) warnings.push('resolution_too_low');
-          if (!colorOk) warnings.push('grayscale_or_low_bit_depth');
-        }
-      }
-      const paperRequired = resolutionOk === false || colorOk === false;
-      if (paperRequired) warnings.push('paper_required');
-
-      const dl = deadline(receivedOn, deps.config.calendar.deadlineMode, {
-        yearEndHolidays: deps.config.calendar.yearEndHolidays,
-        countFrom: deps.config.deadline.countFrom,
-      });
-      warnings.push(...dl.warnings);
-
-      const stored = await putObject(deps.objectsDir, bytes);
-      const at = now();
-      const iso = at.toISOString();
-      const id = ulid(at.getTime());
-      const b = (v: boolean | null) => (v === null ? null : v ? 1 : 0);
-      try {
-        tx(deps.db, () => {
-          deps.db
-            .prepare(
-              `INSERT INTO documents (id, sha256, bytes, mime, orig_name, source, kind, size_preset, width_px, height_px,
-                resolution_ok, color_ok, paper_required, received_at, received_on, received_on_source, deadline_on, deadline_mode,
-                storage_key, no_ai, status, paper_status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?)`,
-            )
-            .run(
-              id, sha256, bytes.length, mime, file.name || null, source, kind, sizePreset, width, height,
-              b(resolutionOk), b(colorOk), paperRequired ? 1 : 0, iso, receivedOn, receivedOnSource, dl.deadlineOn, dl.mode,
-              stored.key, noAi ? 1 : 0, paperRequired ? 'keep_required' : 'unknown', iso,
-            );
-          appendAudit(
-            deps.db,
-            {
-              actor: 'user',
-              action: 'document.received',
-              entity: 'document',
-              entityId: id,
-              payload: {
-                sha256, bytes: bytes.length, mime, kind, size_preset: sizePreset, source,
-                received_on: receivedOn, received_on_source: receivedOnSource, deadline_on: dl.deadlineOn, deadline_mode: dl.mode,
-                resolution_ok: resolutionOk, color_ok: colorOk, paper_required: paperRequired, forced: force, no_ai: noAi,
-              },
-            },
-            at,
-          );
-          enqueue(deps.db, 'upload_receipt', id, { now: at });
-          // no_ai でも積む（抽出ハンドラが Gemini を呼ばずに needs_review にする）。
-          enqueue(deps.db, 'extract', id, { now: at });
-        });
-      } catch (e) {
-        if (e instanceof Error && /UNIQUE constraint failed: documents\.sha256/.test(e.message)) {
-          const d = deps.db.prepare('SELECT id FROM documents WHERE sha256 = ?').get(sha256) as { id: string };
-          return c.json({ reason: 'duplicate', id: d.id, sha256 }, 409);
-        }
-        throw e;
-      }
+      const res = await ingestDocument(
+        deps,
+        {
+          bytes, origName: file.name || null, kind, sizePreset, receivedOn, receivedOnSource,
+          noAi, force, source, actor: 'user',
+        },
+        now,
+      );
+      if (!res.ok) return c.json(res.body, res.status);
+      const { id, sha256, deadline_on, warnings } = res;
       // 起動に失敗しても記録は済んでいる（keihi-worker.timer が 2 分ごとに拾う）。
       try {
         deps.triggerWorker();
       } catch {
         warnings.push('worker_trigger_failed');
       }
-      return c.json({ id, sha256, deadline_on: dl.deadlineOn, warnings }, 201);
+      return c.json({ id, sha256, deadline_on, warnings }, 201);
     },
   );
   return r;

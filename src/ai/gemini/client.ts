@@ -29,7 +29,8 @@ export type GenerateInput = {
   model: string;
   systemInstruction: string;
   prompt: string;
-  inline: { mimeType: string; data: Uint8Array };
+  // 画像・PDF（領収書）。テキストだけの呼び出し（メールの手がかり。src/mail/hints.ts）では省き、mediaResolution も送らない。
+  inline?: { mimeType: string; data: Uint8Array };
   responseJsonSchema: unknown;
   thinkingLevel: ThinkingLevel;
   mediaResolution: MediaResolution;
@@ -97,7 +98,7 @@ export function buildGenerateContentBody(input: GenerateInput): Record<string, u
       {
         role: 'user',
         parts: [
-          { inlineData: { mimeType: input.inline.mimeType, data: Buffer.from(input.inline.data).toString('base64') } },
+          ...(input.inline ? [{ inlineData: { mimeType: input.inline.mimeType, data: Buffer.from(input.inline.data).toString('base64') } }] : []),
           { text: input.prompt },
         ],
       },
@@ -106,7 +107,7 @@ export function buildGenerateContentBody(input: GenerateInput): Record<string, u
       responseMimeType: 'application/json',
       responseJsonSchema: input.responseJsonSchema,
       thinkingConfig: { thinkingLevel: input.thinkingLevel },
-      mediaResolution: MEDIA_RESOLUTION[input.mediaResolution],
+      ...(input.inline ? { mediaResolution: MEDIA_RESOLUTION[input.mediaResolution] } : {}),
       maxOutputTokens: input.maxOutputTokens,
     },
   };

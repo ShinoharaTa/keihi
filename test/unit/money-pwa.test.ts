@@ -9,6 +9,7 @@ import { areaPoints, gapLineChart, lineChart, niceTicks, pairBars, pct, spans, s
 import {
   accountPatch,
   addMonth,
+  applyMatches,
   applyRuleLocally,
   applyTag,
   balanceSeries,
@@ -39,10 +40,15 @@ import {
   dayLabel,
   dayOfMonth,
   daysBetween,
+  docLine,
   draftBody,
   draftOf,
   draftError,
   emptyDraft,
+  expenseFilterText,
+  expensesUrl,
+  expensesYear,
+  expenseVendors,
   failText,
   filterCount,
   flatIncome,
@@ -53,6 +59,14 @@ import {
   incomePct,
   itemInfoMap,
   lastOccurrence,
+  linkedText,
+  MAIL_ATTENTION_URL,
+  mailAttachmentText,
+  mailAttention,
+  mailAttentionText,
+  mailHintText,
+  mailStateText,
+  mailSyncText,
   ledgerRows,
   man,
   markSize,
@@ -73,6 +87,7 @@ import {
   parseAmount,
   parseYen,
   peakMonths,
+  receiptMark,
   periodRange,
   periodText,
   RECURRENCES,
@@ -92,12 +107,15 @@ import {
   taxWarningText,
   taxYearBodies,
   taxYearDrafts,
+  toggleUnset,
   tokyoDate,
   txnIncome,
   txnSummary,
   txnsUrl,
   unsetPosition,
+  vendorFilter,
   verdict,
+  waitingText,
   warningText,
   yearGroups,
   yearSummary,
@@ -106,8 +124,14 @@ import {
   type BankStatus,
   type Candidate,
   type Categories,
+  type DocBrief,
+  type Expenses,
+  type ExpenseVendor,
   type Forecast,
+  type Matches,
   type ForecastMonth,
+  type MailMessage,
+  type MailStatus,
   type MonthlySummary,
   type Overview,
   type ScheduledItem,
@@ -913,6 +937,87 @@ describe('税の試算の純関数', () => {
   });
 });
 
+const doc = (over: Partial<DocBrief> = {}): DocBrief => ({ id: 'D1', status: 'approved', kind: 'receipt', source: 'pwa', txn_date: '2026-11-03', amount: 1234, vendor: 'サンプル商店', thumbnail_url: '/api/documents/D1/thumbnail', ...over });
+const link = (d: DocBrief, created_at = '2026-11-06T01:00:00Z') => ({ bank_txn_id: 'T1', document_id: d.id, state: 'confirmed', actor: 'user', score: null, created_at, document: d });
+const vendor = (over: Partial<ExpenseVendor> = {}): ExpenseVendor => ({ vendor_key: 'サンプルショウテン', label: 'サンプル商店', count: 3, amount: 3702, waiting_count: 1, category: 'daily', ...over });
+const expenses: Expenses = {
+  from: '2026-11',
+  to: '2026-11',
+  total: { amount: 15702, count: 5, waiting_count: 2, waiting_amount: 5234 },
+  months: [{ month: '2026-11', amount: 15702, count: 5, waiting_count: 2 }],
+  vendors: [vendor({ vendor_key: 'カ）エービーシー', label: 'カ）エービーシー', count: 1, amount: 10000, waiting_count: 0, category: null }), vendor(), vendor({ vendor_key: null, label: 'その他', count: 1, amount: 2000, waiting_count: 1, category: null })],
+};
+
+describe('照合・経費の一覧の純関数', () => {
+  test('行の印: receipt の 4 通り、未設定で証憑ありは「証憑あり・未タグ」、どれでもなければ出さない', () => {
+    assert.deepEqual(
+      (['matched', 'pending_review', 'candidate', 'waiting'] as const).map((r) => receiptMark(txn({ receipt: r }))?.label),
+      ['証憑', '確認待ち', '候補', '待ち'],
+    );
+    assert.deepEqual(receiptMark(txn({ tag: 'unset', receipt: null, receipt_hint: { document_id: 'D1', status: 'approved' } })), { kind: 'hint', label: '証憑あり・未タグ' });
+    assert.equal(receiptMark(txn({ tag: 'private', receipt: null, receipt_hint: { document_id: 'D1', status: 'approved' } })), null);
+    assert.equal(receiptMark(txn()), null, '古いサーバー（receipt が無い）');
+  });
+  test('明細の URL に経費の絞り込み（side・excluded・vendor_key・receipt）を足す', () => {
+    const u = new URL(txnsUrl({ period: 'month', month: '2026-10', accountId: '', tag: 'business', category: '', q: '', side: 'expense', excluded: '0', vendorKey: 'カ）エービーシー', vendorLabel: '表示だけ', receipt: 'waiting' }, TODAY, null), 'http://x');
+    assert.deepEqual(Object.fromEntries(u.searchParams), { limit: '50', from: '2026-10-01', to: '2026-10-31', tag: 'business', side: 'expense', excluded: '0', vendor_key: 'カ）エービーシー', receipt: 'waiting' });
+    assert.equal(txnsUrl({ period: 'all', accountId: '', tag: '', category: '', q: '' }, TODAY, null), '/api/bank_txns?limit=50', '無ければ送らない');
+  });
+  test('相手の行 → 明細の絞り込み（待ちだけなら receipt も。「その他」は null）・見出し', () => {
+    assert.deepEqual(vendorFilter(vendor(), '2026-10', false), { period: 'month', month: '2026-10', tag: 'business', side: 'expense', excluded: '0', vendorKey: 'サンプルショウテン', vendorLabel: 'サンプル商店' });
+    const w = vendorFilter(vendor(), '2026-10', true)!;
+    assert.equal(w.receipt, 'waiting');
+    assert.equal(vendorFilter(vendor({ vendor_key: null }), '2026-10', true), null);
+    assert.equal(expenseFilterText({ period: 'month', accountId: '', tag: 'business', category: '', q: '', ...w }), '経費 · サンプル商店 · 領収書待ちだけ');
+    assert.equal(expenseFilterText({ period: 'all', accountId: '', tag: 'business', category: '', q: '', side: 'expense', excluded: '0', receipt: 'waiting' }), '経費 · 領収書待ちだけ');
+    assert.equal(expenseFilterText({ period: 'all', accountId: '', tag: 'business', category: '', q: '' }), null);
+  });
+  test('待ちの文・待ちだけの相手・URL', () => {
+    assert.equal(waitingText(3, 5234), '領収書待ち 3 件 / 5,234 円');
+    assert.equal(waitingText(3), '領収書待ち 3 件');
+    assert.equal(waitingText(0, 0), '領収書待ちはありません');
+    assert.deepEqual(expenseVendors(expenses.vendors, true).map((v) => v.label), ['サンプル商店', 'その他']);
+    assert.equal(expenseVendors(expenses.vendors, false).length, 3);
+    assert.equal(expensesUrl('2026-10'), '/api/expenses?month=2026-10');
+  });
+  test('領収書待ちで開く期間: 今月を含む直近 12 か月（年をまたぐ）。明細へは period=year', () => {
+    assert.deepEqual(expensesYear(TODAY), { from: '2025-12', to: '2026-11' });
+    assert.deepEqual(expensesYear('2026-01-15'), { from: '2025-02', to: '2026-01' });
+    assert.equal(expensesUrl(null, TODAY), '/api/expenses?from=2025-12&to=2026-11');
+    assert.deepEqual(periodRange('year', TODAY), { from: '2025-12-01', to: TODAY });
+    const f = vendorFilter(vendor(), null, true)!;
+    assert.deepEqual([f.period, f.month, f.receipt], ['year', undefined, 'waiting']);
+    assert.equal(new URL(txnsUrl({ period: 'all', accountId: '', tag: '', category: '', q: '', ...f }, TODAY, null), 'http://x').searchParams.get('from'), '2025-12-01');
+  });
+  test('「未設定だけ」に切り替えると経費の絞り込み（receipt・vendor_key・excluded・side）を外す。戻すとタグだけ外す', () => {
+    const f = { period: 'month' as const, month: '2026-10', accountId: 'A1', tag: 'business' as const, category: '', q: 'x', side: 'expense' as const, excluded: '0' as const, vendorKey: 'K', vendorLabel: 'L', receipt: 'waiting' as const };
+    const on = toggleUnset(f);
+    assert.equal(new URL(txnsUrl(on, TODAY, null), 'http://x').search, '?limit=50&from=2026-10-01&to=2026-10-31&account_id=A1&tag=unset&q=x');
+    assert.equal(expenseFilterText(on), null);
+    assert.equal(toggleUnset(on).tag, '');
+  });
+  test('紐付け/解除の後の行: 確認済みの証憑で matched、確認前だけなら pending_review、無くなれば candidate / waiting', () => {
+    const t = txn({ receipt: 'candidate', receipt_hint: null });
+    const done: Matches = { links: [link(doc({ id: 'D0', status: 'needs_review' }), '2026-11-05T00:00:00Z'), link(doc())], candidates: [] };
+    assert.deepEqual([applyMatches(t, done).receipt, applyMatches(t, done).receipt_hint], ['matched', { document_id: 'D1', status: 'approved' }]);
+    assert.equal(applyMatches(t, { links: [link(doc({ status: 'received' }))], candidates: [] }).receipt, 'pending_review');
+    assert.equal(applyMatches(t, { links: [], candidates: [{ document_id: 'D2', score: 90, date_diff: 1, vendor_match: 1, document: doc({ id: 'D2' }) }] }).receipt, 'candidate');
+    const empty = applyMatches(t, { links: [], candidates: [] });
+    assert.deepEqual([empty.receipt, empty.receipt_hint], ['waiting', null]);
+    const unset = applyMatches(txn({ tag: 'unset', receipt: null }), done);
+    assert.deepEqual([unset.receipt, unset.receipt_hint?.document_id], [null, 'D1'], '経費でない明細は receipt を作らない');
+  });
+  test('事業でなくしたら receipt を外す。証憑の 1 行・紐付けの警告', () => {
+    const out = applyTag([txn({ receipt: 'waiting' })], 'T1', { effective: { tag: 'private', category: null, source: 'override' } });
+    assert.equal(out[0]!.receipt, null);
+    assert.equal(applyTag([txn({ receipt: 'waiting' })], 'T1', { effective: { tag: 'business', category: null, source: 'override' } })[0]!.receipt, 'waiting');
+    assert.equal(docLine(doc()), 'サンプル商店 · 11/3 · 1,234 円');
+    assert.equal(docLine(doc({ vendor: null, txn_date: null, amount: null, status: 'needs_review' })), '相手名なし · 確認前');
+    assert.equal(linkedText([]), '');
+    assert.equal(linkedText(['amount_mismatch', 'date_out_of_window']), '紐付けました（金額が明細と違います・日付が離れています）。');
+  });
+});
+
 describe('SSR スナップショット', () => {
   let vite: ViteDevServer;
   const load = (p: string) => vite.ssrLoadModule(p) as Promise<Record<string, (props: any) => unknown>>;
@@ -1213,6 +1318,26 @@ describe('SSR スナップショット', () => {
     t.assert.snapshot(lines(`${out}\n${row}`));
   });
 
+  test('税の試算: 入力（年・売上 ±100 万・方式と区分）、負担の表、方式の比較の 3 行（使えない方式は理由）', async (t) => {
+    const m = await load('/src/money/TaxSim.tsx');
+    const form = seedSimForm(emptySimForm(), simRes);
+    const input = html(m.SimForm!, { today: TODAY, form, includesTax: true, more: true, onForm: noop, onMore: noop });
+    assert.match(input, /売上（万円・税込）/);
+    assert.match(input, /<option value="2026">2026 年<\/option>[\s\S]*<option value="2028">2028 年<\/option>/);
+    assert.match(input, /第 5 種 サービス 50%/);
+    assert.match(input, /placeholder="経費と同じ"/);
+    const withSaving = { ...simRes, deductions: { ideco: 240000, kyosai: 0, saving: 72000 }, free_cash: 4290000, warnings: [{ kind: 'rates_assumed' as const, year: 2028, latest: 2026 }] };
+    const out = html(m.TaxSimResult!, { res: withSaving, inputClass: 5, profileClass: 5 });
+    assert.doesNotMatch(out, /個人事業税|免税/);
+    assert.match(out, /2026 年分まで/);
+    assert.match(out, /自由に使える額/);
+    assert.match(out, /2028 年の税率・料率はまだ無い/);
+    const best = html(m.TaxSimResult!, { res: simRes, inputClass: 1, profileClass: 5 });
+    assert.match(out, /簡易（第 5 種）<span class="m-badge b-income m-sim-best">最安<\/span>/, '区分 5 の行に最安');
+    assert.match(best, /簡易（第 1 種）<span class="m-badge b-income m-sim-best">最安<\/span>/);
+    t.assert.snapshot(lines(`${input}\n${out}`));
+  });
+
   test('不定額: 提案の「約」と金額の幅、台帳の「 · 概算」、見通しの月の「約」。積立のバッジ', async () => {
     const m = await load('/src/money/Schedule.tsx');
     const vc: Candidate = {
@@ -1292,23 +1417,177 @@ describe('SSR スナップショット', () => {
     assert.match(form, /最初の支払日/);
   });
 
-  test('税の試算: 入力（年・売上 ±100 万・方式と区分）、負担の表、方式の比較の 3 行（使えない方式は理由）', async (t) => {
-    const m = await load('/src/money/TaxSim.tsx');
-    const form = seedSimForm(emptySimForm(), simRes);
-    const input = html(m.SimForm!, { today: TODAY, form, includesTax: true, more: true, onForm: noop, onMore: noop });
-    assert.match(input, /売上（万円・税込）/);
-    assert.match(input, /<option value="2026">2026 年<\/option>[\s\S]*<option value="2028">2028 年<\/option>/);
-    assert.match(input, /第 5 種 サービス 50%/);
-    assert.match(input, /placeholder="経費と同じ"/);
-    const withSaving = { ...simRes, deductions: { ideco: 240000, kyosai: 0, saving: 72000 }, free_cash: 4290000, warnings: [{ kind: 'rates_assumed' as const, year: 2028, latest: 2026 }] };
-    const out = html(m.TaxSimResult!, { res: withSaving, inputClass: 5, profileClass: 5 });
-    assert.doesNotMatch(out, /個人事業税|免税/);
-    assert.match(out, /2026 年分まで/);
-    assert.match(out, /自由に使える額/);
-    assert.match(out, /2028 年の税率・料率はまだ無い/);
-    const best = html(m.TaxSimResult!, { res: simRes, inputClass: 1, profileClass: 5 });
-    assert.match(out, /簡易（第 5 種）<span class="m-badge b-income m-sim-best">最安<\/span>/, '区分 5 の行に最安');
-    assert.match(best, /簡易（第 1 種）<span class="m-badge b-income m-sim-best">最安<\/span>/);
-    t.assert.snapshot(lines(`${input}\n${out}`));
+  test('経費: 合計・領収書待ちだけ・相手ごとの行（「その他」は押せない）', async (t) => {
+    const m = await load('/src/money/Expenses.tsx');
+    const all = html(m.ExpensesView!, { data: expenses, month: '2026-11', cats, waitingOnly: false, onWaiting: noop, onTxns: noop });
+    const waiting = html(m.ExpensesView!, { data: expenses, month: '2026-11', cats, waitingOnly: true, onWaiting: noop, onTxns: noop });
+    const none = html(m.ExpensesView!, { data: { ...expenses, total: { amount: 0, count: 0, waiting_count: 0, waiting_amount: 0 }, vendors: [] }, month: '2026-11', cats, waitingOnly: true, onWaiting: noop, onTxns: noop });
+    assert.match(all, /<b>15,702<\/b>/);
+    assert.match(all, /<b>2 件<\/b>[\s\S]*5,234 円/);
+    assert.match(all, /aria-pressed="false">領収書待ちだけ（2）/);
+    assert.match(all, /カ）エービーシー/);
+    assert.match(all, /日用品<\/span>[\s\S]*待ち 1/);
+    assert.match(all, /<div class="m-nav-row">[\s\S]*その他/, '「その他」は押せない');
+    assert.doesNotMatch(waiting, /カ）エービーシー/, '待ちだけなら待ちの無い相手を隠す');
+    assert.match(none, /領収書待ちはありません/);
+    assert.match(html(m.YearBar!, { from: '2025-12', to: '2026-11', onMonth: noop }), /直近 12 か月<\/b><span class="m-sub">2025-12〜2026-11<\/span>[\s\S]*今月だけにする/);
+    assert.match(html(m.ExpensesView!, { data: expenses, month: null, cats, waitingOnly: true, onWaiting: noop, onTxns: noop }), /aria-label="直近 12 か月の経費"/);
+    t.assert.snapshot(lines([all, waiting, none].join('\n')));
+  });
+
+  test('明細の証憑: 行の印・経費の絞り込みのピル・シートの「証憑」の段', async (t) => {
+    const m = await load('/src/money/Txns.tsx');
+    const rows = [
+      txn({ id: 'R1', receipt: 'matched' }),
+      txn({ id: 'R2', receipt: 'pending_review' }),
+      txn({ id: 'R3', receipt: 'candidate' }),
+      txn({ id: 'R4', receipt: 'waiting' }),
+      txn({ id: 'R5', tag: 'unset', category: null, receipt: null, receipt_hint: { document_id: 'D1', status: 'approved' } }),
+    ];
+    const ef = { period: 'month', month: '2026-11', accountId: '', tag: 'business', category: '', q: '', side: 'expense', excluded: '0', vendorKey: 'サンプルショウテン', vendorLabel: 'サンプル商店', receipt: 'waiting' };
+    const sheet = (matches: unknown) =>
+      html(m.TagSheet!, { txn: rows[2], draft: { tag: 'business', category: 'telecom', rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', matches, matchBusy: false, onDraft: noop, onSave: noop, onClose: noop, onLink: noop, onUnlink: noop, onCapture: noop });
+    const out = [
+      html(m.TxnFilters!, { f: ef, q: '', expanded: false, unsetCount: '', accounts: [], cats, onChange: noop, onQ: noop, onExpand: noop }),
+      html(m.TxnList!, { items: rows, f: ef, today: TODAY, more: false, cats, busyIds: [], hint: false, onHint: noop, onOpen: noop, onToggle: noop }),
+      sheet({ links: [link(doc())], candidates: [{ document_id: 'D2', score: 95, date_diff: 0, vendor_match: 1, document: doc({ id: 'D2', status: 'needs_review', thumbnail_url: null }) }] }),
+      sheet(null),
+      sheet('error'),
+      sheet({ links: [], candidates: [] }),
+    ].join('\n');
+    assert.match(out, /aria-label="経費 · サンプル商店 · 領収書待ちだけ。押すと外す"/);
+    for (const [k, l] of [
+      ['matched', '証憑'],
+      ['pending_review', '確認待ち'],
+      ['candidate', '候補'],
+      ['waiting', '待ち'],
+      ['hint', '証憑あり・未タグ'],
+    ])
+      assert.match(out, new RegExp(`m-rc m-rc-${k}">${l}<`));
+    assert.match(out, /サンプル商店 · 11\/3 · 1,234 円<\/span>[\s\S]*外す/);
+    assert.match(out, /候補（押すと紐付けます）[\s\S]*PDF<\/span>[\s\S]*確認前/);
+    assert.match(out, /証憑を読めませんでした/);
+    assert.match(out, /紐付いた証憑も候補もありません/);
+    assert.match(out, /領収書を撮る・共有で入れる/);
+    const plain = html(m.TagSheet!, { txn: rows[0], draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', onDraft: noop, onSave: noop, onClose: noop });
+    assert.doesNotMatch(plain, /証憑<\/legend>/, '照合を渡さなければ段を出さない');
+    t.assert.snapshot(lines(out));
+  });
+  test('「証憑」の段に注文の確認メールの手がかり（mail_hint）の 1 行。行の印は変えない', async () => {
+    const m = await load('/src/money/Txns.tsx');
+    const hint = { mail_message_id: 'M1', account_id: 'personal', received_on: '2026-11-03', from_domain: 'example.com', subject: 'ご注文の確認', order_ref: '123-0000000' };
+    const row = txn({ id: 'R4', receipt: 'waiting', mail_hint: hint });
+    const out = html(m.TagSheet!, { txn: row, draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', matches: { links: [], candidates: [] }, matchBusy: false, onDraft: noop, onSave: noop, onClose: noop, onCapture: noop });
+    assert.match(out, /注文 #123-0000000 の確認メールあり（11\/3、example\.com）→ 注文履歴から領収書を保存して共有シートで入れてください/);
+    const none = html(m.TagSheet!, { txn: txn({ id: 'R4', receipt: 'waiting' }), draft: { tag: 'business', category: null, rule: false }, pos: { index: 0, total: 0 }, cats, saving: false, error: '', matches: { links: [], candidates: [] }, matchBusy: false, onDraft: noop, onSave: noop, onClose: noop });
+    assert.doesNotMatch(none, /確認メールあり/);
+    const list = html(m.TxnList!, { items: [row], f: { period: 'this', accountId: '', tag: '', category: '', q: '' }, today: TODAY, more: false, cats, busyIds: [], hint: false, onHint: noop, onOpen: noop, onToggle: noop });
+    assert.match(list, /m-rc m-rc-waiting">待ち</);
+    assert.doesNotMatch(list, /確認メール/);
+    assert.equal(mailHintText({ ...hint, order_ref: null, received_on: null, from_domain: null }), '注文の確認メールあり→ 注文履歴から領収書を保存して共有シートで入れてください');
+    // 紐付けたら消える（待ち・候補の明細だけに付く）。
+    assert.equal(applyMatches(row, { links: [link(doc())], candidates: [] }).mail_hint, null);
+    assert.deepEqual(applyMatches(row, { links: [], candidates: [] }).mail_hint, hint);
+  });
+
+  test('ホーム: 経費の入口に領収書待ちの件数（0 なら件数を出さない）', async () => {
+    const m = await load('/src/money/Home.tsx');
+    const d = { o: { ...overview, receipt_waiting_count: 4 }, history: null, cf: null, months: [], upcoming: [], status: [] };
+    const out = html(m.HomeView!, { today: TODAY, d, accounts: [], cats, go: noop });
+    assert.match(out, /経費<\/span><span class="m-nav-sub m-warn-text">領収書待ち 4 件<\/span><\/span><span class="m-count">4<\/span>/);
+    const zero = html(m.HomeView!, { today: TODAY, d: { ...d, o: { ...overview, receipt_waiting_count: 0 } }, accounts: [], cats, go: noop });
+    assert.match(zero, /経費<\/span><span class="m-nav-sub">事業の支出を相手ごとに<\/span><\/span><svg/);
+  });
+});
+
+const mailStatus = (over: Partial<MailStatus> = {}): MailStatus => ({
+  enabled: true,
+  provider: 'gmail_api',
+  accounts: [
+    { id: 'personal', label: 'keihi', last_run_at: null, last_ok_at: null, last_error: null, reauth_required: false, attention_count: 2 },
+    { id: 'work', label: 'keihi', last_run_at: null, last_ok_at: null, last_error: null, reauth_required: false, attention_count: 1 },
+  ],
+  ...over,
+});
+const mailMsg = (over: Partial<MailMessage> = {}): MailMessage => ({
+  id: 'M1',
+  account_id: 'personal',
+  received_on: '2026-11-03',
+  from_domain: 'example.com',
+  subject: 'ご請求書のお知らせ',
+  state: 'unsupported',
+  error_reason: null,
+  attempts: 0,
+  attachments: [{ filename: 'invoice.xlsx', result: 'unsupported', document_id: null }],
+  hint: null,
+  ...over,
+});
+
+describe('メールの取り込みの純関数', () => {
+  test('要対応の件数はアカウントの合計。無効・読めないなら 0', () => {
+    assert.equal(mailAttention(mailStatus()), 3);
+    assert.equal(mailAttention(mailStatus({ enabled: false })), 0);
+    assert.equal(mailAttention(mailStatus({ accounts: [] })), 0);
+    assert.equal(mailAttention(null), 0);
+    assert.equal(mailAttention(undefined), 0);
+    assert.equal(mailAttentionText(3), 'メールの要対応 3 件');
+    assert.equal(MAIL_ATTENTION_URL, '/api/mail/messages?state=attention&limit=100');
+  });
+  test('状態と添付の文', () => {
+    assert.equal(mailStateText(mailMsg()), '未対応の形式');
+    assert.equal(mailStateText(mailMsg({ state: 'body_only' })), '添付なし');
+    assert.equal(mailStateText(mailMsg({ state: 'too_large' })), '大きすぎる');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: 'fetch_failed', attempts: 3 })), '取得に失敗（3 回）');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: 'parse_failed', attempts: 4 })), '解析に失敗（4 回）');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: null, attempts: 3 })), '失敗（3 回）');
+    assert.equal(mailAttachmentText({ filename: 'invoice.pdf', result: 'ingested', document_id: 'D1' }), 'invoice.pdf: 取り込み済み');
+    assert.equal(mailAttachmentText({ filename: 'a.pdf', result: 'duplicate', document_id: 'D1' }), 'a.pdf: 取り込み済み（重複）');
+    assert.equal(mailAttachmentText({ filename: null, result: 'too_large', document_id: null }), '名前なし: 大きすぎる');
+  });
+  test('今すぐ取り込むの結果の文', () => {
+    assert.equal(mailSyncText(200, { accounts: [{ account_id: 'personal', job_id: 'J1', created: false }, { account_id: 'work', job_id: 'J2', created: true }] }), '取り込みを始めました。しばらくしてから読み直してください。');
+    assert.equal(mailSyncText(200, { accounts: [{ account_id: 'personal', job_id: 'J1', created: false }] }), '実行中か、10 分以内に実行済みです。');
+    assert.equal(mailSyncText(200, { accounts: [] }), '実行中か、10 分以内に実行済みです。');
+    assert.equal(mailSyncText(409, { reason: 'mail_disabled' }), 'メールの取り込みは無効です（config.toml の [mail] enabled）。');
+    assert.equal(mailSyncText(0, null), failText(0));
+    assert.equal(mailSyncText(500, null), 'サーバーから読めませんでした（HTTP 500）');
+  });
+});
+
+describe('SSR スナップショット（メール）', () => {
+  let vite: ViteDevServer;
+  const load = (p: string) => vite.ssrLoadModule(p) as Promise<Record<string, (props: any) => unknown>>;
+  before(async () => {
+    vite = await startSsr();
+  });
+  after(async () => {
+    await vite.close();
+  });
+  const html = (c: (props: never) => unknown, props: object) => pretty(renderHtml(h(c as never, props as never)));
+
+  test('ホーム: 要対応があれば入口に「メールの要対応 n 件」。無効・0 件・読めないときは出さない', async () => {
+    const m = await load('/src/money/Home.tsx');
+    const d = { o: overview, history: null, cf: null, months: [], upcoming: [], status: [] };
+    const out = html(m.HomeView!, { today: TODAY, d: { ...d, mail: mailStatus() }, accounts: [], cats, go: noop });
+    assert.match(out, /メール<\/span><span class="m-nav-sub m-warn-text">メールの要対応 3 件<\/span><\/span><span class="m-count">3<\/span>/);
+    for (const mail of [mailStatus({ enabled: false }), mailStatus({ accounts: [] }), null, undefined]) {
+      assert.doesNotMatch(html(m.HomeView!, { today: TODAY, d: { ...d, mail }, accounts: [], cats, go: noop }), /メールの要対応/);
+    }
+  });
+
+  test('要対応のメールの一覧: 今すぐ取り込む・受信日・送信元・件名・状態・添付', async (t) => {
+    const m = await load('/src/money/Mail.tsx');
+    const items = [
+      mailMsg(),
+      mailMsg({ id: 'M2', received_on: '2025-12-28', from_domain: 'example.net', subject: null, state: 'error', error_reason: 'fetch_failed', attempts: 3, attachments: [] }),
+      mailMsg({ id: 'M3', received_on: null, from_domain: null, state: 'body_only', attachments: [] }),
+      mailMsg({ id: 'M4', state: 'too_large', attachments: [{ filename: 'scan.pdf', result: 'too_large', document_id: null }, { filename: 'note.pdf', result: 'ingested', document_id: 'D9' }] }),
+    ];
+    const out = html(m.MailView!, { page: { items, next_cursor: null }, today: TODAY, busy: false, onSync: noop });
+    const more = html(m.MailView!, { page: { items: items.slice(0, 1), next_cursor: 'c1' }, today: TODAY, busy: true, onSync: noop });
+    const none = html(m.MailView!, { page: { items: [], next_cursor: null }, today: TODAY, busy: false, onSync: noop });
+    t.assert.snapshot(lines([out, more, none].join('\n')));
+    assert.match(none, /要対応のメールはありません。/);
+    assert.match(more, /<button type="button" class="m-btn" disabled>今すぐ取り込む/);
   });
 });

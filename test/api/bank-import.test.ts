@@ -55,7 +55,7 @@ beforeEach(() => {
       retention: { years: 7, extraYears: 1, start: 'next_year_0316' },
       cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false },
       provider: { kind: 'fake' },
-      bank: { backfillFrom: '2025-01-01', dedupDateWindowDays: 0, transferWindowDays: 3, matchDateWindowDays: 3 },
+      bank: { backfillFrom: '2025-01-01', dedupDateWindowDays: 0, transferWindowDays: 3, matchDateWindowDays: 3, matchCardDateWindowDays: 10 },
     },
     auth: createAuth({ allowedUsers: [USER], allowedHosts: [LOCAL] }),
     triggerWorker: () => {},

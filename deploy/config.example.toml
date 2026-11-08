@@ -71,9 +71,28 @@ paid_tier_confirmed = false
 # dedup_date_window_days = 0    # API と CSV の重複を照合する日付の幅（0 = 同じ日だけ）
 # transfer_window_days = 3      # 口座間振替とみなす入出金の日付差の上限
 # match_date_window_days = 3    # 領収書の日付から明細の日付までの幅（照合）
+# match_card_date_window_days = 10  # 同じくカードの口座の幅（0〜31。Amazon などは注文日と請求日がずれる）
 
 [cashflow]
 # 資金繰り表（docs/mvp-plan-v3.md T303、V11）
 # unplanned_lookback_months = 6 # 予定外の収支の目安（中央値）を出すのに見る、今月より前の月数（1〜24）
 # reserve_months = 3            # 「月末に残す額」に積む、その月末からの予定支出の月数（1〜12）
 # include_unplanned_income = false  # 予定外の収入の目安を残高に足すか（false なら表示だけ）
+
+[mail]
+# メールからの証憑の取り込み（docs/cashflow.md §16、手順は docs/ops/gmail.md）。Gmail API（読み取り専用）
+# enabled = false               # false なら daily も手動（POST /api/mail/sync）も取りに行かない
+# provider = "gmail_api"        # "gmail_api" だけ（"imap" は予約。指定すると起動時エラー）
+# max_messages_per_run = 100    # 1 回に取り込む通数（アカウントごと。1〜500）。残りは次回
+# extract_hints = true          # 本文だけのメールから手がかり（注文日・金額・注文番号）を Gemini で抜き出し、領収書待ちの明細に出す
+
+# アカウントごとに 1 つ書く。トークンは <data_dir>/gmail-token-<id>.json（`keihi gmail auth <id>` で作る）
+# [[mail.accounts]]
+# id = "personal"               # 英数字と - の 1〜32 字（一意）
+# label = "keihi"               # 取り込む Gmail のラベル（1〜100 字）
+# query = ""                    # 検索式に AND で足す（0〜500 字。例 "has:attachment"）
+# since = "2026-10-01"          # 取り始める日。無ければ初回実行日の 30 日前
+#
+# [[mail.accounts]]
+# id = "work"
+# label = "keihi"

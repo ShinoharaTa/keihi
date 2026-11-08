@@ -171,7 +171,8 @@ function isAlive(pid: number): boolean {
   }
 }
 
-export class TokenStore {
+// T は保存するトークンの形（既定は freee。Gmail（src/mail/gmail/auth.ts）も同じ保存とロックを使う）。
+export class TokenStore<T = StoredToken> {
   readonly path: string;
   readonly lockPath: string;
   // lockPath の既定は <file>.lock（PoC）。keihi 本体は <data_dir>/freee-token.lock を渡す（mvp-plan.md §4.1）。
@@ -180,7 +181,7 @@ export class TokenStore {
     this.lockPath = lockPath ?? `${file}.lock`;
   }
 
-  async read(): Promise<StoredToken | null> {
+  async read(): Promise<T | null> {
     let st;
     try {
       st = await stat(this.path);
@@ -191,11 +192,11 @@ export class TokenStore {
     if (!st.isFile()) throw new Error(`${this.path} が通常のファイルではない`);
     const mode = st.mode & 0o777;
     if (mode !== 0o600) throw new Error(`${this.path} のパーミッションが 0600 ではない（現在 0${mode.toString(8)}）`);
-    return JSON.parse(await readFile(this.path, 'utf8')) as StoredToken;
+    return JSON.parse(await readFile(this.path, 'utf8')) as T;
   }
 
   // 一時ファイルに 0600 で書いて fsync → rename → ディレクトリを fsync する（途中で落ちても古い方か新しい方のどちらかが残る）。
-  async write(t: StoredToken): Promise<void> {
+  async write(t: T): Promise<void> {
     const tmp = `${this.path}.tmp-${process.pid}`;
     await rm(tmp, { force: true });
     const fh = await open(tmp, 'wx', 0o600);

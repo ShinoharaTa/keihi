@@ -7,10 +7,13 @@
 //    needs_attention: meta_deadline_passed、期限の 7 日前からのものは settings.meta_deadline_warnings に載せる（PWA の一覧の警告）。
 // 4. 日次照合: reconcile_deals ジョブを積む（未完了のもの（queued / running）があれば積み増さない）。
 // 4'. 明細の同期: sync_bank ジョブを積む（同じく積み増さない。src/bank/sync.ts、T104）。
+// 4'-mail. メールの取り込み: [mail] enabled なら [[mail.accounts]] ごとに fetch_mail ジョブを積む（そのアカウントの未完了のものがあれば
+//    積み増さない。src/mail/status.ts enqueueFetchMail）。enabled = false なら積まない（report.mail = 'disabled'）。
 // 4''. 周期の検出（src/cashflow/detect.ts、T302）: 予定支出の候補を作る・更新する。sync_bank は後でジョブとして走るので、
 //    ここではその時点（前回の同期まで）の明細で検出する（1 日遅れでよい）。失敗しても daily は失敗にせず、report に {error} を残す。
 // 4'''. 税・保険の見積もりの再計算（src/cashflow/tax/sync.ts、T308）: 毎月 1 日（JST）だけ。tax_profile が無ければ skipped、
 //    1 日でなければ not_due。期間（今日 + 39 か月）が時間とともに伸びるように、POST /api/tax/recalculate と同じ処理を actor = system で。
+// 4''''. 明細 ⇔ 証憑の照合（src/bank/match.ts の runMatchingSafe、T206）。失敗しても daily は失敗にせず、report に {error} を残す。
 // 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
 // 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
@@ -19,6 +22,7 @@
 //   settings.daily_last_step_<段> に JST の日付を残し、同じ日の再試行（や 2 回目の daily）では飛ばす（report.skipped_steps）。
 import { getSetting, markNeedsAttention, setSetting } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
+import { runMatchingSafe, type MatchWindows, type RunMatchingSafeResult } from '../../bank/match.ts';
 import type { AccountProvider } from '../../bank/repo.ts';
 import { enqueueSyncBank } from '../../bank/sync.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
@@ -30,6 +34,7 @@ import { recalculate } from '../../cashflow/tax/sync.ts';
 import { refreshPaperStatuses } from '../../deals/paper.ts';
 import { tx, type Db } from '../../db/index.ts';
 import { enqueue } from '../../jobs/queue.ts';
+import { enqueueFetchMail } from '../../mail/status.ts';
 import type { Handler } from '../../jobs/worker.ts';
 import { syncMasters, type SyncResult } from '../../masters/sync.ts';
 import { FreeeAuthError, type RefreshCheck } from '../../providers/freee/auth.ts';
@@ -52,6 +57,10 @@ export type DailyDeps = {
   refreshToken: (() => Promise<RefreshCheck>) | null;
   // 証憑の照合。省略・null なら飛ばす。provider は downloadReceipt を用途 sync で予算に通したもの。
   remoteVerify?: { provider: () => Pick<Provider, 'downloadReceipt'>; objectsDir: string; mode: RemoteVerifyMode } | null;
+  // 照合の日付の幅（[bank]。省略時は既定値）。
+  matchWindows?: MatchWindows;
+  // メールの取り込みのアカウント（[mail] enabled のときの [[mail.accounts]] の id）。省略・null なら積まない。
+  mailAccounts?: string[] | null;
 };
 
 export type MetaDeadlineItem = { document_id: string; meta_deadline_on: string };
@@ -64,8 +73,10 @@ export type DailyReport = {
   meta_deadline: { warn: MetaDeadlineItem[]; passed: MetaDeadlineItem[] } | null;
   reconcile: { job_id: number; created: boolean } | null;
   sync_bank: { job_id: number; created: boolean } | null;
+  mail: { account_id: string; job_id: number; created: boolean }[] | 'disabled' | null;
   detect_recurrences: { created: number; updated: number } | { error: string } | null;
   tax_recalc: { run_id: string; created: number; updated: number; deactivated: number } | 'skipped' | 'not_due' | null;
+  match: RunMatchingSafeResult | null;
   paper_status_changed: number | null;
   remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
@@ -126,8 +137,10 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       meta_deadline: null,
       reconcile: null,
       sync_bank: null,
+      mail: null,
       detect_recurrences: null,
       tax_recalc: null,
+      match: null,
       paper_status_changed: null,
       remote_verify: null,
       needs_attention: 0,
@@ -184,6 +197,11 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       report.sync_bank = enqueueSyncBank(db, now);
     });
 
+    await step('mail', () => {
+      const accounts = deps.mailAccounts ?? null;
+      report.mail = accounts === null ? 'disabled' : accounts.map((id) => ({ account_id: id, ...enqueueFetchMail(db, id, now) }));
+    });
+
     await step('detect_recurrences', () => {
       try {
         report.detect_recurrences = detectRecurrences(db, { today, now });
@@ -199,6 +217,10 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
         const r = recalculate(db, { today, now, actor: 'system' });
         report.tax_recalc = { run_id: r.run_id, created: r.created, updated: r.updated, deactivated: r.deactivated };
       }
+    });
+
+    await step('match', () => {
+      report.match = runMatchingSafe(db, now, { windows: deps.matchWindows });
     });
 
     await step('paper_status', () => {
@@ -235,8 +257,10 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             meta_deadline_passed: report.meta_deadline?.passed.length ?? null,
             reconcile: report.reconcile,
             sync_bank: report.sync_bank,
+            mail: report.mail,
             detect_recurrences: report.detect_recurrences,
             tax_recalc: report.tax_recalc,
+            match: report.match,
             paper_status_changed: report.paper_status_changed,
             remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,
