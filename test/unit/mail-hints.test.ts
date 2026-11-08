@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createGeminiClient, type Gemini } from '../../src/ai/gemini/client.ts';
-import type { MailAccount } from '../../src/config.ts';
+import { ConfigError, type MailAccount } from '../../src/config.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { enqueue, getJob, type Job } from '../../src/jobs/queue.ts';
@@ -140,6 +140,8 @@ describe('スキーマ外は捨てる', () => {
     { name: '必須の欠け', out: { is_purchase: true, txn_date: '2026-11-04', amount_total: 1234, vendor_name: null } },
     { name: '金額が文字列', out: { ...HINT, amount_total: '1234' } },
     { name: '金額が小数', out: { ...HINT, amount_total: 1234.5 } },
+    { name: '金額が負', out: { ...HINT, amount_total: -1 } },
+    { name: '金額が 1 億円を超える', out: { ...HINT, amount_total: 100_000_001 } },
     { name: '日付の形式が違う', out: { ...HINT, txn_date: '2026/11/04' } },
     { name: '相手名が 101 字', out: { ...HINT, vendor_name: 'あ'.repeat(101) } },
     { name: '注文番号が 65 字', out: { ...HINT, order_ref: '1'.repeat(65) } },
@@ -232,13 +234,83 @@ describe('Gemini の失敗と再試行', () => {
     assert.deepEqual(done, [...Array(MAX_HINT_RETRIES).fill(true), ...Array(5).fill(false)]);
   });
 
-  test('Gemini の設定が無い（ConfigError）ときも取り込みは失敗にしない', async () => {
+  test('Gemini の設定が無い（ConfigError）ときも取り込みは失敗にしない。取り直しは丸ごと飛ばす（ログ 1 行）', async () => {
+    const logs: string[] = [];
+    const run = () =>
+      fetchMailForAccount({
+        db, objectsDir, config: CONFIG, now: () => NOW, client: clientFor('personal'), account: ACCOUNT, maxMessages: 100,
+        hints: { gemini: () => { throw new ConfigError('secrets.env に GEMINI_API_KEY が無い'); }, log: (s) => logs.push(s) },
+      });
     gm.add({ id: 'm1', internalMs: T1, text: ORDER_TEXT });
-    await fetchMailForAccount({
-      db, objectsDir, config: CONFIG, now: () => NOW, client: clientFor('personal'), account: ACCOUNT, maxMessages: 100,
-      hints: { gemini: () => { throw new Error('GEMINI_API_KEY が無い'); }, log: () => {} },
-    });
+    await run();
     assert.deepEqual(msgs().map((m) => [m.state, m.hint_extracted_at]), [['body_only', null]]);
+    logs.length = 0;
+    const before = gm.gets('full').length;
+    const r = await run();
+    assert.equal(r.hint_retries, 0);
+    assert.equal(gm.gets('full').length, before, 'Gmail も取り直さない');
+    assert.equal(logs.length, 1);
+    assert.doesNotMatch(logs[0]!, /GEMINI_API_KEY/);
+  });
+
+  test('取り直しで Gemini が一時的に失敗（5xx）したらその回は打ち切る。ログは種別と状態だけ', async () => {
+    reply = () => new Response('{"error":{"message":"SECRET-BODY"}}', { status: 500 });
+    for (let i = 0; i < 3; i++) gm.add({ id: `m${i}`, internalMs: T1 + i * 1000, text: ORDER_TEXT });
+    await fetchOnce();
+    geminiCalls = [];
+    const logs: string[] = [];
+    const r = await fetchMailForAccount({
+      db, objectsDir, config: CONFIG, now: () => NOW, client: clientFor('personal'), account: ACCOUNT, maxMessages: 100,
+      hints: { gemini, log: (s) => logs.push(s) },
+    });
+    assert.equal(r.hint_retries, 1);
+    assert.equal(geminiCalls.length, 1);
+    assert.deepEqual(msgs().map((m) => m.hint_extracted_at), [null, null, null]);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /code=http status=500/);
+    assert.doesNotMatch(logs[0]!, /SECRET-BODY/);
+  });
+
+  test('Gemini が 4xx（429 以外）で拒んだら捨てて hint_extracted_at を埋める（もう呼ばない）', async () => {
+    reply = () => new Response('{"error":{"code":400}}', { status: 400 });
+    gm.add({ id: 'm1', internalMs: T1, text: ORDER_TEXT });
+    await fetchOnce();
+    const [m] = msgs();
+    assert.deepEqual(hintOf(m!), EMPTY);
+    assert.equal(m!.hint_extracted_at, NOW.toISOString());
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'mail.hint_extracted'`).get() as { payload_json: string };
+    assert.deepEqual(JSON.parse(a.payload_json), { account_id: 'personal', found: false, discarded: 'request_rejected' });
+    await fetchOnce();
+    assert.equal(geminiCalls.length, 1);
+  });
+
+  test('429 は取り直す（埋めない）', async () => {
+    reply = () => new Response('{}', { status: 429 });
+    gm.add({ id: 'm1', internalMs: T1, text: ORDER_TEXT });
+    await fetchOnce();
+    assert.equal(msgs()[0]!.hint_extracted_at, null);
+  });
+
+  test('取り直しで Gmail の取得が 4xx（削除済みなど）なら hint_extracted_at を埋めて印を残す', async () => {
+    reply = () => new Response('{}', { status: 503 });
+    gm.add({ id: 'm1', internalMs: T1, text: ORDER_TEXT });
+    await fetchOnce();
+    gm.fail('/messages/m1?format=full', { status: 404 });
+    reply = () => ok(HINT);
+    geminiCalls = [];
+    const r = await fetchOnce();
+    assert.equal(r.hint_retries, 0);
+    assert.equal(geminiCalls.length, 0);
+    const [m] = msgs();
+    assert.equal(m!.state, 'body_only');
+    assert.equal(m!.hint_extracted_at, NOW.toISOString());
+    assert.deepEqual(hintOf(m!), EMPTY);
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'mail.hint_extracted'`).get() as { payload_json: string };
+    assert.deepEqual(JSON.parse(a.payload_json), { account_id: 'personal', found: false, discarded: 'fetch_failed' });
+    gm.clearFailures();
+    const before = gm.gets('full').length;
+    await fetchOnce();
+    assert.equal(gm.gets('full').length, before, 'もう取り直さない');
   });
 
   test('fetch_mail ジョブは [mail] extract_hints に従う', async () => {

@@ -57,8 +57,6 @@ export type ParsedMessage = {
   internalAt: Date;
   receivedOn: string;
   attachments: AttachmentRef[];
-  // 手がかりの抽出に送る本文（hints.ts の bodyTextOf）。
-  body: string | null;
 };
 
 export class MailParseError extends Error {
@@ -131,7 +129,6 @@ export function parseGmailMessage(m: GmailMessage): ParsedMessage {
     internalAt,
     receivedOn: todayInTokyo(internalAt),
     attachments,
-    body: bodyTextOf(payload),
   };
 }
 
@@ -192,8 +189,10 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
   };
 
   let parsed: ParsedMessage;
+  let full: GmailMessage;
   try {
-    parsed = parseGmailMessage(await client.getFull(remoteId));
+    full = await client.getFull(remoteId);
+    parsed = parseGmailMessage(full);
     if (parsed.remoteId !== remoteId) throw new MailParseError('応答の id が違う');
   } catch (e) {
     return fetchFailed(e, null);
@@ -299,6 +298,7 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
     );
     return { mail_message_id: id, state, documents, duplicates };
   });
-  if (result.state === 'body_only' && deps.hints) await extractMailHint(db, deps.hints, result.mail_message_id, parsed.body, deps.now);
+  // 本文は body_only のときだけ作る（hints.ts の bodyTextOf）。
+  if (result.state === 'body_only' && deps.hints) await extractMailHint(db, deps.hints, result.mail_message_id, bodyTextOf(full.payload), deps.now);
   return result;
 }
