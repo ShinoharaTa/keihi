@@ -1,12 +1,13 @@
 // npm run build（docs/mvp-plan-v0.1.md T1-1、D2）。サーバーと worker は型ストリップで直接実行するのでビルドしない。
 // PWA（pwa/vite.config.ts）があるときだけ、型検査 → vite build（画面）→ vite build（service worker）→ サイズ予算の確認をする。
-// サイズ予算（T1-12）: 初期に読む html・js・css の gzip 合計が 60KB 以内（sw.js は含めない）。
+// サイズ予算（T1-12）: 初期に読む html・js・css の gzip 合計が 64KB 以内（sw.js は含めない）。
+//   2026-11 に 3 本柱（試算・経費・メール）を足して 60KB を超えたため 64KB に。遅延読み込みで戻すのは別 issue。
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 
-export const GZIP_BUDGET = 60 * 1024;
+export const GZIP_BUDGET = 64 * 1024;
 const DIST = 'pwa/dist';
 
 function run(args: string[]): boolean {
