@@ -2,8 +2,8 @@
 // - 一覧: txn_date DESC, id DESC の keyset（cursor）。1 回の上限は MAX_LIMIT 件。タグ・カテゴリの絞り込みは効くタグ（tags.ts の
 //   resolveTagsBulk）で決まるので SQL では絞れない。SQL で絞った行を CHUNK 件ずつ読み、効くタグで落としながら limit + 1 件まで集める。
 //   摘要の絞り込み（q）は normalizeVendor で揃えて description_norm への部分一致にする（揃えて空になる q は 400）。
-//   category=none は未分類（category が null）。
-// - 月次: その月の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
+//   category=none は未分類（category が null）。既定は active = 1 の口座の明細だけ。include_inactive=1 で active = 0 の口座も含める。
+// - 月次: その月の active = 1 の口座の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
 // - 除く明細は有効な組（listActiveTransfers）の両側。transfers.ts の excludedFromCashflow と同じ集合を、kind 付きで 1 回で読む。
@@ -112,6 +112,10 @@ export function parseTxnQuery(q: Record<string, string | undefined>): TxnQuery {
     out.to = q.to;
   }
   if (q.account_id !== undefined) out.accountId = q.account_id;
+  if (q.include_inactive !== undefined) {
+    if (q.include_inactive !== '0' && q.include_inactive !== '1') throw new SummaryError('invalid_include_inactive');
+    if (q.include_inactive === '1') out.includeInactive = true;
+  }
   if (q.tag !== undefined) {
     if (!isTag(q.tag)) throw new SummaryError('invalid_tag');
     out.tag = q.tag;

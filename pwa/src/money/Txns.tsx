@@ -102,7 +102,7 @@ export function TxnFilters({
         <div class="m-filter-more" id="m-txn-more">
           <select class="m-field" aria-label="口座" value={f.accountId} onChange={(e) => onChange({ ...f, accountId: e.currentTarget.value })}>
             <option value="">口座: 全部</option>
-            {accounts.map((a) => (
+            {accounts.filter((a) => a.active).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
               </option>

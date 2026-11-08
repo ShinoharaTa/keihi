@@ -273,6 +273,8 @@ export type BankTxnSqlFilter = {
   amountMax?: number;
   // description_norm に含まれる文字列（正規化済み）。
   descriptionNorm?: string;
+  // true なら active = 0 の口座の明細も含める（既定は active = 1 の口座だけ）。
+  includeInactive?: boolean;
 };
 
 // txn_date DESC, id DESC の順で、after（その行より後ろ）から limit 件。
@@ -288,6 +290,7 @@ export function listBankTxnsPage(
     where.push(sql);
     args.push(...v);
   };
+  if (!f.includeInactive) where.push('a.active = 1');
   if (f.from !== undefined) add('t.txn_date >= ?', f.from);
   if (f.to !== undefined) add('t.txn_date <= ?', f.to);
   if (f.accountId !== undefined) add('t.account_id = ?', f.accountId);
@@ -304,19 +307,21 @@ export function listBankTxnsPage(
     .all(...args, limit) as BankTxnListRow[];
 }
 
-// 日付が [from, to] の明細（口座名付き）。
+// 日付が [from, to] の、active な口座の明細（口座名付き）。
 export function listBankTxnsBetween(db: Db, from: string, to: string): BankTxnListRow[] {
   return db
     .prepare(
       `SELECT t.*, a.name AS account_name FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id
-       WHERE t.txn_date BETWEEN ? AND ? ORDER BY t.txn_date, t.rowid`,
+       WHERE a.active = 1 AND t.txn_date BETWEEN ? AND ? ORDER BY t.txn_date, t.rowid`,
     )
     .all(from, to) as BankTxnListRow[];
 }
 
-// すべての明細の ID（GET /api/bank/overview の untagged_count）。
+// active な口座の明細の ID（GET /api/bank/overview の untagged_count）。
 export function listAllBankTxnIds(db: Db): string[] {
-  return (db.prepare('SELECT id FROM bank_txns ORDER BY txn_date, id').all() as { id: string }[]).map((r) => r.id);
+  return (
+    db.prepare('SELECT t.id FROM bank_txns t JOIN money_accounts a ON a.id = t.account_id WHERE a.active = 1 ORDER BY t.txn_date, t.id').all() as { id: string }[]
+  ).map((r) => r.id);
 }
 
 // 口座の、残高（balance）付きの明細の日付と残高（to 以前。txn_date, id の昇順）。GET /api/balance_history。
