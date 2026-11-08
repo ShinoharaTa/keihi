@@ -1227,3 +1227,47 @@ export function mailHintText(h: MailHint): string {
 // 紐付けの警告（POST /api/bank_txns/:id/matches の warnings。拒否はされない）。
 export const MATCH_WARNINGS: Record<string, string> = { amount_mismatch: '金額が明細と違います', date_out_of_window: '日付が離れています' };
 export const linkedText = (warnings: string[]) => (warnings.length ? `紐付けました（${warnings.map((w) => MATCH_WARNINGS[w] ?? w).join('・')}）。` : '');
+
+// ---- メールの取り込み（docs/cashflow.md §17。GET /api/mail/status・GET /api/mail/messages・POST /api/mail/sync、src/web/routes/mail.ts） ----
+
+export type MailAccount = { id: string; label: string; last_run_at: string | null; last_ok_at: string | null; last_error: string | null; reauth_required: boolean; attention_count: number };
+export type MailStatus = { enabled: boolean; provider: string; accounts: MailAccount[] };
+export type MailState = 'ingested' | 'body_only' | 'unsupported' | 'too_large' | 'error';
+export type MailAttachmentResult = 'ingested' | 'duplicate' | 'unsupported' | 'too_large';
+export type MailAttachment = { filename: string | null; result: MailAttachmentResult; document_id: string | null };
+export type MailMessage = {
+  id: string;
+  account_id: string;
+  received_on: string | null;
+  from_domain: string | null;
+  subject: string | null;
+  state: MailState;
+  error_reason: 'fetch_failed' | 'parse_failed' | null;
+  attempts: number;
+  attachments: MailAttachment[];
+  hint: { txn_date: string | null; amount: number | null; vendor: string | null; order_ref: string | null } | null;
+};
+export type MailPage = { items: MailMessage[]; next_cursor: string | null };
+
+// 要対応のメール（src/mail/status.ts の ATTENTION_SQL）。1 回に読む上限は API の最大（100）。
+export const MAIL_ATTENTION_URL = '/api/mail/messages?state=attention&limit=100';
+export const MAIL_STATE_LABELS: Record<MailState, string> = { ingested: '取り込み済み', body_only: '添付なし', unsupported: '未対応の形式', too_large: '大きすぎる', error: '失敗' };
+export const MAIL_ERROR_LABELS: Record<NonNullable<MailMessage['error_reason']>, string> = { fetch_failed: '取得に失敗', parse_failed: '解析に失敗' };
+export const MAIL_ATTACHMENT_LABELS: Record<MailAttachmentResult, string> = { ingested: '取り込み済み', duplicate: '取り込み済み（重複）', unsupported: '未対応の形式', too_large: '大きすぎる' };
+// 要対応の件数の合計。取り込みが無効（enabled = false）か、読めなければ 0（何も出さない）。
+export const mailAttention = (s: MailStatus | null | undefined) => (s?.enabled ? s.accounts.reduce((n, a) => n + a.attention_count, 0) : 0);
+export const mailAttentionText = (n: number) => `メールの要対応 ${n} 件`;
+// 行の状態の文。error は理由と試した回数（「取得に失敗（3 回）」）。
+export function mailStateText(m: MailMessage): string {
+  if (m.state !== 'error') return MAIL_STATE_LABELS[m.state];
+  return `${m.error_reason ? MAIL_ERROR_LABELS[m.error_reason] : MAIL_STATE_LABELS.error}（${m.attempts} 回）`;
+}
+// 添付の 1 行「invoice.pdf: 未対応の形式」。
+export const mailAttachmentText = (a: MailAttachment) => `${a.filename || '名前なし'}: ${MAIL_ATTACHMENT_LABELS[a.result] ?? a.result}`;
+// POST /api/mail/sync の結果の文。どのアカウントも積まなければ「実行中か、10 分以内に実行済み」。409 は取り込みが無効。
+export function mailSyncText(status: number, body: unknown): string {
+  if (status === 409) return 'メールの取り込みは無効です（config.toml の [mail] enabled）。';
+  if (status !== 200) return failText(status, body);
+  const accounts = (body as { accounts?: { created?: boolean }[] } | null)?.accounts ?? [];
+  return accounts.some((a) => a.created === true) ? '取り込みを始めました。しばらくしてから読み直してください。' : '実行中か、10 分以内に実行済みです。';
+}

@@ -1,5 +1,5 @@
 // PWA のエントリ（docs/mvp-plan-v0.1.md T1-12・T1-13、mvp-plan.md T2-10・T2-11）。画面は 撮影 / 確認 / 送信待ち / 送信済み の 4 つ（下のタブで切り替え）。
-// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。5 つ目の「お金」（T111・T304）には期日の近い予定の件数（counts.upcoming、T305）を出す。バックアップが止まっていたら・freee の再認可が要るなら上に警告帯（GET /api/status）。
+// 確認のタブには確認待ちの件数（GET /api/documents/counts）を出す。5 つ目の「お金」（T111・T304）には期日の近い予定の件数（counts.upcoming、T305）を出す。バックアップが止まっていたら・freee やメールの再認可が要るなら上に警告帯（GET /api/status）。
 // 送信待ちは開いたとき・オンラインに戻ったとき・画面に戻ったとき・追加したときに再送する（iOS は Background Sync が無いため）。
 import { h, render } from 'preact';
 import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
@@ -11,7 +11,7 @@ import { idbStore } from './queue/idb.ts';
 import { QueueList } from './queue/QueueList.tsx';
 import { ReviewList } from './review/ReviewList.tsx';
 import { createFlusher, type FlushReport, type QueueItem } from './queue/queue.ts';
-import { backupWarning, reauthWarning, STATUS_URL, type StatusResponse } from './status.ts';
+import { backupWarning, mailReauthWarnings, reauthWarning, STATUS_URL, type StatusResponse } from './status.ts';
 import './style.css';
 
 type MoneyComponent = (typeof import('./money/Money.tsx'))['Money'];
@@ -86,6 +86,7 @@ function App() {
   const [money, setMoney] = useState<MoneyComponent | 'error' | null>(null);
   const [backupWarn, setBackupWarn] = useState<string | null>(null);
   const [reauthWarn, setReauthWarn] = useState<string | null>(null);
+  const [mailWarns, setMailWarns] = useState<string[]>([]);
   const today = todayLocal(new Date());
   const flusher = useMemo(() => createFlusher(idbStore, sendIngest), []);
 
@@ -103,6 +104,7 @@ function App() {
     if (st.ok) {
       setBackupWarn(backupWarning(st.data.backup, new Date()));
       setReauthWarn(reauthWarning(st.data));
+      setMailWarns(mailReauthWarnings(st.data));
     }
   }, []);
 
@@ -158,6 +160,11 @@ function App() {
           {reauthWarn}
         </p>
       )}
+      {mailWarns.map((w) => (
+        <p key={w} class="band-warn" role="alert">
+          {w}
+        </p>
+      ))}
       {backupWarn && (
         <p class="band-warn" role="alert">
           {backupWarn}
