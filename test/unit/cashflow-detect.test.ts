@@ -10,7 +10,7 @@ import { insertAccount, insertBankTxn, updateAccountSettings, type TxnSide } fro
 import { detectTransfers } from '../../src/bank/transfers.ts';
 import { addDays, addMonths } from '../../src/calendar/businessDays.ts';
 import { acceptCandidate, detectRecurrences, dismissCandidate, findRecurrences, nextDueFromCandidate } from '../../src/cashflow/detect.ts';
-import { listRecurrenceCandidates, listScheduledItems } from '../../src/cashflow/repo.ts';
+import { insertRecurrenceCandidate, listRecurrenceCandidates, listScheduledItems } from '../../src/cashflow/repo.ts';
 import { createItem } from '../../src/cashflow/schedule.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -62,10 +62,10 @@ function seed(db: Db, A: string, B: string): void {
   txn(db, A, '2026-05-22', 39500, '自動車税');
   // ノイズ: 1 回だけ。
   txn(db, A, '2026-03-03', 50000, '家電');
-  // ノイズ: 1 年おきだが金額が 20% 違う。
+  // 1 年おきで金額が 20% 違う: 金額の段が 2 つなので、値上げした毎年の定額（額は新しい方）になる。
   txn(db, A, '2025-07-01', 20000, '保険');
   txn(db, A, '2026-07-01', 24000, '保険');
-  // ノイズ: 毎月だが真ん中だけ 20% 違う（同じ金額の 2 本は間隔 60 日で、隔月には 2 回しかない）。
+  // ノイズ: 毎月だが真ん中だけ 20% 違う（段 1 は金額の段が 3 つで捨て、段 2 の同じ金額の 2 本は隔月に 2 回しかない）。
   txn(db, A, '2026-01-05', 10000, '電気');
   txn(db, A, '2026-02-04', 12000, '電気');
   txn(db, A, '2026-03-06', 10000, '電気');
@@ -80,11 +80,11 @@ const summary = (db: Db) =>
     .sort();
 
 describe('detectRecurrences', () => {
-  test('24 か月の明細から、毎月 2・隔月 1・毎年 1 だけを候補にする', () => {
+  test('24 か月の明細から、毎月 2・隔月 1・毎年 2 だけを候補にする', () => {
     const { db, A, B } = fresh();
     seed(db, A, B);
-    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 4, updated: 0 });
-    assert.deepEqual(summary(db), ['家賃:monthly:80000', '携帯:monthly:3120', '水道:bimonthly:6000', '自動車税:yearly:39500'].sort());
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 5, updated: 0 });
+    assert.deepEqual(summary(db), ['家賃:monthly:80000', '携帯:monthly:3120', '水道:bimonthly:6000', '自動車税:yearly:39500', '保険:yearly:24000'].sort());
     for (const c of listRecurrenceCandidates(db)) {
       assert.equal(c.state, 'open');
       assert.equal(c.account_id, A);
@@ -104,7 +104,7 @@ describe('detectRecurrences', () => {
     seed(db, A, B);
     detectRecurrences(db, { today: TODAY, now: T0 });
     assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 0, updated: 0 });
-    assert.equal(listRecurrenceCandidates(db).length, 4);
+    assert.equal(listRecurrenceCandidates(db).length, 5);
     db.close();
   });
 
@@ -121,21 +121,73 @@ describe('detectRecurrences', () => {
 
   // 最後の出現を 2026-11-01 にして、等間隔で count 回さかのぼる。
   const series = (gap: number, count: number, end = '2026-11-01') => Array.from({ length: count }, (_, i) => addDays(end, -gap * (count - 1 - i)));
-  const BOUNDS: [string, number, number, string | null][] = [
-    ['毎月', 27, 3, null], ['毎月', 28, 3, 'monthly'], ['毎月', 31, 3, 'monthly'], ['毎月', 32, 3, null],
-    ['隔月', 57, 3, null], ['隔月', 58, 3, 'bimonthly'], ['隔月', 62, 3, 'bimonthly'], ['隔月', 63, 3, null],
-    ['3 か月', 84, 3, null], ['3 か月', 85, 3, 'quarterly'], ['3 か月', 97, 3, 'quarterly'], ['3 か月', 98, 3, null], ['3 か月', 91, 2, null],
-    ['毎年', 349, 2, null], ['毎年', 350, 2, 'yearly'], ['毎年', 380, 2, 'yearly'], ['毎年', 381, 2, null],
-    ['隔年', 714, 2, null], ['隔年', 715, 2, 'biennial'], ['隔年', 745, 2, 'biennial'], ['隔年', 746, 2, null],
-  ];
-  for (const [label, gap, count, want] of BOUNDS) {
-    test(`間隔の境界: ${label} ${gap} 日 × ${count} 回 → ${want ?? 'なし'}`, () => {
-      const { db, A } = fresh();
-      for (const d of series(gap, count)) txn(db, A, d, 1000, '境界');
-      assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 26 }).map((d) => d.interval), want ? [want] : []);
-      db.close();
+  const found = (db: Db) => findRecurrences(db, { today: TODAY }).map((d) => `${d.descriptionNorm}:${d.interval}:${d.amount}:${d.occurrences.length}`).sort();
+  // 1.06 倍ずつ違う額（どの 2 つも ±5% に入らない）。
+  const spread = (k: number) => Math.round(1000 * 1.06 ** k);
+
+  test('枠: 毎月 27 日のうち 2 回が +2 日・+1 日にずれても 1 本の列', () => {
+    const { db, A } = fresh();
+    for (const d of ['2026-05-27', '2026-06-29', '2026-07-27', '2026-08-27', '2026-09-28', '2026-10-27']) txn(db, A, d, 50000, 'テスト家賃');
+    assert.deepEqual(found(db), ['テスト家賃:monthly:50000:6']);
+    db.close();
+  });
+
+  test('枠: 月末払いが 12/31 → 1/5（+5 日）にずれても列が切れない', () => {
+    const { db, A } = fresh();
+    const dates = Array.from({ length: 16 }, (_, i) => addMonths('2025-07-31', i)).map((d) => (d === '2025-12-31' ? '2026-01-05' : d));
+    for (const d of dates) txn(db, A, d, 3000, 'テスト月末');
+    const [f] = findRecurrences(db, { today: TODAY });
+    assert.deepEqual([f.interval, f.occurrences.length], ['monthly', 16]);
+    assert.ok(f.occurrences.some((o) => o.date === '2026-01-05'));
+    db.close();
+  });
+
+  test('枠: −3 日（前営業日）は同じ列、−4 日は枠外で列が切れる', () => {
+    const { db, A } = fresh();
+    for (const ym of ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10']) {
+      txn(db, A, ym === '2026-08' ? '2026-08-07' : day(ym, 10), 2000, 'テスト前営業日');
+      txn(db, A, ym === '2026-06' ? '2026-06-06' : day(ym, 10), 2000, 'テスト枠外');
+    }
+    // 枠外の 6/6 で切れ、7 月〜10 月の 4 回だけが列になる（5 月の 1 回は 3 回に足りない）。
+    assert.deepEqual(found(db), ['テスト前営業日:monthly:2000:6', 'テスト枠外:monthly:2000:4']);
+    db.close();
+  });
+
+  test('枠: 隔月・3 か月・毎年・隔年も日のずれを許す', () => {
+    const { db, A } = fresh();
+    for (const d of ['2026-04-15', '2026-06-18', '2026-08-15', '2026-10-15']) txn(db, A, d, 6000, 'テスト水道');
+    for (const d of ['2026-01-20', '2026-04-18', '2026-07-20', '2026-10-20']) txn(db, A, d, 40000, 'テスト国保');
+    for (const d of ['2024-11-10', '2025-11-12']) txn(db, A, d, 30000, 'テスト年払い');
+    for (const d of ['2024-10-01', '2026-10-03']) txn(db, A, d, 10000, 'テスト更新');
+    assert.deepEqual(found(db), ['テスト水道:bimonthly:6000:4', 'テスト国保:quarterly:40000:4', 'テスト年払い:yearly:30000:2', 'テスト更新:biennial:10000:2'].sort());
+    db.close();
+  });
+
+  test('増額: 10,000 × 5 回 → 20,000 × 2 回は毎月の定額 1 件（額は新しい方、7 回）', () => {
+    const { db, A } = fresh();
+    ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].forEach((ym, i) => txn(db, A, day(ym, 27), i < 5 ? 10000 : 20000, 'テスト積立A'));
+    assert.deepEqual(found(db), ['テスト積立A:monthly:20000:7']);
+    db.close();
+  });
+
+  test('毎月同じ日の 600 円と月 3 回のばらばらの買い物: 段 1 は純度で落ち、段 2 で 600 円の毎月', () => {
+    const { db, A } = fresh();
+    ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].forEach((ym, i) => {
+      txn(db, A, day(ym, 15), 600, 'テスト店');
+      [3 + i, 9 + i, 22 - i].forEach((d, j) => txn(db, A, day(ym, d), spread(i * 3 + j), 'テスト店'));
     });
-  }
+    assert.deepEqual(found(db), ['テスト店:monthly:600:6']);
+    db.close();
+  });
+
+  test('月に 4 回以上ばらばらに出る店は何も作らない', () => {
+    const { db, A } = fresh();
+    MONTHS.slice(-10).forEach((ym, i) => {
+      [2 + (i % 3), 9 + (i % 4), 16 + (i % 2), 24 + (i % 3)].forEach((d, j) => txn(db, A, day(ym, d), spread(i * 4 + j), 'テスト雑貨'));
+    });
+    assert.deepEqual(findRecurrences(db, { today: TODAY }), []);
+    db.close();
+  });
 
   test('毎月は 2 回では足りない（3 回から）', () => {
     const { db, A } = fresh();
@@ -153,10 +205,10 @@ describe('detectRecurrences', () => {
     db.close();
   });
 
-  test('値上げ: 3000 → 3500 なら新しい金額だけが候補になる', () => {
+  test('値上げ: 3000 → 3500 は 1 本の列で、金額は新しい方', () => {
     const { db, A } = fresh();
     for (const ym of MONTHS) txn(db, A, day(ym, 10), ym < '2026-07' ? 3000 : 3500, '携帯');
-    assert.deepEqual(findRecurrences(db, { today: TODAY }).map((d) => `${d.interval}:${d.amount}:${d.occurrences.length}`), ['monthly:3500:4']);
+    assert.deepEqual(findRecurrences(db, { today: TODAY }).map((d) => `${d.interval}:${d.amount}:${d.occurrences.length}`), ['monthly:3500:24']);
     db.close();
   });
 
@@ -181,18 +233,23 @@ describe('detectRecurrences', () => {
     db.close();
   });
 
-  test('止まった支払いは出ない（最後の出現から上限 + 半分の日数を超えたら）', () => {
+  test('止まった支払いは出ない（次の予定日から months × 15 + 6 日を過ぎたら）', () => {
     const { db, A } = fresh();
-    // 毎月の上限は 31 + 15 = 46 日。today − 46 日は出て、today − 47 日は出ない。
-    for (const d of series(30, 3, addDays(TODAY, -46))) txn(db, A, d, 1000, 'まだ');
-    for (const d of series(30, 3, addDays(TODAY, -47))) txn(db, A, d, 1000, '止まった');
-    // 3 か月ごとの上限は 97 + 48 = 145 日。
-    for (const d of series(91, 3, addDays(TODAY, -145))) txn(db, A, d, 1000, '3か月まだ');
-    for (const d of series(91, 3, addDays(TODAY, -146))) txn(db, A, d, 1000, '3か月止まった');
-    // 毎年の上限は 380 + 190 = 570 日。
-    for (const d of series(365, 2, addDays(TODAY, -570))) txn(db, A, d, 1000, '年まだ');
-    for (const d of series(365, 2, addDays(TODAY, -571))) txn(db, A, d, 1000, '年止まった');
-    assert.deepEqual(findRecurrences(db, { today: TODAY, lookbackMonths: 40 }).map((d) => d.descriptionNorm).sort(), ['まだ', '3か月まだ', '年まだ'].sort());
+    // 毎月: 最後の枠は 9 月。次の予定日 10/10 + 21 日 = 10/31 までは出る。最後の明細が −2 日ずれていても枠で数える。
+    for (const ym of ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09']) {
+      txn(db, A, day(ym, 10), 1000, 'テスト毎月');
+      txn(db, A, ym === '2026-09' ? '2026-09-08' : day(ym, 10), 1000, 'テストずれ');
+    }
+    // 毎年: 次の予定日 2026-05-20 + 186 日 = 2026-11-22 までは出る。
+    for (const d of ['2024-05-20', '2025-05-20']) txn(db, A, d, 1000, 'テスト毎年');
+    const names = (today: string) =>
+      findRecurrences(db, { today, lookbackMonths: 40 })
+        .map((d) => d.descriptionNorm)
+        .sort();
+    assert.deepEqual(names('2026-10-31'), ['テストずれ', 'テスト毎年', 'テスト毎月'].sort());
+    assert.deepEqual(names('2026-11-01'), ['テスト毎年']);
+    assert.deepEqual(names('2026-11-22'), ['テスト毎年']);
+    assert.deepEqual(names('2026-11-23'), []);
     db.close();
   });
 
@@ -248,7 +305,7 @@ describe('detectRecurrences', () => {
       T0,
     );
     detectRecurrences(db, { today: TODAY, now: T0 });
-    assert.deepEqual(summary(db), ['携帯:monthly:3120', '水道:bimonthly:6000', '自動車税:yearly:39500'].sort());
+    assert.deepEqual(summary(db), ['携帯:monthly:3120', '水道:bimonthly:6000', '自動車税:yearly:39500', '保険:yearly:24000'].sort());
     db.prepare('UPDATE scheduled_items SET active = 0 WHERE id = ?').run(it.id);
     assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 1);
     db.close();
@@ -293,6 +350,35 @@ describe('既存の候補・予定項目との重複', () => {
     assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
     assert.deepEqual(listRecurrenceCandidates(db).find((c) => c.id === old.id), d);
     assert.deepEqual(systemDismissals(db), []);
+    db.close();
+  });
+
+  test('明細が重なる open の候補は周期が違っても置き換える（人が dismissed にしたもの・重ならないものは触らない）', () => {
+    const { db, A } = fresh();
+    const ids = ['2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].map((ym) =>
+      txn(db, A, day(ym, 10), 5000, 'テスト保険'),
+    );
+    const other = ['2026-08', '2026-09', '2026-10'].map((ym) => txn(db, A, day(ym, 20), 1000, 'テスト回線'));
+    // 前の版の検出で作られた候補を置く: 同じ明細を含む「毎年」と「3 か月ごと」（後者は人が却下）、重ならない別の摘要。
+    const occ = (xs: string[]) => xs.map((id) => ({ ...(db.prepare('SELECT txn_date AS date, amount FROM bank_txns WHERE id = ?').get(id) as { date: string; amount: number }), bank_txn_id: id }));
+    const yearly = insertRecurrenceCandidate(db, { accountId: A, descriptionNorm: 'テスト保険', interval: 'yearly', amount: 5000, occurrences: occ([ids[0], ids[11]]), now });
+    const quarterly = insertRecurrenceCandidate(db, { accountId: A, descriptionNorm: 'テスト保険', interval: 'quarterly', amount: 5000, occurrences: occ([ids[5], ids[8], ids[11]]), now });
+    const q = dismissCandidate(db, quarterly.id, by, T0);
+    const keep = insertRecurrenceCandidate(db, { accountId: A, descriptionNorm: 'テスト回線', interval: 'monthly', amount: 1000, occurrences: occ(other), now });
+
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 1 });
+    const all = listRecurrenceCandidates(db);
+    const neu = all.find((c) => c.interval === 'monthly' && c.description_norm === 'テスト保険')!;
+    assert.equal(neu.state, 'open');
+    assert.equal(all.find((c) => c.id === yearly.id)!.state, 'dismissed');
+    assert.deepEqual(all.find((c) => c.id === quarterly.id), q);
+    assert.equal(all.find((c) => c.id === keep.id)!.state, 'open');
+    assert.deepEqual(
+      systemDismissals(db).map((r) => [r.entity_id, JSON.parse(r.payload_json)]),
+      [[yearly.id, { reason: 'superseded', by: neu.id }]],
+    );
+    assert.equal(verifyAudit(db).ok, true);
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 0, updated: 0 });
     db.close();
   });
 
@@ -433,7 +519,7 @@ describe('acceptCandidate / dismissCandidate', () => {
     assert.throws(() => acceptCandidate(db, c.id, by, { amount: 0 }, T0), /invalid_amount/);
     assert.throws(() => acceptCandidate(db, 'nope', by, {}, T0), /not_found/);
     assert.equal(listScheduledItems(db).length, 0);
-    assert.equal(listRecurrenceCandidates(db, { state: 'open' }).length, 4);
+    assert.equal(listRecurrenceCandidates(db, { state: 'open' }).length, 5);
     db.close();
   });
 
@@ -450,7 +536,7 @@ describe('acceptCandidate / dismissCandidate', () => {
     // 明細が増えても同じ条件では出さない。
     txn(db, A, '2026-11-05', 6000, '水道');
     assert.equal(detectRecurrences(db, { today: TODAY, now: T0 }).created, 0);
-    assert.equal(listRecurrenceCandidates(db).length, 4);
+    assert.equal(listRecurrenceCandidates(db).length, 5);
     db.close();
   });
 });
@@ -477,14 +563,14 @@ describe('/api/recurrence_candidates', () => {
   test('detect → 一覧 → accept / dismiss', async () => {
     let res = await post('/api/recurrence_candidates/detect');
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { created: 4, updated: 0 });
+    assert.deepEqual(await res.json(), { created: 5, updated: 0 });
     res = await post('/api/recurrence_candidates/detect');
     assert.deepEqual(await res.json(), { created: 0, updated: 0 });
 
     res = await get('/api/recurrence_candidates?state=open');
     assert.equal(res.status, 200);
     const { candidates } = (await res.json()) as { candidates: { id: string; description_norm: string }[] };
-    assert.equal(candidates.length, 4);
+    assert.equal(candidates.length, 5);
     const id = (s: string) => candidates.find((c) => c.description_norm === s)!.id;
 
     res = await post(`/api/recurrence_candidates/${id('自動車税')}/accept`, { category: 'car' });
@@ -500,9 +586,9 @@ describe('/api/recurrence_candidates', () => {
     assert.equal(((await res.json()) as { state: string }).state, 'dismissed');
 
     res = await get('/api/recurrence_candidates?state=open');
-    assert.equal(((await res.json()) as { candidates: unknown[] }).candidates.length, 2);
+    assert.equal(((await res.json()) as { candidates: unknown[] }).candidates.length, 3);
     res = await get('/api/recurrence_candidates');
-    assert.equal(((await res.json()) as { candidates: unknown[] }).candidates.length, 4);
+    assert.equal(((await res.json()) as { candidates: unknown[] }).candidates.length, 5);
 
     // 受け入れ済みは 400。
     res = await post(`/api/recurrence_candidates/${id('自動車税')}/accept`, {});
@@ -521,7 +607,7 @@ describe('/api/recurrence_candidates', () => {
     const { candidates } = (await (await get('/api/recurrence_candidates')).json()) as {
       candidates: { description_norm: string; description: string | null; account_name: string | null }[];
     };
-    assert.equal(candidates.length, 5);
+    assert.equal(candidates.length, 6);
     const c = candidates.find((x) => x.description_norm === norm)!;
     assert.deepEqual([c.description, c.account_name], ['NTT東日本光コラボ回収代行分', '銀行A']);
     for (const x of candidates) assert.equal(x.account_name, '銀行A');
