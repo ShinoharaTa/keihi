@@ -20,6 +20,11 @@
 //        months は 1〜FORECAST_MAX_MONTHS の整数。[cashflow] の設定は deps.config.cashflow。
 //        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）・
 //        consumption_tax_not_implemented（方式は設定済みだが PR1 は消費税を作らない）を足す。
+// 大きな出費（src/cashflow/large.ts。docs/cashflow.md §15）:
+//   GET  /api/large_expenses                          → 200 {items: [LargeExpense]}（5 万円以上の支出。新しい順、50 件まで。今日は Asia/Tokyo の暦日）
+//   POST /api/large_expenses/:bank_txn_id/schedule    body {recurrence（yearly | biennial | once）, category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 明細の額）, anchor_date?}
+//        → 201 {decision, item} / 400 {error}（once で anchor_date が無いか今日より後でなければ anchor_date_required）/ 404（一覧に出せない明細）/ 409 already_decided
+//   POST /api/large_expenses/:bank_txn_id/dismiss     → 200 {decision}（既に dismissed ならそのまま）/ 404 / 409 already_decided（予定にした明細）
 //   PATCH /api/scheduled_items/:id は pinned（真偽値。origin = estimate の項目だけ。それ以外は 400 invalid_pinned）も受ける。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。
 import { Hono, type Context } from 'hono';
@@ -29,6 +34,7 @@ import { DEFAULT_FORECAST_MONTHS, FORECAST_MAX_MONTHS, buildForecast } from '../
 import type { Config } from '../../config.ts';
 import { acceptCandidate, detectRecurrences, dismissCandidate, type AcceptOverrides } from '../../cashflow/detect.ts';
 import { CANDIDATE_STATES, listRecurrenceCandidateViews, type CandidateState } from '../../cashflow/repo.ts';
+import { dismissLargeExpense, listLargeExpenses, scheduleLargeExpense, type ScheduleLargeInput } from '../../cashflow/large.ts';
 import { cashflowTaxWarnings } from '../../cashflow/tax/sync.ts';
 import type { AppDeps } from '../app.ts';
 import { USER_HEADER } from '../auth.ts';
@@ -133,6 +139,32 @@ export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
   r.post('/recurrence_candidates/:id/dismiss', (c) => {
     try {
       return c.json(dismissCandidate(deps.db, c.req.param('id'), by(c), now()));
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  // ---- 大きな出費 ----
+
+  r.get('/large_expenses', (c) => c.json({ items: listLargeExpenses(deps.db, todayInTokyo(now())) }));
+
+  r.post('/large_expenses/:bank_txn_id/schedule', async (c) => {
+    const body = await jsonBody(c.req.raw);
+    if (!body) return c.json({ error: 'invalid_json' }, 400);
+    if (Object.keys(body).some((k) => !['recurrence', 'category', 'name', 'amount', 'anchor_date'].includes(k))) return c.json({ error: 'invalid_field' }, 400);
+    const t = now();
+    try {
+      // 値は createItem が確かめる（acceptCandidate と同じ）。
+      return c.json(scheduleLargeExpense(deps.db, c.req.param('bank_txn_id'), body as ScheduleLargeInput, by(c), { today: todayInTokyo(t), now: t }), 201);
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  r.post('/large_expenses/:bank_txn_id/dismiss', (c) => {
+    const t = now();
+    try {
+      return c.json({ decision: dismissLargeExpense(deps.db, c.req.param('bank_txn_id'), by(c), { today: todayInTokyo(t), now: t }) });
     } catch (e) {
       return fail(c, e);
     }

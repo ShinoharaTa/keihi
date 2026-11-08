@@ -1043,4 +1043,37 @@ describe('SSR スナップショット', () => {
     const cf = html(c.CashflowView!, { cf: { ...forecast, months: ms, first_shortfall_month: null, warnings: [], cut_per_month_to_survive: null }, info: itemInfoMap([ins]), accounts: [], openYears: [0], onToggleYear: noop, onJump: noop, onMonthly: noop, onSchedule: noop, onAddIncome: noop });
     assert.match(cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!, /テスト保険 約 9,000/);
   });
+
+  test('大きな出費: 既定 3 件と「もっと見る」、ボタン 4 つ（suggested を accent）、同じ摘要の回数は 2 以上だけ', async () => {
+    const m = await load('/src/money/Schedule.tsx');
+    const big = (i: number, over: Record<string, unknown> = {}) => ({
+      bank_txn_id: `L${i}`,
+      account_id: 'A1',
+      account_name: 'テスト銀行',
+      txn_date: `2026-0${9 - i}-10`,
+      amount: 50_000 + i * 10_000,
+      description: `テスト大口${i}（原文）`,
+      description_norm: `テスト大口${i}`,
+      same_desc_count: 1,
+      suggested: 'yearly',
+      ...over,
+    });
+    const items = [big(1, { same_desc_count: 2 }), big(2, { suggested: 'biennial', txn_date: '2025-07-10' }), big(3), big(4)];
+    const props = { items, today: TODAY, busy: false, onShowAll: noop, onSchedule: noop, onDismiss: noop };
+    const out = html(m.LargeList!, { ...props, showAll: false });
+    assert.match(out, /大きな出費（5 万円以上）（4）/);
+    assert.equal((out.match(/<article /g) ?? []).length, 3);
+    assert.match(out, /もっと見る（あと 1 件）/);
+    assert.match(out, /<h3 class="m-h3">テスト大口1（原文）<\/h3>/, '名前は正規化前の摘要');
+    assert.match(out, /テスト銀行 · 8\/10 · 同じ摘要 2 回/);
+    assert.match(out, /テスト銀行 · 2025-07-10<\/p>/);
+    const card2 = out.split('テスト大口2（原文）')[1]!.split('</article>')[0]!;
+    assert.match(card2, /class="m-btn">毎年<\/button>/);
+    assert.match(card2, /class="m-btn m-btn-accent">2 年ごと<\/button>/);
+    assert.match(card2, />1 回だけ<\/button>[\s\S]*>しない<\/button>/);
+    const all = html(m.LargeList!, { ...props, showAll: true });
+    assert.equal((all.match(/<article /g) ?? []).length, 4);
+    assert.doesNotMatch(all, /もっと見る/);
+    assert.doesNotMatch(html(m.LargeList!, { ...props, items: [], showAll: false }), /保険の年払い/);
+  });
 });

@@ -1887,6 +1887,11 @@ button:disabled {
   padding: 12px;
   gap: 8px;
 }
+.m-grid2x2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
 .m-cand .m-row h3 {
   min-width: 0;
   overflow-wrap: anywhere;

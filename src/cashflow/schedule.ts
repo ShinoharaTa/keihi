@@ -35,8 +35,8 @@ const STEP_MONTHS: Record<Exclude<Recurrence, 'once'>, number> = { monthly: 1, b
 
 export class ScheduleError extends Error {
   readonly code: string;
-  readonly status: 400 | 404;
-  constructor(code: string, status: 400 | 404 = 400) {
+  readonly status: 400 | 404 | 409;
+  constructor(code: string, status: 400 | 404 | 409 = 400) {
     super(code);
     this.code = code;
     this.status = status;
