@@ -8,6 +8,7 @@
 //    skip の行（PayPay のポイント）は明細に入れず、件数だけ返す。壊れた行は行番号と理由を返し、ほかの行は入れる。
 // 5. コミットの後に振替を検出する（transfers.ts。範囲は「取り込んだ明細の最小の日付 − 2 × windowDays 〜 今日」）。
 //    作った組があれば監査（transfers.detected）に残す。検出が失敗しても取り込みの結果は変えない（transfers.detect_failed）。
+// 6. その後に明細 ⇔ 証憑の照合を動かす（match.ts の runMatchingSafe。失敗しても取り込みの結果は変えない）。
 // rows_merged は「既にあった明細に当たった行」の数（dedup の merged + touched。外部 ID が同じ行も、別の取得元の明細と組んだ行も含む）。
 // rows_error は CSV として読めなかった行と、dedup の検査に落ちた行の合計。
 import path from 'node:path';
@@ -18,6 +19,7 @@ import { ulid } from '../../db/ids.ts';
 import { putObject, sha256Hex } from '../../storage/objects.ts';
 import { addDays, dedupAndInsert, type DedupInput, type DedupResult } from '../dedup.ts';
 import { getAccount, updateSyncStatus } from '../repo.ts';
+import { runMatchingSafe, type MatchWindows } from '../match.ts';
 import { detectTransfers } from '../transfers.ts';
 import { decodeCsv, detectParser, headLine, type ParseError } from './index.ts';
 
@@ -103,6 +105,8 @@ export async function importCsv(
     user: string | null;
     dedupDateWindowDays: number;
     transferWindowDays: number;
+    // 照合の日付の幅（省略時は既定値）。
+    matchWindows?: MatchWindows;
     now: Date;
   },
 ): Promise<CsvImportResult> {
@@ -183,6 +187,8 @@ export async function importCsv(
   const errors: ParseError[] = [...parsed.errors, ...res.errors.map((e) => ({ line: rows[e.index]!.line, reason: e.reason }))].sort((a, b) => a.line - b.line);
   const dates = rows.map((r) => r.txnDate).sort();
   const dateRange = dates.length ? { from: dates[0]!, to: dates[dates.length - 1]! } : null;
+  const transfers = dateRange ? detectAfterImport(db, dateRange.from, input.transferWindowDays, at) : null;
+  if (dateRange) runMatchingSafe(db, at, { windows: input.matchWindows });
   return {
     csv_import_id: id,
     parser: parser.id,
@@ -193,7 +199,7 @@ export async function importCsv(
     rows_error: errors.length,
     errors,
     date_range: dateRange,
-    transfers: dateRange ? detectAfterImport(db, dateRange.from, input.transferWindowDays, at) : null,
+    transfers,
   };
 }
 

@@ -9,6 +9,7 @@
 // 4'. 明細の同期: sync_bank ジョブを積む（同じく積み増さない。src/bank/sync.ts、T104）。
 // 4''. 周期の検出（src/cashflow/detect.ts、T302）: 予定支出の候補を作る・更新する。sync_bank は後でジョブとして走るので、
 //    ここではその時点（前回の同期まで）の明細で検出する（1 日遅れでよい）。失敗しても daily は失敗にせず、report に {error} を残す。
+// 4'''. 明細 ⇔ 証憑の照合（src/bank/match.ts の runMatchingSafe、T206）。失敗しても daily は失敗にせず、report に {error} を残す。
 // 5. 紙原本のステータスの更新（src/deals/paper.ts refreshPaperStatuses）。
 // 6. 証憑の照合（src/backup/verifyRemote.ts）: 前回（settings.remote_verify_last_at）から 30 日以上空いたら。
 //    downloadReceipt は用途 sync で予算に通す（worker/main.ts）。途中で止まったら（予算など）前回実行日を進めず翌日に回す。
@@ -17,6 +18,7 @@
 //   settings.daily_last_step_<段> に JST の日付を残し、同じ日の再試行（や 2 回目の daily）では飛ばす（report.skipped_steps）。
 import { getSetting, markNeedsAttention, setSetting } from '../../attention.ts';
 import { appendAudit } from '../../audit.ts';
+import { runMatchingSafe, type MatchWindows, type RunMatchingSafeResult } from '../../bank/match.ts';
 import type { AccountProvider } from '../../bank/repo.ts';
 import { enqueueSyncBank } from '../../bank/sync.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
@@ -48,6 +50,8 @@ export type DailyDeps = {
   refreshToken: (() => Promise<RefreshCheck>) | null;
   // 証憑の照合。省略・null なら飛ばす。provider は downloadReceipt を用途 sync で予算に通したもの。
   remoteVerify?: { provider: () => Pick<Provider, 'downloadReceipt'>; objectsDir: string; mode: RemoteVerifyMode } | null;
+  // 照合の日付の幅（[bank]。省略時は既定値）。
+  matchWindows?: MatchWindows;
 };
 
 export type MetaDeadlineItem = { document_id: string; meta_deadline_on: string };
@@ -61,6 +65,7 @@ export type DailyReport = {
   reconcile: { job_id: number; created: boolean } | null;
   sync_bank: { job_id: number; created: boolean } | null;
   detect_recurrences: { created: number; updated: number } | { error: string } | null;
+  match: RunMatchingSafeResult | null;
   paper_status_changed: number | null;
   remote_verify: Omit<RemoteVerifyResult, 'items'> | 'skipped' | 'not_due' | null;
   needs_attention: number;
@@ -122,6 +127,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       reconcile: null,
       sync_bank: null,
       detect_recurrences: null,
+      match: null,
       paper_status_changed: null,
       remote_verify: null,
       needs_attention: 0,
@@ -186,6 +192,10 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
       }
     });
 
+    await step('match', () => {
+      report.match = runMatchingSafe(db, now, { windows: deps.matchWindows });
+    });
+
     await step('paper_status', () => {
       report.paper_status_changed = refreshPaperStatuses(db, now);
     });
@@ -221,6 +231,7 @@ export function createDailyHandler(getDeps: () => DailyDeps): Handler {
             reconcile: report.reconcile,
             sync_bank: report.sync_bank,
             detect_recurrences: report.detect_recurrences,
+            match: report.match,
             paper_status_changed: report.paper_status_changed,
             remote_verify: report.remote_verify,
             needs_attention: report.needs_attention,

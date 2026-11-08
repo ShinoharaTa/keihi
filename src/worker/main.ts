@@ -8,6 +8,7 @@
 //   node src/worker/main.ts [--db /path/to.db]
 import { parseArgs } from 'node:util';
 import { createGeminiFromConfig, type Gemini } from '../ai/gemini/client.ts';
+import { matchWindowsOf } from '../bank/match.ts';
 import { loadConfig, requireFreee, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers, type RunOptions } from '../jobs/worker.ts';
@@ -92,7 +93,7 @@ export const HANDLERS: Handlers = {
   }),
   extract: createExtractHandler(() => {
     const rt = runtime();
-    return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir };
+    return { gemini: rt.gemini, objectsDir: rt.cfg.objectsDir, matchWindows: matchWindowsOf(rt.cfg.bank) };
   }),
   update_receipt_meta: createUpdateReceiptMetaHandler(() => ({ provider: runtime().provider() })),
   send_deal: createSendDealHandler(() => ({ provider: runtime().provider() })),
@@ -102,13 +103,20 @@ export const HANDLERS: Handlers = {
   }),
   sync_bank: createSyncBankHandler(() => {
     const rt = runtime();
-    return { provider: rt.provider(), providerKind: rt.cfg.provider.kind, backfillFrom: rt.cfg.bank.backfillFrom, transferWindowDays: rt.cfg.bank.transferWindowDays };
+    return {
+      provider: rt.provider(),
+      providerKind: rt.cfg.provider.kind,
+      backfillFrom: rt.cfg.bank.backfillFrom,
+      transferWindowDays: rt.cfg.bank.transferWindowDays,
+      matchWindows: matchWindowsOf(rt.cfg.bank),
+    };
   }),
   daily: createDailyHandler(() => {
     const rt = runtime();
     return {
       provider: rt.provider,
       providerKind: rt.cfg.provider.kind,
+      matchWindows: matchWindowsOf(rt.cfg.bank),
       refreshToken: buildTokenRefresher(rt.cfg, rt.db),
       // 月 1 回の証憑の照合は予算の用途 sync で数える（既定の user ではない）。
       remoteVerify: {

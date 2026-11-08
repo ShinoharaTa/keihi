@@ -71,6 +71,7 @@ paid_tier_confirmed = false
 # dedup_date_window_days = 0    # API と CSV の重複を照合する日付の幅（0 = 同じ日だけ）
 # transfer_window_days = 3      # 口座間振替とみなす入出金の日付差の上限
 # match_date_window_days = 3    # 領収書の日付から明細の日付までの幅（照合）
+# match_card_date_window_days = 10  # 同じくカードの口座の幅（0〜31。Amazon などは注文日と請求日がずれる）
 
 [cashflow]
 # 資金繰り表（docs/mvp-plan-v3.md T303、V11）

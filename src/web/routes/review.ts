@@ -8,6 +8,7 @@
 //        → 400 本文の不正 / 404 / 409 版の食い違い・古いカード / 422 値の不正・必須の欠け（R10）
 import { Hono } from 'hono';
 import { thumbnail } from '../../ai/gemini/derive.ts';
+import { matchWindowsOf } from '../../bank/match.ts';
 import { openCard } from '../../review/card.ts';
 import { decide, ReviewError, type Decision } from '../../review/confirm.ts';
 import { readObject } from '../../storage/objects.ts';
@@ -55,7 +56,9 @@ export function reviewRoutes(deps: Pick<AppDeps, 'db' | 'objectsDir' | 'config' 
         return c.json({ reason: 'invalid_json' }, 400);
       }
       try {
-        const res = decide(deps.db, { documentId: c.req.param('id'), decision, body, user: c.req.header(USER_HEADER) ?? null, now: now() });
+        const res = decide(deps.db, {
+          documentId: c.req.param('id'), decision, body, user: c.req.header(USER_HEADER) ?? null, now: now(), matchWindows: matchWindowsOf(deps.config.bank),
+        });
         // 確定で積んだジョブ（検索項目・取引）を動かす。起動に失敗しても確定は済んでいる（keihi-worker.timer が拾う）。
         if (decision === 'approve') {
           try {

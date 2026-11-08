@@ -3,6 +3,8 @@
 //   resolveTagsBulk）で決まるので SQL では絞れない。SQL で絞った行を CHUNK 件ずつ読み、効くタグで落としながら limit + 1 件まで集める。
 //   摘要の絞り込み（q）は normalizeVendor で揃えて description_norm への部分一致にする（揃えて空になる q は 400）。
 //   category=none は未分類（category が null）。
+//   excluded（0 = 振替の除外を外す / 1 = 除外だけ）と receipt（match.ts の receipt）も同じく JS 側で絞る。vendor_key は
+//   description_norm の完全一致（SQL）。各行に receipt・receipt_hint（match.ts の createReceiptResolver）を付ける。
 // - 月次: その月の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
@@ -19,12 +21,14 @@ import {
   type Tag,
   type TxnSide,
 } from './repo.ts';
+import { createReceiptResolver, DEFAULT_MATCH_WINDOWS, isReceiptStatus, type MatchWindows, type ReceiptInfo, type ReceiptStatus } from './match.ts';
 import { CATEGORIES, isCategory, isTag, resolveTagsBulk, type ResolvedTag, type TagDecisionSource } from './tags.ts';
 import { listActiveTransfers } from './transfers.ts';
 import type { TransferKind } from './transferRepo.ts';
 
 export const MAX_LIMIT = 100;
 export const MAX_MONTHS = 36;
+export const VENDOR_KEY_MAX = 200;
 // タグ・カテゴリで絞るときに 1 回で読む行数。
 const CHUNK = 500;
 const TRANSFER_KINDS: readonly TransferKind[] = ['transfer', 'card_settlement', 'charge'];
@@ -45,6 +49,9 @@ export type TxnQuery = BankTxnSqlFilter & {
   tag?: Tag;
   // null は未分類（category=none）。
   category?: string | null;
+  // true = 振替の除外だけ、false = 除外を外す。
+  excluded?: boolean;
+  receipt?: ReceiptStatus;
   cursor?: { txnDate: string; id: string };
   limit: number;
 };
@@ -64,6 +71,9 @@ export type TxnView = {
   // 振替・引き落とし・チャージとして月次の集計から除かれるか。
   excluded: boolean;
   transfer_kind: TransferKind | null;
+  // 照合（match.ts）。receipt は経費の明細のときだけ。
+  receipt: ReceiptStatus | null;
+  receipt_hint: { document_id: string; status: string } | null;
 };
 
 export type TxnPage = { items: TxnView[]; next_cursor: string | null };
@@ -129,6 +139,18 @@ export function parseTxnQuery(q: Record<string, string | undefined>): TxnQuery {
   if (q.amount_max !== undefined) out.amountMax = nonNegInt(q.amount_max, 'invalid_amount_max');
   if (out.from !== undefined && out.to !== undefined && out.from > out.to) throw new SummaryError('invalid_range');
   if (out.amountMin !== undefined && out.amountMax !== undefined && out.amountMin > out.amountMax) throw new SummaryError('invalid_range');
+  if (q.excluded !== undefined) {
+    if (q.excluded !== '0' && q.excluded !== '1') throw new SummaryError('invalid_excluded');
+    out.excluded = q.excluded === '1';
+  }
+  if (q.vendor_key !== undefined) {
+    if (q.vendor_key.length < 1 || q.vendor_key.length > VENDOR_KEY_MAX) throw new SummaryError('invalid_vendor_key');
+    out.descriptionNormExact = q.vendor_key;
+  }
+  if (q.receipt !== undefined) {
+    if (!isReceiptStatus(q.receipt)) throw new SummaryError('invalid_receipt');
+    out.receipt = q.receipt;
+  }
   if (q.q !== undefined) {
     const n = normalizeVendor(q.q);
     if (n === '') throw new SummaryError('invalid_q');
@@ -153,7 +175,7 @@ function transferKinds(db: Db): Map<string, TransferKind> {
   return m;
 }
 
-function view(r: BankTxnListRow, t: ResolvedTag, kinds: Map<string, TransferKind>): TxnView {
+function view(r: BankTxnListRow, t: ResolvedTag, kinds: Map<string, TransferKind>, m: ReceiptInfo): TxnView {
   return {
     id: r.id,
     account_id: r.account_id,
@@ -168,24 +190,31 @@ function view(r: BankTxnListRow, t: ResolvedTag, kinds: Map<string, TransferKind
     tag_source: t.source,
     excluded: kinds.has(r.id),
     transfer_kind: kinds.get(r.id) ?? null,
+    receipt: m.receipt,
+    receipt_hint: m.receipt_hint,
   };
 }
 
-export function listTxns(db: Db, q: TxnQuery): TxnPage {
+export function listTxns(db: Db, q: TxnQuery, opts: { matchWindows?: MatchWindows } = {}): TxnPage {
   const limit = Math.min(Math.max(q.limit, 1), MAX_LIMIT);
-  const byTag = q.tag !== undefined || q.category !== undefined;
-  const chunk = byTag ? CHUNK : limit + 1;
+  const byJs = q.tag !== undefined || q.category !== undefined || q.excluded !== undefined || q.receipt !== undefined;
+  const chunk = byJs ? CHUNK : limit + 1;
   const kinds = transferKinds(db);
+  const receipts = createReceiptResolver(db, opts.matchWindows ?? DEFAULT_MATCH_WINDOWS);
   const out: TxnView[] = [];
   let after = q.cursor ?? null;
   for (;;) {
     const rows = listBankTxnsPage(db, q, after, chunk);
     const tags = resolveTagsBulk(db, rows.map((r) => r.id));
+    const ms = receipts(rows.map((r) => r.id));
     for (const r of rows) {
       const t = tags.get(r.id)!;
       if (q.tag !== undefined && t.tag !== q.tag) continue;
       if (q.category !== undefined && t.category !== q.category) continue;
-      out.push(view(r, t, kinds));
+      if (q.excluded !== undefined && kinds.has(r.id) !== q.excluded) continue;
+      const m = ms.get(r.id)!;
+      if (q.receipt !== undefined && m.receipt !== q.receipt) continue;
+      out.push(view(r, t, kinds, m));
       if (out.length > limit) break;
     }
     if (out.length > limit || rows.length < chunk) break;

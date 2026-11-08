@@ -9,7 +9,9 @@
 // - approve と personal は取引先の辞書を学習する（src/review/learn.ts）。
 // - approve で integrity_checked: true なら、同じトランザクションで documents.integrity_checked_at を入れる（T004、legal R9）。
 //   scan だけ。一度入れたら変えない（NULL のときだけ書く）。書いたら audit に document.integrity_checked。
+// - 確定の後（トランザクションの外）に明細 ⇔ 証憑の照合を動かす（src/bank/match.ts の runMatchingSafe。失敗しても確定は済んでいる）。
 import { appendAudit } from '../audit.ts';
+import { runMatchingSafe, type MatchWindows } from '../bank/match.ts';
 import { checkInvoiceRegNo, sanitizeText } from '../ai/validate.ts';
 import { tx, type Db } from '../db/index.ts';
 import { ulid } from '../db/ids.ts';
@@ -219,6 +221,8 @@ export type DecideInput = {
   user: string | null;
   now: Date;
   accountMap?: AccountMap;
+  // 照合の日付の幅（[bank]。省略時は既定値）。
+  matchWindows?: MatchWindows;
 };
 
 export type DecideResult = {
@@ -268,7 +272,7 @@ export function decide(db: Db, input: DecideInput): DecideResult {
   const warnings = amountWarnings(values);
   const { changed, sources } = diffSources(cardValues, stored.card.dataModel.sources, values);
 
-  return tx(db, () => {
+  const res = tx(db, () => {
     const cur = (db.prepare('SELECT max(version) v FROM reviews WHERE document_id = ?').get(doc.id) as { v: number | null }).v ?? 0;
     if (cur !== body.expected_version) throw new ReviewError(409, 'version_conflict', { current_version: cur });
     const card = db.prepare('SELECT status FROM ui_cards WHERE id = ?').get(stored.id) as { status: string };
@@ -339,4 +343,6 @@ export function decide(db: Db, input: DecideInput): DecideResult {
 
     return { review_id: id, version, decision: input.decision, status: next, changed, warnings, jobs, learned };
   });
+  runMatchingSafe(db, input.now, { windows: input.matchWindows });
+  return res;
 }
