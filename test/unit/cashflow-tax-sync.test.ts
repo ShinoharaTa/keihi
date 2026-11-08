@@ -59,7 +59,7 @@ describe('0008_tax のマイグレーション', () => {
       migrate(db, ms.filter((m) => m.version <= 7));
       const acc = insertAccount(db, { provider: 'freee', name: '普通預金', kind: 'bank', source: 'csv', now: T0.toISOString() }).id;
       const it = createItem(db, { ...manual, accountId: acc, recurrence: 'quarterly' }, user, T0);
-      assert.deepEqual(migrate(db, ms), ['0008_tax.sql']);
+      assert.deepEqual(migrate(db, ms.filter((m) => m.version <= 8)), ['0008_tax.sql']);
       assert.deepEqual(integrityCheck(db), []);
       assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
       const row = getScheduledItem(db, it.id)!;

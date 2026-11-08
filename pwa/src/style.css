@@ -1887,6 +1887,14 @@ button:disabled {
   padding: 12px;
   gap: 8px;
 }
+.m-grid2x2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.m-span2 {
+  grid-column: 1 / -1;
+}
 .m-cand .m-row h3 {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -2000,6 +2008,10 @@ button:disabled {
 .b-car {
   background: var(--m-car-soft);
   color: var(--m-car);
+}
+.b-savings {
+  background: var(--m-accent-soft);
+  color: var(--m-accent);
 }
 .b-other {
   background: var(--m-chip);

@@ -14,6 +14,8 @@ import {
   balanceSeries,
   candidateName,
   candidateNext,
+  candidateRange,
+  categoriesFor,
   cardUsage,
   ctaxReasonText,
   ctaxRowLabel,
@@ -485,6 +487,24 @@ describe('予定の純関数', () => {
     assert.equal(candidateNext({ interval: 'monthly', occurrences_json: 'x' } as Candidate), null);
     assert.equal(occurrenceCount(c('monthly', ['2026-09-15', '2026-10-15'])), 2);
     assert.ok(RECURRENCES.includes('quarterly'));
+  });
+  test('積立: 摘要から推す、支出だけ選べる、山では その他 に寄せる。提案の金額の幅', () => {
+    for (const d of ['テスト積立A', 'ﾂﾐﾀﾃ', 'テスト投信', 'テスト証券']) assert.equal(guessCategory(d), 'savings', d);
+    assert.ok(categoriesFor('out').includes('savings'));
+    assert.ok(!categoriesFor('out').includes('income'));
+    assert.ok(!categoriesFor('in').includes('savings'));
+    assert.ok(categoriesFor('in').includes('income'));
+    const d = { ...emptyDraft(TODAY), name: 'テスト積立A', amount: '20000' };
+    assert.equal(draftError({ ...d, direction: 'out', category: 'savings' }), null);
+    assert.equal(draftError({ ...d, direction: 'in', category: 'savings' }), 'この分類はこの向きの予定には使えません。');
+    assert.equal(draftError({ ...d, direction: 'out', category: 'income' }), 'この分類はこの向きの予定には使えません。');
+    const sav = scheduled({ id: 'V1', name: 'テスト積立A', category: 'savings', recurrence: 'yearly', amount: 20000 });
+    const peaks = peakMonths([up(sav, '2026-12-27')], TODAY);
+    assert.deepEqual([peaks[1]!.other, peaks[1]!.total], [20000, 20000]);
+    const json = (xs: unknown) => ({ occurrences_json: JSON.stringify(xs) }) as Candidate;
+    assert.deepEqual(candidateRange(json([{ amount: 8000 }, { amount: 15000 }, { amount: 12300 }])), { min: 8000, max: 15000 });
+    assert.equal(candidateRange(json([])), null);
+    assert.equal(candidateRange({ occurrences_json: 'x' } as Candidate), null);
   });
 });
 
@@ -1191,6 +1211,85 @@ describe('SSR スナップショット', () => {
     assert.match(cf, /税・保険の見積もりが未設定です/);
     const row = cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!;
     t.assert.snapshot(lines(`${out}\n${row}`));
+  });
+
+  test('不定額: 提案の「約」と金額の幅、台帳の「 · 概算」、見通しの月の「約」。積立のバッジ', async () => {
+    const m = await load('/src/money/Schedule.tsx');
+    const vc: Candidate = {
+      ...candidate,
+      id: 'R3',
+      description_norm: 'テストでんき',
+      amount: 12300,
+      amount_kind: 'variable',
+      occurrences_json: '[{"date":"2026-09-10","amount":8000},{"date":"2026-10-10","amount":15000},{"date":"2026-11-10","amount":12000}]',
+    };
+    const cards = html(m.CandidateList!, { items: [vc, candidate], accounts: [account()], today: TODAY, busy: false, onAccept: noop, onDismiss: noop });
+    assert.match(cards, /約 12,300<span class="m-per"> \/ 毎月<\/span>/);
+    assert.match(cards, /8,000〜15,000/);
+    assert.equal((cards.match(/約 /g) ?? []).length, 1, '定額の提案には付けない');
+    const v = scheduled({ id: 'V1', name: 'テストでんき', category: 'other', recurrence: 'monthly', amount: 12300, origin: 'detected', amount_kind: 'variable' });
+    const sav = scheduled({ id: 'V2', name: 'テスト積立A', category: 'savings', recurrence: 'monthly', amount: 20000 });
+    const ledger = html(m.Ledger!, { items: [v, sav], nextDue: {}, today: TODAY, filter: '', showInactive: false, onFilter: noop, onShowInactive: noop, onOpen: noop });
+    assert.match(ledger, /毎月 · 明細から · 概算<\/span>/);
+    assert.match(ledger, /<span class="m-badge b-savings">積立<\/span>/);
+    assert.match(ledger, /aria-pressed="false">積立<\/button>/);
+    const c = await load('/src/money/Cashflow.tsx');
+    const ins = scheduled({ id: 'S2', category: 'insurance', recurrence: 'bimonthly' });
+    const ms = months36((i) => (i === 1 ? { items: [{ id: 'S2', name: 'テスト保険', amount: 9000, direction: 'out' as const, due: '2026-12-20', origin: 'detected', amount_kind: 'variable' as const }] } : {}));
+    const cf = html(c.CashflowView!, { cf: { ...forecast, months: ms, first_shortfall_month: null, warnings: [], cut_per_month_to_survive: null }, info: itemInfoMap([ins]), accounts: [], openYears: [0], onToggleYear: noop, onJump: noop, onMonthly: noop, onSchedule: noop, onAddIncome: noop });
+    assert.match(cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!, /テスト保険 約 9,000/);
+  });
+
+  test('大きな出費: 既定 3 件と「もっと見る」、ボタン 5 つ（suggested を accent、しないは幅いっぱい）、同じ摘要の回数と合計は 2 以上だけ。1 回だけのフォーム', async () => {
+    const m = await load('/src/money/Schedule.tsx');
+    const big = (i: number, over: Record<string, unknown> = {}) => ({
+      bank_txn_id: `L${i}`,
+      account_id: 'A1',
+      account_name: 'テスト銀行',
+      txn_date: `2026-0${9 - i}-10`,
+      amount: 50_000 + i * 10_000,
+      description: `テスト大口${i}（原文）`,
+      description_norm: `テスト大口${i}`,
+      same_desc_count: 1,
+      total_amount: 50_000 + i * 10_000,
+      first_date: `2026-0${9 - i}-10`,
+      suggested: 'yearly',
+      ...over,
+    });
+    const items = [big(1, { same_desc_count: 2, total_amount: 115_000 }), big(2, { suggested: 'biennial', txn_date: '2025-07-10' }), big(3), big(4)];
+    const props = { items, today: TODAY, busy: false, onShowAll: noop, onSchedule: noop, onDismiss: noop };
+    const out = html(m.LargeList!, { ...props, showAll: false });
+    assert.match(out, /大きな出費（5 万円以上）（4）/);
+    assert.equal((out.match(/<article /g) ?? []).length, 3);
+    assert.match(out, /もっと見る（あと 1 件）/);
+    assert.match(out, /<h3 class="m-h3">テスト大口1（原文）<\/h3>/, '名前は正規化前の摘要');
+    assert.match(out, /テスト銀行 · 8\/10 · 同じ摘要 2 回 · 合計 115,000<\/p>/);
+    assert.match(out, /テスト銀行 · 2025-07-10<\/p>/);
+    const card2 = out.split('テスト大口2（原文）')[1]!.split('</article>')[0]!;
+    assert.match(card2, /class="m-btn">毎年<\/button>/);
+    assert.match(card2, /class="m-btn m-btn-accent">2 年ごと<\/button>/);
+    assert.match(card2, /class="m-btn">毎月<\/button>/);
+    assert.match(card2, />1 回だけ<\/button>[\s\S]*class="m-btn m-span2">しない<\/button>/);
+    const card4 = html(m.LargeList!, { ...props, items: [big(4, { suggested: 'monthly', same_desc_count: 6 })], showAll: false });
+    assert.match(card4, /class="m-btn m-btn-accent">毎月<\/button>/);
+    assert.equal((card4.match(/m-btn-accent/g) ?? []).length, 1);
+    const all = html(m.LargeList!, { ...props, showAll: true });
+    assert.equal((all.match(/<article /g) ?? []).length, 4);
+    assert.doesNotMatch(all, /もっと見る/);
+    assert.doesNotMatch(html(m.LargeList!, { ...props, items: [], showAll: false }), /保険の年払い/);
+    const form = html(m.ItemForm!, {
+      draft: { ...emptyDraft(TODAY), name: 'テスト大口1（原文）', amount: '60000', recurrence: 'once', anchor_date: '' },
+      editing: null,
+      busy: false,
+      onChange: noop,
+      onSave: noop,
+      onToggle: noop,
+      onClose: noop,
+      recurrences: ['once', 'monthly', 'yearly', 'biennial'],
+    });
+    assert.deepEqual([...form.matchAll(/<option value="(\w+)"/g)].map((x) => x[1]).filter((v) => ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'].includes(v!)), ['once', 'monthly', 'yearly', 'biennial']);
+    assert.doesNotMatch(form, /何日前に知らせる|終わりの日|aria-label="向き"/);
+    assert.match(form, /最初の支払日/);
   });
 
   test('税の試算: 入力（年・売上 ±100 万・方式と区分）、負担の表、方式の比較の 3 行（使えない方式は理由）', async (t) => {
