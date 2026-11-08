@@ -376,6 +376,9 @@ export function getLargeExpenseDecision(db: Db, bankTxnId: string): LargeExpense
   return (db.prepare('SELECT * FROM large_expense_decisions WHERE bank_txn_id = ?').get(bankTxnId) as LargeExpenseDecisionRow | undefined) ?? null;
 }
 
-export function decidedLargeExpenseTxnIds(db: Db): Set<string> {
-  return new Set((db.prepare('SELECT bank_txn_id FROM large_expense_decisions').all() as { bank_txn_id: string }[]).map((r) => r.bank_txn_id));
+// 判断済みの明細の口座・正規化摘要・日付。
+export function listDecidedLargeExpenseTxns(db: Db): { bank_txn_id: string; account_id: string; description_norm: string; txn_date: string }[] {
+  return db
+    .prepare('SELECT d.bank_txn_id, t.account_id, t.description_norm, t.txn_date FROM large_expense_decisions d JOIN bank_txns t ON t.id = d.bank_txn_id')
+    .all() as { bank_txn_id: string; account_id: string; description_norm: string; txn_date: string }[];
 }

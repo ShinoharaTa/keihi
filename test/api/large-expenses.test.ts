@@ -55,14 +55,15 @@ const txn = (date: string, amount: number, desc: string) =>
   insertBankTxn(db, { accountId: A, txnDate: date, amount, side: 'expense', description: desc, descriptionNorm: desc, now: T0.toISOString() }).id;
 
 describe('GET /api/large_expenses', () => {
-  test('5 万円以上の支出を新しい順に。認証が要る', async () => {
-    const a = txn('2025-07-01', 60_000, 'テスト保険');
+  test('5 万円以上の支出を口座・摘要ごとに 1 行、新しい順に。認証が要る', async () => {
+    txn('2025-07-01', 60_000, 'テスト保険');
     const b = txn('2026-07-01', 60_000, 'テスト保険');
+    const c = txn('2026-03-01', 90_000, 'テスト家電');
     txn('2026-07-02', 49_999, 'テスト家電');
     const r = await req('/api/large_expenses');
     assert.equal(r.status, 200);
     const { items } = (await r.json()) as { items: Record<string, unknown>[] };
-    assert.deepEqual(items.map((x) => x.bank_txn_id), [b, a]);
+    assert.deepEqual(items.map((x) => x.bank_txn_id), [b, c]);
     assert.deepEqual(Object.keys(items[0]).sort(), [
       'account_id',
       'account_name',
@@ -70,11 +71,13 @@ describe('GET /api/large_expenses', () => {
       'bank_txn_id',
       'description',
       'description_norm',
+      'first_date',
       'same_desc_count',
       'suggested',
+      'total_amount',
       'txn_date',
     ]);
-    assert.deepEqual([items[0].account_name, items[0].same_desc_count, items[0].suggested], ['テスト銀行', 2, 'yearly']);
+    assert.deepEqual([items[0].account_name, items[0].same_desc_count, items[0].total_amount, items[0].first_date, items[0].suggested], ['テスト銀行', 2, 120_000, '2025-07-01', 'yearly']);
     assert.notEqual((await req('/api/large_expenses', { user: null })).status, 200);
   });
 });
@@ -121,12 +124,20 @@ describe('POST /api/large_expenses/:bank_txn_id/schedule', () => {
     assert.deepEqual([item.recurrence, item.anchor_date, item.name, item.amount], ['once', '2027-01-20', 'テスト買い替え', 250_000]);
   });
 
+  test('毎月も受ける（anchor_date の既定は明細日 + 1 か月）', async () => {
+    const id = txn('2026-10-20', 70_000, 'テスト外注');
+    const r = await post(`/api/large_expenses/${id}/schedule`, { recurrence: 'monthly', name: 'テスト外注（原文）' });
+    assert.equal(r.status, 201);
+    const { item } = (await r.json()) as { item: Record<string, unknown> };
+    assert.deepEqual([item.recurrence, item.anchor_date, item.name], ['monthly', '2026-11-20', 'テスト外注（原文）']);
+  });
+
   test('400（JSON・知らないキー・周期）と 404', async () => {
     const id = txn('2026-06-10', 300_000, 'テスト家電');
     const err = async (r: Response) => [r.status, ((await r.json()) as { error: string }).error];
     assert.deepEqual(await err(await post(`/api/large_expenses/${id}/schedule`, '{')), [400, 'invalid_json']);
     assert.deepEqual(await err(await post(`/api/large_expenses/${id}/schedule`, { recurrence: 'yearly', account_id: A })), [400, 'invalid_field']);
-    assert.deepEqual(await err(await post(`/api/large_expenses/${id}/schedule`, { recurrence: 'monthly' })), [400, 'invalid_recurrence']);
+    assert.deepEqual(await err(await post(`/api/large_expenses/${id}/schedule`, { recurrence: 'quarterly' })), [400, 'invalid_recurrence']);
     assert.deepEqual(await err(await post('/api/large_expenses/NOPE/schedule', { recurrence: 'yearly' })), [404, 'not_found']);
   });
 });

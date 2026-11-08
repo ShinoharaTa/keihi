@@ -7,9 +7,10 @@ import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import { insertAccount, insertBankTxn, updateAccountSettings, type TxnSide } from '../../src/bank/repo.ts';
 import { detectTransfers } from '../../src/bank/transfers.ts';
-import { addDays } from '../../src/calendar/businessDays.ts';
+import { addDays, addMonths } from '../../src/calendar/businessDays.ts';
+import { detectRecurrences } from '../../src/cashflow/detect.ts';
 import { LARGE_LIST_MAX, dismissLargeExpense, listLargeExpenses, scheduleLargeExpense } from '../../src/cashflow/large.ts';
-import { getLargeExpenseDecision, insertRecurrenceCandidate, setRecurrenceCandidateState } from '../../src/cashflow/repo.ts';
+import { getLargeExpenseDecision, insertRecurrenceCandidate, listRecurrenceCandidates, setRecurrenceCandidateState } from '../../src/cashflow/repo.ts';
 import { ScheduleError, createItem, deactivateItem, type ItemInput } from '../../src/cashflow/schedule.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
@@ -69,7 +70,7 @@ const code = (fn: () => unknown): [string, number] => {
 };
 
 describe('一覧の対象', () => {
-  test('5 万円以上の支出だけ、24 か月前〜今日、新しい順。各項目の列', () => {
+  test('5 万円以上の支出だけ、24 か月前〜今日、新しい順。各行の列', () => {
     const { db, A } = fresh();
     const big = txn(db, A, '2026-06-10', 50_000, 'テスト保険A');
     txn(db, A, '2026-06-11', 49_999, 'テスト家電');
@@ -88,6 +89,8 @@ describe('一覧の対象', () => {
       description: 'テスト保険A（原文）',
       description_norm: 'テスト保険A',
       same_desc_count: 1,
+      total_amount: 50_000,
+      first_date: '2026-06-10',
       suggested: 'yearly',
     });
     db.close();
@@ -145,11 +148,11 @@ describe('一覧の対象', () => {
   test('active な台帳の項目で期日が ±7 日・金額が ±10% のものがあれば出さない（口座は NULL か同じ口座）', () => {
     const { db, A } = fresh();
     createItem(db, item(), by, T0); // 毎年 3/15、10 万円、口座なし
-    const in7 = txn(db, A, '2026-03-22', 109_000, 'テスト納付'); // +7 日・+9%
-    const before7 = txn(db, A, '2026-03-08', 100_000, 'テスト納付'); // −7 日
-    const day8 = txn(db, A, '2026-03-23', 100_000, 'テスト納付'); // +8 日
-    const amt11 = txn(db, A, '2026-03-15', 111_000, 'テスト納付'); // +11%
-    const low = txn(db, A, '2026-03-16', 91_000, 'テスト納付'); // 100,000 は 91,000 の 109.9%
+    const in7 = txn(db, A, '2026-03-22', 109_000, 'テスト納付1'); // +7 日・+9%
+    const before7 = txn(db, A, '2026-03-08', 100_000, 'テスト納付2'); // −7 日
+    const day8 = txn(db, A, '2026-03-23', 100_000, 'テスト納付3'); // +8 日
+    const amt11 = txn(db, A, '2026-03-15', 111_000, 'テスト納付4'); // +11%
+    const low = txn(db, A, '2026-03-16', 91_000, 'テスト納付5'); // 100,000 は 91,000 の 109.9%
     const xs = ids(db);
     assert.ok(!xs.includes(in7) && !xs.includes(before7) && !xs.includes(low));
     assert.ok(xs.includes(day8) && xs.includes(amt11));
@@ -159,32 +162,81 @@ describe('一覧の対象', () => {
     createItem(db2, item({ accountId: B2 }), by, T0);
     const off = createItem(db2, item({ anchorDate: '2026-05-15', origin: 'manual' }), by, T0);
     deactivateItem(db2, off.id, by, T0);
-    const x = txn(db2, A2, '2026-03-15', 100_000, 'テスト納付');
-    const y = txn(db2, A2, '2026-05-15', 100_000, 'テスト納付');
-    const z = txn(db2, B2, '2026-03-15', 100_000, 'テスト納付');
+    const x = txn(db2, A2, '2026-03-15', 100_000, 'テスト納付1');
+    const y = txn(db2, A2, '2026-05-15', 100_000, 'テスト納付2');
+    txn(db2, B2, '2026-03-15', 100_000, 'テスト納付1');
     assert.deepEqual(ids(db2), [y, x]);
-    assert.ok(!ids(db2).includes(z));
     db.close();
     db2.close();
   });
 
-  test('same_desc_count と suggested（350〜380 日前 → 毎年、715〜745 日前 → 2 年ごと、無ければ毎年）', () => {
+  test('同じ口座・摘要は 1 行（最新の明細・件数・合計・最初の日）。suggested（350〜380 日前 → 毎年、715〜745 日前 → 2 年ごと、無ければ毎年）', () => {
     const { db, A, B } = fresh();
-    const y1 = txn(db, A, '2025-07-01', 60_000, 'テスト保険B');
-    const y2 = txn(db, A, '2026-07-01', 60_000, 'テスト保険B'); // 365 日後
-    txn(db, A, '2026-08-01', 3_000, 'テスト保険B'); // 小口も回数に入る
-    txn(db, B, '2026-07-01', 60_000, 'テスト保険B'); // 別の口座は数えない
-    const b1 = txn(db, A, '2024-11-08', 120_000, 'テスト車検');
+    txn(db, A, '2025-07-01', 60_000, 'テスト保険B');
+    const y2 = txn(db, A, '2026-07-01', 62_000, 'テスト保険B'); // 365 日後
+    txn(db, A, '2026-08-01', 3_000, 'テスト保険B'); // 小口は行に入れない
+    const other = txn(db, B, '2026-06-30', 60_000, 'テスト保険B'); // 別の口座は別の行
+    txn(db, A, '2024-11-08', 120_000, 'テスト車検');
     const b2 = txn(db, A, '2026-11-06', 120_000, 'テスト車検'); // 728 日後
     const late = txn(db, A, addDays('2025-01-10', 381), 70_000, 'テスト会費');
     txn(db, A, '2025-01-10', 70_000, 'テスト会費');
-    const xs = new Map(listLargeExpenses(db, TODAY).map((x) => [x.bank_txn_id, x]));
-    const pick = (id: string) => [xs.get(id)!.same_desc_count, xs.get(id)!.suggested];
-    assert.deepEqual(pick(y2), [3, 'yearly']);
-    assert.deepEqual(pick(y1), [3, 'yearly']);
-    assert.deepEqual(pick(b2), [2, 'biennial']);
-    assert.deepEqual(pick(b1), [2, 'yearly']);
-    assert.deepEqual(pick(late), [2, 'yearly']);
+    const xs = listLargeExpenses(db, TODAY);
+    assert.deepEqual(xs.map((x) => x.bank_txn_id), [b2, y2, other, late]);
+    const pick = (id: string) => {
+      const x = xs.find((e) => e.bank_txn_id === id)!;
+      return [x.amount, x.same_desc_count, x.total_amount, x.first_date, x.suggested];
+    };
+    assert.deepEqual(pick(y2), [62_000, 2, 122_000, '2025-07-01', 'yearly']);
+    assert.deepEqual(pick(other), [60_000, 1, 60_000, '2026-06-30', 'yearly']);
+    assert.deepEqual(pick(b2), [120_000, 2, 240_000, '2024-11-08', 'biennial']);
+    assert.deepEqual(pick(late), [70_000, 2, 140_000, '2025-01-10', 'yearly']);
+    db.close();
+  });
+
+  test('同じ摘要の大口が 6 件以上なら suggested = monthly（5 件までは今までどおり）', () => {
+    const { db, A } = fresh();
+    const days = ['2026-04-03', '2026-05-20', '2026-06-08', '2026-07-30', '2026-08-14', '2026-10-02'];
+    days.forEach((d, i) => txn(db, A, d, 55_000 + i * 7_000, 'テスト外注'));
+    days.slice(0, 5).forEach((d) => txn(db, A, d, 52_000, 'テスト仕入'));
+    const xs = listLargeExpenses(db, TODAY);
+    assert.deepEqual(xs.map((x) => [x.description_norm, x.same_desc_count, x.suggested]), [
+      ['テスト外注', 6, 'monthly'],
+      ['テスト仕入', 5, 'yearly'],
+    ]);
+    db.close();
+  });
+
+  test('判断した明細と同じ口座・摘要で、その日以前の明細は出さない（後の明細はまた出る）', () => {
+    const { db, A } = fresh();
+    const old = txn(db, A, '2026-03-01', 80_000, 'テスト工事');
+    const rep = txn(db, A, '2026-05-01', 90_000, 'テスト工事');
+    const sameDay = txn(db, A, '2026-05-01', 70_000, 'テスト工事');
+    const row = listLargeExpenses(db, TODAY)[0]!;
+    assert.equal(row.same_desc_count, 3);
+    assert.ok([rep, sameDay].includes(row.bank_txn_id));
+    // 一覧の行の明細でなければ 404。
+    assert.deepEqual(code(() => dismissLargeExpense(db, old, by, opts)), ['not_found', 404]);
+    dismissLargeExpense(db, row.bank_txn_id, by, opts);
+    assert.deepEqual(ids(db), []);
+    const next = txn(db, A, '2026-09-01', 85_000, 'テスト工事');
+    assert.deepEqual(
+      listLargeExpenses(db, TODAY).map((x) => [x.bank_txn_id, x.same_desc_count, x.first_date]),
+      [[next, 1, '2026-09-01']],
+    );
+    db.close();
+  });
+
+  test('検出した open の候補（毎月の家賃）の明細は出さない。同じ摘要で列に入らない大口は出す', () => {
+    const { db, A } = fresh();
+    for (let i = 0; i < 12; i++) txn(db, A, addMonths('2025-11-27', i), 65_000, 'テスト家賃');
+    const renewal = txn(db, A, '2026-04-10', 130_000, 'テスト家賃'); // 更新料（枠外）
+    assert.equal(listLargeExpenses(db, TODAY)[0]!.same_desc_count, 13);
+    assert.deepEqual(detectRecurrences(db, { today: TODAY, now: T0 }), { created: 1, updated: 0 });
+    assert.equal(listRecurrenceCandidates(db, { state: 'open' }).length, 1);
+    assert.deepEqual(
+      listLargeExpenses(db, TODAY).map((x) => [x.bank_txn_id, x.same_desc_count]),
+      [[renewal, 1]],
+    );
     db.close();
   });
 
@@ -234,16 +286,20 @@ describe('予定にする', () => {
     db.close();
   });
 
-  test('anchor_date の既定は応当日が無ければ月末（2/29 → 平年の 2/28）', () => {
+  test('anchor_date の既定（毎月 + 1 か月・毎年 + 12 か月・2 年ごと + 24 か月）は応当日が無ければ月末', () => {
     const { db, A } = fresh();
     const today = '2026-01-15';
     const a = txn(db, A, '2024-02-29', 70_000, 'テスト閏A');
     const b = txn(db, A, '2024-02-29', 70_000, 'テスト閏B');
     const c = txn(db, A, '2025-01-31', 70_000, 'テスト月末');
+    const d = txn(db, A, '2025-12-31', 70_000, 'テスト毎月');
     const at = (id: string, recurrence: string) => scheduleLargeExpense(db, id, { recurrence }, by, { today, now: T0 }).item.anchor_date;
     assert.equal(at(a, 'yearly'), '2025-02-28');
     assert.equal(at(b, 'biennial'), '2026-02-28');
     assert.equal(at(c, 'yearly'), '2026-01-31');
+    assert.equal(at(d, 'monthly'), '2026-01-31');
+    const e = txn(db, A, '2026-01-31', 90_000, 'テスト毎月2'); // d の予定（1/31・7 万円）と金額が離れている
+    assert.equal(scheduleLargeExpense(db, e, { recurrence: 'monthly' }, by, { today: '2026-02-01', now: T0 }).item.anchor_date, '2026-02-28');
     db.close();
   });
 
@@ -259,10 +315,10 @@ describe('予定にする', () => {
     db.close();
   });
 
-  test('周期は yearly・biennial・once だけ。値は createItem が確かめる', () => {
+  test('周期は monthly・yearly・biennial・once だけ。値は createItem が確かめる', () => {
     const { db, A } = fresh();
     const id = txn(db, A, '2026-06-10', 300_000, 'テスト家電');
-    assert.deepEqual(code(() => scheduleLargeExpense(db, id, { recurrence: 'monthly' }, by, opts)), ['invalid_recurrence', 400]);
+    assert.deepEqual(code(() => scheduleLargeExpense(db, id, { recurrence: 'quarterly' }, by, opts)), ['invalid_recurrence', 400]);
     assert.deepEqual(code(() => scheduleLargeExpense(db, id, {}, by, opts)), ['invalid_recurrence', 400]);
     assert.deepEqual(code(() => scheduleLargeExpense(db, id, { recurrence: 'yearly', category: 'income' }, by, opts)), ['invalid_category_for_direction', 400]);
     assert.deepEqual(code(() => scheduleLargeExpense(db, id, { recurrence: 'yearly', amount: 0 }, by, opts)), ['invalid_amount', 400]);

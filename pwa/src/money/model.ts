@@ -103,7 +103,7 @@ export type Candidate = {
 // 提案の表示名。正規化前の摘要（description）があればそれ、無ければ description_norm。大きな出費の名前も同じ規則。
 export const candidateName = (c: { description?: string; description_norm: string }) => c.description || c.description_norm;
 
-// 大きな出費（5 万円以上。GET /api/large_expenses、src/cashflow/large.ts）。
+// 大きな出費（5 万円以上。GET /api/large_expenses、src/cashflow/large.ts）。同じ口座・摘要の明細を 1 行にまとめ、bank_txn_id・金額・日付は最新の明細。
 export type LargeExpense = {
   bank_txn_id: string;
   account_id: string;
@@ -113,9 +113,13 @@ export type LargeExpense = {
   description: string;
   description_norm: string;
   same_desc_count: number;
-  suggested: 'yearly' | 'biennial';
+  total_amount: number;
+  first_date: string;
+  suggested: 'monthly' | 'yearly' | 'biennial';
 };
-export type LargeRecurrence = 'yearly' | 'biennial' | 'once';
+export type LargeRecurrence = 'monthly' | 'yearly' | 'biennial' | 'once';
+// 大きな出費から開くフォームで選べる周期。
+export const LARGE_FORM_RECURRENCES: readonly Recurrence[] = ['once', 'monthly', 'yearly', 'biennial'];
 // 一覧に最初から出す件数（残りは「もっと見る」）。
 export const LARGE_SHOWN = 3;
 

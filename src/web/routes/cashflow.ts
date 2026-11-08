@@ -21,9 +21,9 @@
 //        warnings に税の見積もりの tax_profile_missing（プロファイルが無い）・consumption_tax_mode_unset（消費税の方式が未設定）・
 //        consumption_tax_not_implemented（方式は設定済みだが PR1 は消費税を作らない）を足す。
 // 大きな出費（src/cashflow/large.ts。docs/cashflow.md §15）:
-//   GET  /api/large_expenses                          → 200 {items: [LargeExpense]}（5 万円以上の支出。新しい順、50 件まで。今日は Asia/Tokyo の暦日）
-//   POST /api/large_expenses/:bank_txn_id/schedule    body {recurrence（yearly | biennial | once）, category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 明細の額）, anchor_date?}
-//        → 201 {decision, item} / 400 {error}（once で anchor_date が無いか今日より後でなければ anchor_date_required）/ 404（一覧に出せない明細）/ 409 already_decided
+//   GET  /api/large_expenses                          → 200 {items: [LargeExpense]}（5 万円以上の支出を口座・摘要ごとに 1 行。最新の明細日の新しい順、50 行まで。今日は Asia/Tokyo の暦日）
+//   POST /api/large_expenses/:bank_txn_id/schedule    body {recurrence（monthly | yearly | biennial | once）, category?（既定 other）, name?（既定 正規化摘要）, amount?（既定 明細の額）, anchor_date?}
+//        → 201 {decision, item} / 400 {error}（once で anchor_date が無いか今日より後でなければ anchor_date_required）/ 404（一覧の行の明細でない）/ 409 already_decided
 //   POST /api/large_expenses/:bank_txn_id/dismiss     → 200 {decision}（既に dismissed ならそのまま）/ 404 / 409 already_decided（予定にした明細）
 //   PATCH /api/scheduled_items/:id は pinned（真偽値。origin = estimate の項目だけ。それ以外は 400 invalid_pinned）も受ける。
 // 変更はすべて監査ログに残す（actor は user、payload に Tailscale-User-Login）。

@@ -1044,7 +1044,7 @@ describe('SSR スナップショット', () => {
     assert.match(cf.split('id="m-f-2026-12"')[1]!.split('</li>')[0]!, /テスト保険 約 9,000/);
   });
 
-  test('大きな出費: 既定 3 件と「もっと見る」、ボタン 4 つ（suggested を accent）、同じ摘要の回数は 2 以上だけ', async () => {
+  test('大きな出費: 既定 3 件と「もっと見る」、ボタン 5 つ（suggested を accent、しないは幅いっぱい）、同じ摘要の回数と合計は 2 以上だけ。1 回だけのフォーム', async () => {
     const m = await load('/src/money/Schedule.tsx');
     const big = (i: number, over: Record<string, unknown> = {}) => ({
       bank_txn_id: `L${i}`,
@@ -1055,25 +1055,44 @@ describe('SSR スナップショット', () => {
       description: `テスト大口${i}（原文）`,
       description_norm: `テスト大口${i}`,
       same_desc_count: 1,
+      total_amount: 50_000 + i * 10_000,
+      first_date: `2026-0${9 - i}-10`,
       suggested: 'yearly',
       ...over,
     });
-    const items = [big(1, { same_desc_count: 2 }), big(2, { suggested: 'biennial', txn_date: '2025-07-10' }), big(3), big(4)];
+    const items = [big(1, { same_desc_count: 2, total_amount: 115_000 }), big(2, { suggested: 'biennial', txn_date: '2025-07-10' }), big(3), big(4)];
     const props = { items, today: TODAY, busy: false, onShowAll: noop, onSchedule: noop, onDismiss: noop };
     const out = html(m.LargeList!, { ...props, showAll: false });
     assert.match(out, /大きな出費（5 万円以上）（4）/);
     assert.equal((out.match(/<article /g) ?? []).length, 3);
     assert.match(out, /もっと見る（あと 1 件）/);
     assert.match(out, /<h3 class="m-h3">テスト大口1（原文）<\/h3>/, '名前は正規化前の摘要');
-    assert.match(out, /テスト銀行 · 8\/10 · 同じ摘要 2 回/);
+    assert.match(out, /テスト銀行 · 8\/10 · 同じ摘要 2 回 · 合計 115,000<\/p>/);
     assert.match(out, /テスト銀行 · 2025-07-10<\/p>/);
     const card2 = out.split('テスト大口2（原文）')[1]!.split('</article>')[0]!;
     assert.match(card2, /class="m-btn">毎年<\/button>/);
     assert.match(card2, /class="m-btn m-btn-accent">2 年ごと<\/button>/);
-    assert.match(card2, />1 回だけ<\/button>[\s\S]*>しない<\/button>/);
+    assert.match(card2, /class="m-btn">毎月<\/button>/);
+    assert.match(card2, />1 回だけ<\/button>[\s\S]*class="m-btn m-span2">しない<\/button>/);
+    const card4 = html(m.LargeList!, { ...props, items: [big(4, { suggested: 'monthly', same_desc_count: 6 })], showAll: false });
+    assert.match(card4, /class="m-btn m-btn-accent">毎月<\/button>/);
+    assert.equal((card4.match(/m-btn-accent/g) ?? []).length, 1);
     const all = html(m.LargeList!, { ...props, showAll: true });
     assert.equal((all.match(/<article /g) ?? []).length, 4);
     assert.doesNotMatch(all, /もっと見る/);
     assert.doesNotMatch(html(m.LargeList!, { ...props, items: [], showAll: false }), /保険の年払い/);
+    const form = html(m.ItemForm!, {
+      draft: { ...emptyDraft(TODAY), name: 'テスト大口1（原文）', amount: '60000', recurrence: 'once', anchor_date: '' },
+      editing: null,
+      busy: false,
+      onChange: noop,
+      onSave: noop,
+      onToggle: noop,
+      onClose: noop,
+      recurrences: ['once', 'monthly', 'yearly', 'biennial'],
+    });
+    assert.deepEqual([...form.matchAll(/<option value="(\w+)"/g)].map((x) => x[1]).filter((v) => ['once', 'monthly', 'bimonthly', 'quarterly', 'yearly', 'biennial'].includes(v!)), ['once', 'monthly', 'yearly', 'biennial']);
+    assert.doesNotMatch(form, /何日前に知らせる|終わりの日|aria-label="向き"/);
+    assert.match(form, /最初の支払日/);
   });
 });
