@@ -1,4 +1,4 @@
--- メールからの証憑の取り込み（docs/cashflow.md §16、src/mail/）。
+-- メールからの証憑の取り込み（docs/cashflow.md §17、src/mail/）。
 -- mail_messages は 1 通 1 行（アカウント・方式・メールの ID で一意）。添付は mail_attachments に 1 つ 1 行で追記する。
 -- 件名・送信元のドメインは DB にだけ置き、監査ログには入れない。時刻は UTC の ISO8601、日付は Asia/Tokyo の暦日。
 

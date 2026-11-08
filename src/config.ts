@@ -46,7 +46,7 @@ export const DEFAULT_BACKFILL_FROM = '2025-01-01';
 export const DEFAULT_DEDUP_DATE_WINDOW_DAYS = 0;
 export const DEFAULT_TRANSFER_WINDOW_DAYS = 3;
 export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
-// カードの口座の照合の幅（Amazon は注文日と請求日がずれる。docs/cashflow.md §15）。
+// カードの口座の照合の幅（Amazon は注文日と請求日がずれる。docs/cashflow.md §16）。
 export const DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS = 10;
 export const MAX_MATCH_CARD_DATE_WINDOW_DAYS = 31;
 // [cashflow]（docs/mvp-plan-v3.md T303、V11 の初期案）。予定外の支出の目安は直近 6 か月の中央値、残す額は今後 3 か月分の予定支出。
@@ -54,7 +54,7 @@ export const DEFAULT_UNPLANNED_LOOKBACK_MONTHS = 6;
 export const DEFAULT_RESERVE_MONTHS = 3;
 export const MAX_UNPLANNED_LOOKBACK_MONTHS = 24;
 export const MAX_RESERVE_MONTHS = 12;
-// [mail]（docs/cashflow.md §16、src/mail/）。
+// [mail]（docs/cashflow.md §17、src/mail/）。
 export const DEFAULT_MAIL_LABEL = 'keihi';
 export const DEFAULT_MAIL_MAX_MESSAGES_PER_RUN = 100;
 export const MAX_MAIL_MAX_MESSAGES_PER_RUN = 500;

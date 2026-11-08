@@ -1,4 +1,4 @@
-// メールの取り込みの状態（settings）とジョブの積み方、API の読み出し（docs/cashflow.md §16）。
+// メールの取り込みの状態（settings）とジョブの積み方、API の読み出し（docs/cashflow.md §17）。
 // - settings mail_status_<account_id> = {last_run_at, last_ok_at, last_error, last_internal_at, first_run_on}。
 //   first_run_on は [[mail.accounts]] since が無いときの既定（初回実行日の 30 日前）の起点。
 // - 要対応のメール = state が error（attempts ≥ 3）・unsupported・too_large、または手がかりの無い body_only。

@@ -3,7 +3,7 @@
 // 行の右端のタグを押すと 事業 ⇄ 私用（未設定は事業）をその場で保存（POST /api/bank_txns/:id/tag。押した行だけ busy）。行を押すとタグ付けシート（暗幕つき）。
 // シート: 事業/私用/未設定・カテゴリ 12 種・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
 // 「保存して閉じる」「保存して次の未設定へ」。
-// 照合（docs/cashflow.md §15）: 行の右に証憑の印（receiptMark）。シートを開いたら GET /api/bank_txns/:id/matches を読み、支出なら「証憑」の段
+// 照合（docs/cashflow.md §16）: 行の右に証憑の印（receiptMark）。シートを開いたら GET /api/bank_txns/:id/matches を読み、支出なら「証憑」の段
 // （紐付いた証憑と「外す」・候補（押すと紐付け）・撮影タブへ）。紐付け/解除の後は読み直して行の印も差し替える（applyMatches）。
 // 経費の一覧から来た絞り込み（side・excluded・vendor_key・receipt）は上に 1 つのピルで出し、押すと外す。描画だけの部品（TxnFilters・TxnList・TagSheet）は SSR のスナップショットで試す。
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';

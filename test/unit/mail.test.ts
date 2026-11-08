@@ -1,4 +1,4 @@
-// メールからの証憑の取り込み（docs/cashflow.md §16）。Gmail の応答は fetch のモック（test/unit/gmail-mock.ts）。
+// メールからの証憑の取り込み（docs/cashflow.md §17）。Gmail の応答は fetch のモック（test/unit/gmail-mock.ts）。
 // DB・原本ストア・トークンは一時ディレクトリ。
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -436,7 +436,7 @@ describe('daily の段 mail', () => {
   });
 });
 
-describe('0010_mail.sql のトリガ', () => {
+describe('0012_mail.sql のトリガ', () => {
   test('mail_attachments は追記専用、mail_messages は削除できず中身の列は変えられない', async () => {
     gm.add({ id: 'm1', internalMs: T_LATE, attachments: [{ filename: 'a.pdf', mime: 'application/pdf', bytes: pdf('a') }] });
     await fetchOnce();

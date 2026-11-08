@@ -1,4 +1,4 @@
-// 明細 ⇔ 証憑の照合と領収書待ち（docs/mvp-plan-v3.md T206・T207、docs/cashflow.md §15、0009_matches.sql）。
+// 明細 ⇔ 証憑の照合と領収書待ち（docs/mvp-plan-v3.md T206・T207、docs/cashflow.md §16、0011_matches.sql）。
 // - 経費の明細: 効くタグ（tags.ts）が business、side = expense、振替の除外（transfers.ts の excludedFromCashflow）でない、active な口座の明細。
 //   照合の候補にできる明細は、これに加えてタグが unset の支出も入れる（private は入れない）。
 // - 候補にできる証憑: documents.status が rejected / duplicate / personal 以外。値は最新の reviews の版（txn_date・amount・vendor）、

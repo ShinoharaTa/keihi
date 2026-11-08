@@ -1,4 +1,4 @@
-// 経費の一覧（docs/cashflow.md §15.1、GET /api/expenses）。期間（月の範囲、最大 MAX_EXPENSE_MONTHS か月）の経費の明細を
+// 経費の一覧（docs/cashflow.md §16.1、GET /api/expenses）。期間（月の範囲、最大 MAX_EXPENSE_MONTHS か月）の経費の明細を
 // 月ごと・相手（description_norm）ごとに集計する。
 // - 経費の明細は match.ts の定義（効くタグが business・side = expense・振替の除外でない・active な口座）。receipt（receiptStatusBulk）が
 //   null でない明細がちょうどそれなので、receipt で判定する。waiting_count は receipt = waiting の件数。

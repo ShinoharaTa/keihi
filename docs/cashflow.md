@@ -148,9 +148,9 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | PATCH /api/accounts/:id | default_tag・mcp_visibility・include_in_cashflow・card_settlement_account_id（bank の口座だけ）・card_settlement_pattern（1〜200 字）・active | 変わった列を `money_account.updated` に |
 | POST /api/bank/sync | ― | `{job_id, created}`。未完了があるか 10 分以内なら積まない |
 | GET /api/bank/status | ― | 口座ごとの last_sync_at・last_ok_at・last_error・last_csv_at・backfill_done_until |
-| GET /api/bank_txns | from・to・account_id・tag・category（none = 未分類）・side・amount_min・amount_max・q（正規化して部分一致）・excluded（0/1）・vendor_key（description_norm の完全一致、1〜200 字）・receipt（§15）・cursor・limit（1〜100） | `{items, next_cursor}`。items に tag・category・tag_source・excluded・transfer_kind・receipt・receipt_hint |
+| GET /api/bank_txns | from・to・account_id・tag・category（none = 未分類）・side・amount_min・amount_max・q（正規化して部分一致）・excluded（0/1）・vendor_key（description_norm の完全一致、1〜200 字）・receipt（§16）・cursor・limit（1〜100） | `{items, next_cursor}`。items に tag・category・tag_source・excluded・transfer_kind・receipt・receipt_hint |
 | GET /api/summary/monthly | `month=YYYY-MM` か `from&to`（最大 36 か月） | MonthlySummary か `{months}` |
-| GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は全口座、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）と一致させるため全口座・sync・receipt_waiting_count（§15）（`src/bank/overview.ts`） |
+| GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は全口座、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）と一致させるため全口座・sync・receipt_waiting_count（§16）（`src/bank/overview.ts`） |
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
@@ -175,7 +175,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | [bank] backfill_from | 2025-01-01 | 過去の明細を取り始める日（V8） |
 | [bank] dedup_date_window_days | 0 | API と CSV の照合の日付幅 |
 | [bank] transfer_window_days | 3 | 振替の日付差の上限 |
-| [bank] match_date_window_days | 3 | 明細⇔証憑の照合の日付の幅（カード以外の口座。§15） |
+| [bank] match_date_window_days | 3 | 明細⇔証憑の照合の日付の幅（カード以外の口座。§16） |
 | [bank] match_card_date_window_days | 10（0〜31） | 同じくカードの口座の幅 |
 | [cashflow] unplanned_lookback_months | 6（最大 24） | 予定外の目安に見る月数 |
 | [cashflow] reserve_months | 3（最大 12） | 残す額に積む予定支出の月数 |
@@ -281,8 +281,10 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 
 PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'、revenue_includes_tax=1、biz_tax_rate=NULL、resident_pay_mode='ordinary4'、nhi_preset='saitama-city-2026'、nhi_members=1、nhi_members_40_64=0、nhi_installments=8、nhi_first_month=7、pension_mode='monthly'、pension_addon=0、spouse=0、dependents=0、other_deductions=0、payment_account_id=NULL。
 
-## 15. 照合（`src/bank/match.ts`、T206・T207）
-明細と証憑（documents）の組を `txn_matches`（0009_matches。追記専用、組ごとに seq 最大の行が効く）に残す。候補は保存せず読むたびに計算する。
+## 15. （feature/recurrence-v2 の『大きな出費』が入る）
+
+## 16. 照合（`src/bank/match.ts`、T206・T207）
+明細と証憑（documents）の組を `txn_matches`（0011_matches。追記専用、組ごとに seq 最大の行が効く）に残す。候補は保存せず読むたびに計算する。
 
 | 用語 | 定義 |
 |---|---|
@@ -315,7 +317,7 @@ PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'�
 
 Link は `{bank_txn_id, document_id, state, actor, score, created_at, document: DocBrief, txn: TxnBrief}`、Candidate は `{document_id, score, date_diff, vendor_match, document: DocBrief}`。DocBrief は `{id, status, kind, source, txn_date, amount, vendor, thumbnail_url}`（PDF は thumbnail_url = null）、TxnBrief は `{id, account_name, txn_date, amount, description}`。
 
-### 15.1 経費の一覧（`src/expenses/summary.ts`、GET /api/expenses）
+### 16.1 経費の一覧（`src/expenses/summary.ts`、GET /api/expenses）
 期間の経費の明細（上の定義。receipt が null でない明細）を月ごと・相手（`description_norm`）ごとに集計する。行の表示と絞り込みは `GET /api/bank_txns?tag=business&side=expense&excluded=0&vendor_key=…` に任せ、ここは合計だけ返す。
 
 | 引数 | 応答 |
@@ -328,7 +330,7 @@ Link は `{bank_txn_id, document_id, state, actor, score, created_at, document: 
 - 400: `month_required`（month も from/to も無い、または from/to の片方だけ）/ `invalid_month`（形式不正）/ `invalid_range`（from > to）/ `range_too_long`（13 か月以上）/ `month_and_range`（month と from/to の両方）。
 - 合計は `bank_txns?tag=business&side=expense&excluded=0` の同じ期間の合計と一致する（active でない口座の明細を除く。bank_txns は口座の active で絞らない）。
 
-## 16. メールの取り込み（`src/mail/`、0010_mail）
+## 17. メールの取り込み（`src/mail/`、0012_mail）
 Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `keihi`）の付いたメールを取り込む。設定の手順は [ops/gmail.md](ops/gmail.md)。
 どのメールを対象にするかは Gmail のフィルタで決める（keihi は送信元の一覧も件名の判定も持たない）。アカウントは `[[mail.accounts]]` で複数。
 
@@ -344,7 +346,7 @@ Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `ke
 | ingested | 証憑にした（か、同じ内容の証憑が既にある）添付が 1 つ以上で、too_large が無い |
 | too_large | `[ingest] max_upload_bytes` を超える添付が 1 つでもある（取り込めた添付があっても優先。証憑はそのまま。宣言の size で超えていれば取らない） |
 | unsupported | PDF / JPEG / PNG 以外の添付だけ（zip 等） |
-| body_only | 添付が無い（`.eml` だけ残す。手がかりは §16.1） |
+| body_only | 添付が無い（`.eml` だけ残す。手がかりは §17.1） |
 | error | 1 通の取得（4xx）・解析に失敗。error_reason = fetch_failed / parse_failed、attempts + 1。3 回で止める |
 
 - 添付の判定: filename と本文のある part。ファイル名は制御文字を除いてパス区切りの後ろだけ（POST /api/documents と共通の sanitizeFileName）。HTML に埋め込まれた画像（inline + Content-ID の image/*。ロゴなど）は添付にしない。
@@ -371,7 +373,7 @@ Gmail API（読み取り専用、`gmail.readonly`）で、ラベル（既定 `ke
 | [mail] enabled | false | false なら daily も手動も積まない |
 | [mail] provider | "gmail_api" | "imap" は予約（起動時エラー `mail_provider_not_implemented`） |
 | [mail] max_messages_per_run | 100（1〜500） | 1 回にアカウントごとに取り込む通数 |
-| [mail] extract_hints | true | 本文だけのメールの手がかりの抽出（§16.1） |
+| [mail] extract_hints | true | 本文だけのメールの手がかりの抽出（§17.1） |
 | [[mail.accounts]] id | ―（必須） | 英数字と - の 1〜32 字、一意。トークンは `<data_dir>/gmail-token-<id>.json`（0600、バックアップの除外 `gmail-token-*.json`） |
 | [[mail.accounts]] label / query / since | "keihi" / "" / 初回実行日の 30 日前 | ラベル（1〜100 字）・検索式に AND（0〜500 字）・取り始める日 |
 
@@ -379,7 +381,7 @@ secrets.env: `GMAIL_CLIENT_ID`・`GMAIL_CLIENT_SECRET`（全アカウントで 1
 
 未実装: PWA のメールの状態・要対応の一覧・再認可の帯、IMAP。
 
-### 16.1 手がかり（`src/mail/hints.ts`。本文だけのメール。Amazon の注文確認など）
+### 17.1 手がかり（`src/mail/hints.ts`。本文だけのメール。Amazon の注文確認など）
 添付の無い注文確認のメールから、注文日・金額・注文番号を Gemini で抜き出し、領収書待ちの明細に「確認メールあり」と出す。証憑ではないので照合の表（txn_matches）には入れない。
 
 | 段 | すること |
@@ -392,5 +394,5 @@ secrets.env: `GMAIL_CLIENT_ID`・`GMAIL_CLIENT_SECRET`（全アカウントで 1
 | 打ち切り | Gemini の 4xx（429 以外）→ 捨てて hint_extracted_at を埋める（request_rejected）。取り直しで Gmail の取得が 4xx（削除済みなど）→ 埋めて印を残す（fetch_failed）。取り直しの回は、Gemini の設定が無ければ丸ごと飛ばし（ログ 1 行）、一時的な失敗が出たらそこで止める |
 
 - ai_turns は document_id が必須（0001_init）なので、手がかりの呼び出しは記録しない。
-- 明細の `mail_hint`（TxnView。`createReceiptResolver` が手がかりを 1 回だけ読んで一括で付ける）: receipt が candidate / waiting の経費の明細に、hint_amount = 明細の金額で、手がかりの日を証憑の日として §15 の日付の幅（−1〜+W）に入る手がかりのうち、日付差（の絶対値）が最小の 1 件 `{mail_message_id, account_id, received_on, from_domain, subject, order_ref}`。無ければ null。
+- 明細の `mail_hint`（TxnView。`createReceiptResolver` が手がかりを 1 回だけ読んで一括で付ける）: receipt が candidate / waiting の経費の明細に、hint_amount = 明細の金額で、手がかりの日を証憑の日として §16 の日付の幅（−1〜+W）に入る手がかりのうち、日付差（の絶対値）が最小の 1 件 `{mail_message_id, account_id, received_on, from_domain, subject, order_ref}`。無ければ null。
 - PWA: 明細のシートの「証憑」の段に「注文 #… の確認メールあり（m/d、送信元）→ 注文履歴から領収書を保存して共有シートで入れてください」。行の印（receipt）は変えない。

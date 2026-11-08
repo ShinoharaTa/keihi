@@ -1,4 +1,4 @@
-// 明細 ⇔ 証憑の照合の API と GET /api/bank_txns の excluded・vendor_key・receipt（docs/cashflow.md §15）。
+// 明細 ⇔ 証憑の照合の API と GET /api/bank_txns の excluded・vendor_key・receipt（docs/cashflow.md §16）。
 // app.request() で叩く（ポートを開かない）。摘要・取引先・金額はすべて架空の値。
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,4 +1,4 @@
-// 本文だけのメールの手がかり（src/mail/hints.ts、docs/cashflow.md §16.1）。Gmail と Gemini の応答は fetch のモック。
+// 本文だけのメールの手がかり（src/mail/hints.ts、docs/cashflow.md §17.1）。Gmail と Gemini の応答は fetch のモック。
 // 送信元は example.com、金額・注文番号は架空の値。
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';

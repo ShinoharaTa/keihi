@@ -1,4 +1,4 @@
-# Gmail からの証憑の取り込みを設定する（docs/cashflow.md §16）
+# Gmail からの証憑の取り込みを設定する（docs/cashflow.md §17）
 
 Gmail で **ラベル `keihi` を付けたメール**を keihi が 1 日 1 回（daily）取りに行き、添付の PDF・JPEG・PNG を
 証憑（電子取引）として取り込む。メール全体は `.eml` として原本ストアに残る。
@@ -109,7 +109,7 @@ node src/cli/keihi.ts gmail auth personal
    分かれているので、届いたメールの From を見て両方をフィルタに足す（例の形: `from:(@amazon.example.com OR @business.amazon.example.com)`。
    実際のドメインは届いたメールで確かめる）。
    - Amazon の注文確認メールには領収書 PDF が付かない。本文だけのメールは `body_only` として残り、領収書は
-     注文履歴から PDF を保存して共有シートで入れる（docs/cashflow.md §16）。
+     注文履歴から PDF を保存して共有シートで入れる（docs/cashflow.md §17）。
 4. 添付の無い宣伝メールまで拾うときは、config の `query = "has:attachment"` で絞れる（本文だけの注文確認も要らなくなる点に注意）。
 
 ## 8. 確認する

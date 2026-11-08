@@ -1146,7 +1146,7 @@ export function runText(runs: RunSummary[], head: string): string {
   return [`${head}予定は作成 ${sum('created')}・更新 ${sum('updated')}・停止 ${sum('deactivated')} 件`, pinned > 0 ? `（手直しの ${pinned} 件はそのまま）` : '', '。', ...warns].join('');
 }
 
-// ---- 照合・経費の一覧（docs/cashflow.md §15・§15.1。src/bank/match.ts・src/expenses/summary.ts） ----
+// ---- 照合・経費の一覧（docs/cashflow.md §16・§16.1。src/bank/match.ts・src/expenses/summary.ts） ----
 
 export type ReceiptStatus = 'matched' | 'pending_review' | 'candidate' | 'waiting';
 export const RECEIPT_LABELS: Record<ReceiptStatus, string> = { matched: '証憑', pending_review: '確認待ち', candidate: '候補', waiting: '待ち' };

@@ -1,4 +1,4 @@
-// 1 アカウント分のメールの取得（fetch_mail ジョブの本体。docs/cashflow.md §16）。
+// 1 アカウント分のメールの取得（fetch_mail ジョブの本体。docs/cashflow.md §17）。
 // - 検索式: `label:<label> after:<UNIX 秒>`（[[mail.accounts]] query があれば `(<query>)` を AND で足す）。
 //   after = max(since の JST 0 時, 前回までに取り込んだ最後のメールの受信時刻 − 2 日)。since が無ければ初回実行日の 30 日前。
 // - messages.list で ID を集め（最大 MAX_LIST_PAGES ページ）、まだ取り込んでいないもの（と、attempts < 3 の error）を
