@@ -9,6 +9,7 @@ import { attentionRoutes } from './routes/attention.ts';
 import { bankRoutes } from './routes/bank.ts';
 import { cashflowRoutes } from './routes/cashflow.ts';
 import { documentsRoutes } from './routes/documents.ts';
+import { expensesRoutes } from './routes/expenses.ts';
 import { exportRoutes } from './routes/export.ts';
 import { ingestRoutes } from './routes/ingest.ts';
 import { reviewRoutes } from './routes/review.ts';
@@ -40,6 +41,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api', cashflowRoutes(deps));
   app.route('/api', exportRoutes(deps));
   app.route('/api', bankRoutes(deps));
+  app.route('/api', expensesRoutes(deps));
   app.route('/api', tagRoutes(deps));
   app.route('/api', taxRoutes(deps));
   if (deps.pwaDir !== undefined) app.route('/', staticRoutes({ pwaDir: deps.pwaDir }));
