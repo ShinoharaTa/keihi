@@ -1,4 +1,4 @@
-// 経費の一覧の API（docs/cashflow.md §15.1、src/expenses/summary.ts）。認証は app.ts が全ルートの前に差し込む。
+// 経費の一覧の API（docs/cashflow.md §16.1、src/expenses/summary.ts）。認証は app.ts が全ルートの前に差し込む。
 //   GET /api/expenses ?month=YYYY-MM、または ?from=YYYY-MM&to=YYYY-MM（最大 12 か月）
 //       → 200 {from, to, total: {amount, count, waiting_count, waiting_amount}, months: [{month, amount, count, waiting_count}],
 //              vendors: [{vendor_key, label, count, amount, waiting_count, category}]}

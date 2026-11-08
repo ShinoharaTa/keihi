@@ -733,3 +733,34 @@ exports[`SSR スナップショット > 見通し: 結論・警告・36 か月�
   "</section>"
 ]
 `;
+
+exports[`SSR スナップショット（メール） > 要対応のメールの一覧: 今すぐ取り込む・受信日・送信元・件名・状態・添付 1`] = `
+[
+  "<div class=\\"m-pills\\"><button type=\\"button\\" class=\\"m-btn\\">今すぐ取り込む</button>",
+  "</div>",
+  "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-mail\\"><div class=\\"m-row\\"><h2 id=\\"m-mail\\" class=\\"m-h2\\">要対応のメール</h2><span class=\\"m-sub\\">4 件</span></div>",
+  "<ul class=\\"m-ledger\\"><li><div class=\\"m-nav-row\\"><span class=\\"m-nav-text\\"><span class=\\"m-txn-top\\"><span class=\\"m-txn-name\\">ご請求書のお知らせ</span></span><span class=\\"m-txn-meta\\"><span>11/3</span><span>example.com</span><span class=\\"m-rc m-rc-waiting\\">未対応の形式</span></span><span class=\\"m-nav-sub\\">invoice.xlsx: 未対応の形式</span></span></div>",
+  "</li>",
+  "<li><div class=\\"m-nav-row\\"><span class=\\"m-nav-text\\"><span class=\\"m-txn-top\\"><span class=\\"m-txn-name\\">件名なし</span></span><span class=\\"m-txn-meta\\"><span>2025-12-28</span><span>example.net</span><span class=\\"m-rc m-rc-waiting\\">取得に失敗（3 回）</span></span></span></div>",
+  "</li>",
+  "<li><div class=\\"m-nav-row\\"><span class=\\"m-nav-text\\"><span class=\\"m-txn-top\\"><span class=\\"m-txn-name\\">ご請求書のお知らせ</span></span><span class=\\"m-txn-meta\\"><span>日付なし</span><span>送信元なし</span><span class=\\"m-rc m-rc-waiting\\">添付なし</span></span></span></div>",
+  "</li>",
+  "<li><div class=\\"m-nav-row\\"><span class=\\"m-nav-text\\"><span class=\\"m-txn-top\\"><span class=\\"m-txn-name\\">ご請求書のお知らせ</span></span><span class=\\"m-txn-meta\\"><span>11/3</span><span>example.com</span><span class=\\"m-rc m-rc-waiting\\">大きすぎる</span></span><span class=\\"m-nav-sub\\">scan.pdf: 大きすぎる</span><span class=\\"m-nav-sub\\">note.pdf: 取り込み済み</span></span></div>",
+  "</li>",
+  "</ul>",
+  "</section>",
+  "<div class=\\"m-pills\\"><button type=\\"button\\" class=\\"m-btn\\" disabled>今すぐ取り込む</button>",
+  "</div>",
+  "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-mail\\"><div class=\\"m-row\\"><h2 id=\\"m-mail\\" class=\\"m-h2\\">要対応のメール</h2><span class=\\"m-sub\\">1+ 件</span></div>",
+  "<ul class=\\"m-ledger\\"><li><div class=\\"m-nav-row\\"><span class=\\"m-nav-text\\"><span class=\\"m-txn-top\\"><span class=\\"m-txn-name\\">ご請求書のお知らせ</span></span><span class=\\"m-txn-meta\\"><span>11/3</span><span>example.com</span><span class=\\"m-rc m-rc-waiting\\">未対応の形式</span></span><span class=\\"m-nav-sub\\">invoice.xlsx: 未対応の形式</span></span></div>",
+  "</li>",
+  "</ul>",
+  "<p class=\\"m-note\\">新しい順に 1 件だけ出しています。</p>",
+  "</section>",
+  "<div class=\\"m-pills\\"><button type=\\"button\\" class=\\"m-btn\\">今すぐ取り込む</button>",
+  "</div>",
+  "<section class=\\"m-card m-pad12 m-gap6\\" aria-labelledby=\\"m-mail\\"><div class=\\"m-row\\"><h2 id=\\"m-mail\\" class=\\"m-h2\\">要対応のメール</h2><span class=\\"m-sub\\">0 件</span></div>",
+  "<p class=\\"m-empty\\">要対応のメールはありません。</p>",
+  "</section>"
+]
+`;

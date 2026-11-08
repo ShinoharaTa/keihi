@@ -1,4 +1,4 @@
-// GET /api/expenses（経費の一覧。docs/cashflow.md §15.1）。app.request() で叩く（ポートを開かない）。摘要・金額はすべて架空の値。
+// GET /api/expenses（経費の一覧。docs/cashflow.md §16.1）。app.request() で叩く（ポートを開かない）。摘要・金額はすべて架空の値。
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Hono } from 'hono';

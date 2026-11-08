@@ -1,4 +1,4 @@
-// 経費の一覧（docs/cashflow.md §15.1、GET /api/expenses?month）。上で月を切り替える（既定は今月、今月より先へは進めない）。
+// 経費の一覧（docs/cashflow.md §16.1、GET /api/expenses?month）。上で月を切り替える（既定は今月、今月より先へは進めない）。
 // ホームの「領収書待ち」から来たとき（initialWaiting）は直近 12 か月（今月を含む）で読み、「今月だけにする」で単月に戻す。
 // 合計（経費・件数・領収書待ち）→「領収書待ちだけ」→ 相手ごとの行（件数・金額・待ち・カテゴリ）。行を押すとその月・その相手の明細へ
 // （tag=business・side=expense・excluded=0・vendor_key。待ちだけのときは receipt=waiting も）。行の表示と操作は明細に任せ、ここは合計だけ。

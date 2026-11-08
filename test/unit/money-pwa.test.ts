@@ -42,7 +42,13 @@ import {
   itemInfoMap,
   lastOccurrence,
   linkedText,
+  MAIL_ATTENTION_URL,
+  mailAttachmentText,
+  mailAttention,
+  mailAttentionText,
   mailHintText,
+  mailStateText,
+  mailSyncText,
   ledgerRows,
   man,
   markSize,
@@ -104,6 +110,8 @@ import {
   type Forecast,
   type Matches,
   type ForecastMonth,
+  type MailMessage,
+  type MailStatus,
   type MonthlySummary,
   type Overview,
   type ScheduledItem,
@@ -1174,5 +1182,97 @@ describe('SSR スナップショット', () => {
     assert.match(out, /経費<\/span><span class="m-nav-sub m-warn-text">領収書待ち 4 件<\/span><\/span><span class="m-count">4<\/span>/);
     const zero = html(m.HomeView!, { today: TODAY, d: { ...d, o: { ...overview, receipt_waiting_count: 0 } }, accounts: [], cats, go: noop });
     assert.match(zero, /経費<\/span><span class="m-nav-sub">事業の支出を相手ごとに<\/span><\/span><svg/);
+  });
+});
+
+const mailStatus = (over: Partial<MailStatus> = {}): MailStatus => ({
+  enabled: true,
+  provider: 'gmail_api',
+  accounts: [
+    { id: 'personal', label: 'keihi', last_run_at: null, last_ok_at: null, last_error: null, reauth_required: false, attention_count: 2 },
+    { id: 'work', label: 'keihi', last_run_at: null, last_ok_at: null, last_error: null, reauth_required: false, attention_count: 1 },
+  ],
+  ...over,
+});
+const mailMsg = (over: Partial<MailMessage> = {}): MailMessage => ({
+  id: 'M1',
+  account_id: 'personal',
+  received_on: '2026-11-03',
+  from_domain: 'example.com',
+  subject: 'ご請求書のお知らせ',
+  state: 'unsupported',
+  error_reason: null,
+  attempts: 0,
+  attachments: [{ filename: 'invoice.xlsx', result: 'unsupported', document_id: null }],
+  hint: null,
+  ...over,
+});
+
+describe('メールの取り込みの純関数', () => {
+  test('要対応の件数はアカウントの合計。無効・読めないなら 0', () => {
+    assert.equal(mailAttention(mailStatus()), 3);
+    assert.equal(mailAttention(mailStatus({ enabled: false })), 0);
+    assert.equal(mailAttention(mailStatus({ accounts: [] })), 0);
+    assert.equal(mailAttention(null), 0);
+    assert.equal(mailAttention(undefined), 0);
+    assert.equal(mailAttentionText(3), 'メールの要対応 3 件');
+    assert.equal(MAIL_ATTENTION_URL, '/api/mail/messages?state=attention&limit=100');
+  });
+  test('状態と添付の文', () => {
+    assert.equal(mailStateText(mailMsg()), '未対応の形式');
+    assert.equal(mailStateText(mailMsg({ state: 'body_only' })), '添付なし');
+    assert.equal(mailStateText(mailMsg({ state: 'too_large' })), '大きすぎる');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: 'fetch_failed', attempts: 3 })), '取得に失敗（3 回）');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: 'parse_failed', attempts: 4 })), '解析に失敗（4 回）');
+    assert.equal(mailStateText(mailMsg({ state: 'error', error_reason: null, attempts: 3 })), '失敗（3 回）');
+    assert.equal(mailAttachmentText({ filename: 'invoice.pdf', result: 'ingested', document_id: 'D1' }), 'invoice.pdf: 取り込み済み');
+    assert.equal(mailAttachmentText({ filename: 'a.pdf', result: 'duplicate', document_id: 'D1' }), 'a.pdf: 取り込み済み（重複）');
+    assert.equal(mailAttachmentText({ filename: null, result: 'too_large', document_id: null }), '名前なし: 大きすぎる');
+  });
+  test('今すぐ取り込むの結果の文', () => {
+    assert.equal(mailSyncText(200, { accounts: [{ account_id: 'personal', job_id: 'J1', created: false }, { account_id: 'work', job_id: 'J2', created: true }] }), '取り込みを始めました。しばらくしてから読み直してください。');
+    assert.equal(mailSyncText(200, { accounts: [{ account_id: 'personal', job_id: 'J1', created: false }] }), '実行中か、10 分以内に実行済みです。');
+    assert.equal(mailSyncText(200, { accounts: [] }), '実行中か、10 分以内に実行済みです。');
+    assert.equal(mailSyncText(409, { reason: 'mail_disabled' }), 'メールの取り込みは無効です（config.toml の [mail] enabled）。');
+    assert.equal(mailSyncText(0, null), failText(0));
+    assert.equal(mailSyncText(500, null), 'サーバーから読めませんでした（HTTP 500）');
+  });
+});
+
+describe('SSR スナップショット（メール）', () => {
+  let vite: ViteDevServer;
+  const load = (p: string) => vite.ssrLoadModule(p) as Promise<Record<string, (props: any) => unknown>>;
+  before(async () => {
+    vite = await startSsr();
+  });
+  after(async () => {
+    await vite.close();
+  });
+  const html = (c: (props: never) => unknown, props: object) => pretty(renderHtml(h(c as never, props as never)));
+
+  test('ホーム: 要対応があれば入口に「メールの要対応 n 件」。無効・0 件・読めないときは出さない', async () => {
+    const m = await load('/src/money/Home.tsx');
+    const d = { o: overview, history: null, cf: null, months: [], upcoming: [], status: [] };
+    const out = html(m.HomeView!, { today: TODAY, d: { ...d, mail: mailStatus() }, accounts: [], cats, go: noop });
+    assert.match(out, /メール<\/span><span class="m-nav-sub m-warn-text">メールの要対応 3 件<\/span><\/span><span class="m-count">3<\/span>/);
+    for (const mail of [mailStatus({ enabled: false }), mailStatus({ accounts: [] }), null, undefined]) {
+      assert.doesNotMatch(html(m.HomeView!, { today: TODAY, d: { ...d, mail }, accounts: [], cats, go: noop }), /メールの要対応/);
+    }
+  });
+
+  test('要対応のメールの一覧: 今すぐ取り込む・受信日・送信元・件名・状態・添付', async (t) => {
+    const m = await load('/src/money/Mail.tsx');
+    const items = [
+      mailMsg(),
+      mailMsg({ id: 'M2', received_on: '2025-12-28', from_domain: 'example.net', subject: null, state: 'error', error_reason: 'fetch_failed', attempts: 3, attachments: [] }),
+      mailMsg({ id: 'M3', received_on: null, from_domain: null, state: 'body_only', attachments: [] }),
+      mailMsg({ id: 'M4', state: 'too_large', attachments: [{ filename: 'scan.pdf', result: 'too_large', document_id: null }, { filename: 'note.pdf', result: 'ingested', document_id: 'D9' }] }),
+    ];
+    const out = html(m.MailView!, { page: { items, next_cursor: null }, today: TODAY, busy: false, onSync: noop });
+    const more = html(m.MailView!, { page: { items: items.slice(0, 1), next_cursor: 'c1' }, today: TODAY, busy: true, onSync: noop });
+    const none = html(m.MailView!, { page: { items: [], next_cursor: null }, today: TODAY, busy: false, onSync: noop });
+    t.assert.snapshot(lines([out, more, none].join('\n')));
+    assert.match(none, /要対応のメールはありません。/);
+    assert.match(more, /<button type="button" class="m-btn" disabled>今すぐ取り込む/);
   });
 });

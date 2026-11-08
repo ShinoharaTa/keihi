@@ -1,4 +1,4 @@
-// Gmail の OAuth（authorization code + PKCE。docs/ops/gmail.md、docs/cashflow.md §16）。
+// Gmail の OAuth（authorization code + PKCE。docs/ops/gmail.md、docs/cashflow.md §17）。
 // - scope は gmail.readonly だけ。redirect_uri はループバック（http://127.0.0.1:8797/）だが待ち受けはしない。
 //   スマホのブラウザがつながらずに止まった URL を `keihi gmail auth <id>` に貼り、code を取り出す。
 // - トークンはアカウントごとに <data_dir>/gmail-token-<id>.json（0600、<data_dir>/gmail-token-<id>.lock で排他）。

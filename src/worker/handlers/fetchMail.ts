@@ -1,4 +1,4 @@
-// fetch_mail ジョブ（docs/cashflow.md §16）。ref_id = [[mail.accounts]] の id。daily がアカウントごとに 1 件、
+// fetch_mail ジョブ（docs/cashflow.md §17）。ref_id = [[mail.accounts]] の id。daily がアカウントごとに 1 件、
 // POST /api/mail/sync が積む。本体は src/mail/gmail/fetch.ts。
 // - [mail] enabled = false、またはアカウントが設定から消えていれば何もしない（完了）。
 // - 再認可待ち（settings.gmail_reauth_required_<id> = 1）なら Gmail を呼ばずに完了。

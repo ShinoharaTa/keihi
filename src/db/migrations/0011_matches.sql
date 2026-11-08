@@ -1,4 +1,4 @@
--- 明細 ⇔ 証憑の照合（docs/mvp-plan-v3.md T206・T207、docs/cashflow.md §15）。
+-- 明細 ⇔ 証憑の照合（docs/mvp-plan-v3.md T206・T207、docs/cashflow.md §16）。
 -- 組 (bank_txn_id, document_id) ごとに行を追記し、seq 最大の行が効く。候補は保存しない（読むたびに計算する。src/bank/match.ts）。
 -- 時刻は UTC の ISO8601。
 

@@ -1,4 +1,4 @@
-// メール 1 通の取り込み（docs/cashflow.md §16）。
+// メール 1 通の取り込み（docs/cashflow.md §17）。
 // 1. messages.get(format=full) でヘッダと添付の構造を取る → 2. messages.get(format=raw) をメール全体（.eml）として原本ストアに保存
 // → 3. 添付を 1 つずつ取り（attachments.get。小さい添付は full の中に data で来る）、先頭バイトで PDF / JPEG / PNG と分かったものを
 //    証憑にする（src/ingest/document.ts。kind = e_transaction、source = 'imap'、source_ref = Message-ID、
@@ -262,7 +262,7 @@ export async function ingestMessage(deps: MailIngestDeps, client: GmailClient, a
     const cur = findMessage(db, accountId, remoteId);
     let id: string;
     if (cur) {
-      // 取り直し（error の行）。中身の列は NULL のものだけ埋まる（0010_mail.sql のトリガ）。
+      // 取り直し（error の行）。中身の列は NULL のものだけ埋まる（0012_mail.sql のトリガ）。
       id = cur.id;
       db.prepare(
         `UPDATE mail_messages SET rfc822_message_id = COALESCE(rfc822_message_id, ?), from_domain = COALESCE(from_domain, ?), subject = COALESCE(subject, ?),

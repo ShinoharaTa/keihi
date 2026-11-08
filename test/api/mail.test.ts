@@ -1,4 +1,4 @@
-// メールの取り込みの API（docs/cashflow.md §16）。app.request() で叩く（ポートを開かない）。
+// メールの取り込みの API（docs/cashflow.md §17）。app.request() で叩く（ポートを開かない）。
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';

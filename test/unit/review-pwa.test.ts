@@ -3,7 +3,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderableComponents } from '../../pwa/src/review/catalog.ts';
 import { reasonText, resolveMessage, resolveUrl } from '../../pwa/src/review/attention.ts';
-import { backupWarning, reauthWarning } from '../../pwa/src/status.ts';
+import { backupWarning, mailReauthWarnings, reauthWarning } from '../../pwa/src/status.ts';
 import { canApprove, changedValues, errorText, missingRequired, parseAmount, pickCandidate, requestBody, type DataModel, type Values } from '../../pwa/src/review/model.ts';
 
 const values = (over: Partial<Values> = {}): Values => ({
@@ -124,5 +124,22 @@ describe('freee の再認可の帯', () => {
     assert.equal(reauthWarning({ freee_reauth_required: true }), 'freee の再認可が必要です。サーバーで keihi freee auth を実行してください');
     assert.equal(reauthWarning({ freee_reauth_required: false }), null);
     assert.equal(reauthWarning({}), null);
+  });
+});
+
+describe('メールの再認可の帯', () => {
+  test('reauth_required のアカウントごとに 1 本。取り込みが無効・mail が無いなら出さない', () => {
+    const accounts = [
+      { id: 'personal', reauth_required: true, attention_count: 0 },
+      { id: 'work', reauth_required: false, attention_count: 2 },
+      { id: 'shop-2', reauth_required: true, attention_count: 1 },
+    ];
+    assert.deepEqual(mailReauthWarnings({ mail: { enabled: true, accounts } }), [
+      'メール（personal）の再認可が必要です。サーバーで keihi gmail auth personal を実行してください',
+      'メール（shop-2）の再認可が必要です。サーバーで keihi gmail auth shop-2 を実行してください',
+    ]);
+    assert.deepEqual(mailReauthWarnings({ mail: { enabled: false, accounts } }), []);
+    assert.deepEqual(mailReauthWarnings({ mail: { enabled: true, accounts: [] } }), []);
+    assert.deepEqual(mailReauthWarnings({}), []);
   });
 });

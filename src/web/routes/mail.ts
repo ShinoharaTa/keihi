@@ -1,4 +1,4 @@
-// メールの取り込みの API（docs/cashflow.md §16）。
+// メールの取り込みの API（docs/cashflow.md §17）。
 //   POST /api/mail/sync      → 200 {accounts: [{account_id, job_id, created}]} / 409 {reason: 'mail_disabled'}
 //                              （アカウントごとに fetch_mail を積む。未完了のものがあるか、前回積んでから 10 分以内なら積まない）
 //   GET  /api/mail/status    → 200 {enabled, provider, accounts: [{id, label, last_run_at, last_ok_at, last_error, reauth_required, attention_count}]}

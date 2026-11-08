@@ -1,4 +1,4 @@
-// 明細 ⇔ 証憑の照合（src/bank/match.ts、docs/cashflow.md §15、T206・T207）。:memory: の DB だけを使う。
+// 明細 ⇔ 証憑の照合（src/bank/match.ts、docs/cashflow.md §16、T206・T207）。:memory: の DB だけを使う。
 // 摘要・取引先・金額はすべて架空の値。
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
