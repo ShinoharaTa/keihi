@@ -287,10 +287,10 @@ export const CSV_ACCOUNT_KINDS: readonly { kind: AccountKind; label: string }[] 
 
 // ---- 明細の絞り込み ----
 
-// month は月次から来たときの「その月」（TxnFilter.month）。
-export type Period = 'this' | 'last' | 'three' | 'all' | 'month';
-export const PERIOD_LABELS: Record<Exclude<Period, 'month'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
-export const PERIODS: readonly Exclude<Period, 'month'>[] = ['this', 'last', 'three', 'all'];
+// month は月次から来たときの「その月」（TxnFilter.month）。year は経費の「直近 12 か月」から来たとき（今月を含む 12 か月）。
+export type Period = 'this' | 'last' | 'three' | 'all' | 'month' | 'year';
+export const PERIOD_LABELS: Record<Exclude<Period, 'month' | 'year'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
+export const PERIODS: readonly Exclude<Period, 'month' | 'year'>[] = ['this', 'last', 'three', 'all'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
 // YYYY-MM に n か月足す（負も可）。
@@ -315,6 +315,7 @@ export function periodRange(p: Period, today: string, month?: string): { from?: 
     return { from: `${l}-01`, to: lastDay(l) };
   }
   if (p === 'three') return { from: `${addMonth(m, -2)}-01`, to: today };
+  if (p === 'year') return { from: `${addMonth(m, -(EXPENSES_YEAR_MONTHS - 1))}-01`, to: today };
   return {};
 }
 
@@ -1173,15 +1174,26 @@ export type Expenses = {
   months: { month: string; amount: number; count: number; waiting_count: number }[];
   vendors: ExpenseVendor[];
 };
-export const expensesUrl = (month: string) => `/api/expenses?month=${month}`;
+// 領収書待ちで開いたときの期間（ホームの件数と同じ、今月を含む直近 12 か月）。YYYY-MM。
+export const EXPENSES_YEAR_MONTHS = 12;
+export const expensesYear = (today: string) => ({ from: addMonth(today.slice(0, 7), -(EXPENSES_YEAR_MONTHS - 1)), to: today.slice(0, 7) });
+// month が null なら直近 12 か月。
+export const expensesUrl = (month: string | null, today = '') => {
+  if (month) return `/api/expenses?month=${month}`;
+  const y = expensesYear(today);
+  return `/api/expenses?from=${y.from}&to=${y.to}`;
+};
 export const waitingText = (n: number, amount?: number) => (n > 0 ? `領収書待ち ${n} 件${amount === undefined ? '' : ` / ${yen(amount)} 円`}` : '領収書待ちはありません');
 // 「領収書待ちだけ」なら待ちのある相手だけ。
 export const expenseVendors = (vs: ExpenseVendor[], waitingOnly: boolean) => (waitingOnly ? vs.filter((v) => v.waiting_count > 0) : vs);
-// 相手の行から明細へ移るときの絞り込み。「その他」（vendor_key = null）は相手で絞れないので null。
-export function vendorFilter(v: ExpenseVendor, month: string, waitingOnly: boolean): Partial<TxnFilter> | null {
+// 相手の行から明細へ移るときの絞り込み（month が null なら直近 12 か月）。「その他」（vendor_key = null）は相手で絞れないので null。
+export function vendorFilter(v: ExpenseVendor, month: string | null, waitingOnly: boolean): Partial<TxnFilter> | null {
   if (v.vendor_key === null) return null;
-  return { period: 'month', month, tag: 'business', side: 'expense', excluded: '0', vendorKey: v.vendor_key, vendorLabel: v.label, ...(waitingOnly ? { receipt: 'waiting' as const } : {}) };
+  return { ...(month ? { period: 'month' as const, month } : { period: 'year' as const }), tag: 'business', side: 'expense', excluded: '0', vendorKey: v.vendor_key, vendorLabel: v.label, ...(waitingOnly ? { receipt: 'waiting' as const } : {}) };
 }
+// 「未設定だけ」に切り替えたときの絞り込み。未設定の明細には receipt が無いので、経費の絞り込み（receipt・vendor_key・excluded・side）も外す。
+export const toggleUnset = (f: TxnFilter): TxnFilter =>
+  f.tag === 'unset' ? { ...f, tag: '' } : { ...f, tag: 'unset', side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined };
 // 経費の一覧から来た絞り込みの見出し「経費 · 相手 · 待ちだけ」。経費の絞り込みでなければ null。
 export function expenseFilterText(f: TxnFilter): string | null {
   if (!f.vendorKey && !f.receipt && !f.side && !f.excluded) return null;

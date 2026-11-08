@@ -1,11 +1,12 @@
 // 経費の一覧（docs/cashflow.md §15.1、GET /api/expenses?month）。上で月を切り替える（既定は今月、今月より先へは進めない）。
+// ホームの「領収書待ち」から来たとき（initialWaiting）は直近 12 か月（今月を含む）で読み、「今月だけにする」で単月に戻す。
 // 合計（経費・件数・領収書待ち）→「領収書待ちだけ」→ 相手ごとの行（件数・金額・待ち・カテゴリ）。行を押すとその月・その相手の明細へ
 // （tag=business・side=expense・excluded=0・vendor_key。待ちだけのときは receipt=waiting も）。行の表示と操作は明細に任せ、ここは合計だけ。
 // 「その他」（上位 50 の外。vendor_key = null）は相手で絞れないので押せない。月を速く切り替えたときは連番で古い応答を捨てる。
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
 import { Icon } from './Icons.tsx';
-import { categoryLabel, expensesUrl, expenseVendors, failText, vendorFilter, waitingText, yen, type Categories, type Expenses as ExpensesData, type ExpenseVendor, type TxnFilter } from './model.ts';
+import { categoryLabel, expensesUrl, expensesYear, expenseVendors, failText, vendorFilter, waitingText, yen, type Categories, type Expenses as ExpensesData, type ExpenseVendor, type TxnFilter } from './model.ts';
 import { ScreenHead, type Go } from './Money.tsx';
 import { MonthBar } from './Monthly.tsx';
 
@@ -39,6 +40,23 @@ function VendorRow({ v, cats, onOpen }: { v: ExpenseVendor; cats: Categories | n
   );
 }
 
+// 直近 12 か月で開いているときの上の帯（月の切り替えの代わり）。
+export function YearBar({ from, to, onMonth }: { from: string; to: string; onMonth: () => void }) {
+  return (
+    <div class="m-monthbar">
+      <div class="m-monthbar-label">
+        <b>直近 12 か月</b>
+        <span class="m-sub">
+          {from}〜{to}
+        </span>
+      </div>
+      <button type="button" class="m-btn" onClick={onMonth}>
+        今月だけにする
+      </button>
+    </div>
+  );
+}
+
 export function ExpensesView({
   data,
   month,
@@ -48,7 +66,8 @@ export function ExpensesView({
   onTxns,
 }: {
   data: ExpensesData;
-  month: string;
+  // null なら直近 12 か月。
+  month: string | null;
   cats: Categories | null;
   waitingOnly: boolean;
   onWaiting: (v: boolean) => void;
@@ -58,7 +77,7 @@ export function ExpensesView({
   const rows = expenseVendors(data.vendors, waitingOnly);
   return (
     <>
-      <section class="m-tiles3" aria-label={`${Number(month.slice(5, 7))} 月の経費`}>
+      <section class="m-tiles3" aria-label={month ? `${Number(month.slice(5, 7))} 月の経費` : '直近 12 か月の経費'}>
         <div class="m-tile3">
           <span class="k-out">経費</span>
           <b>{yen(t.amount)}</b>
@@ -102,7 +121,7 @@ export function ExpensesView({
 
 export function Expenses({ today, cats, initialWaiting, onBack, go }: { today: string; cats: Categories | null; initialWaiting?: boolean; onBack: () => void; go: Go }) {
   const cur = today.slice(0, 7);
-  const [month, setMonth] = useState(cur);
+  const [month, setMonth] = useState<string | null>(initialWaiting ? null : cur);
   const [waitingOnly, setWaitingOnly] = useState(initialWaiting === true);
   const [data, setData] = useState<ExpensesData | null>(null);
   const [msg, setMsg] = useState('');
@@ -111,17 +130,22 @@ export function Expenses({ today, cats, initialWaiting, onBack, go }: { today: s
   useEffect(() => {
     const n = ++seq.current;
     void (async () => {
-      const r = await getJson<ExpensesData>(expensesUrl(month));
+      const r = await getJson<ExpensesData>(expensesUrl(month, today));
       if (n !== seq.current) return; // 後から別の月を選んだ
       setMsg(r.ok ? '' : failText(r.status, r.body));
       setData(r.ok ? r.data : null);
     })();
-  }, [month]);
+  }, [month, today]);
+  const y = expensesYear(today);
 
   return (
     <>
       <ScreenHead title="経費" onBack={onBack} />
-      <MonthBar month={month} today={today} onSelect={(m) => setMonth(m > cur ? cur : m)} />
+      {month ? (
+        <MonthBar month={month} today={today} onSelect={(m) => setMonth(m > cur ? cur : m)} />
+      ) : (
+        <YearBar from={y.from} to={y.to} onMonth={() => setMonth(cur)} />
+      )}
       <div class="m-main">
         {msg && <p class="m-msg">{msg}</p>}
         {data ? (

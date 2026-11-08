@@ -29,6 +29,7 @@ import {
   emptyDraft,
   expenseFilterText,
   expensesUrl,
+  expensesYear,
   expenseVendors,
   failText,
   filterCount,
@@ -79,6 +80,7 @@ import {
   taxProfileDraft,
   taxYearBodies,
   taxYearDrafts,
+  toggleUnset,
   tokyoDate,
   txnIncome,
   txnSummary,
@@ -772,6 +774,22 @@ describe('照合・経費の一覧の純関数', () => {
     assert.equal(expenseVendors(expenses.vendors, false).length, 3);
     assert.equal(expensesUrl('2026-10'), '/api/expenses?month=2026-10');
   });
+  test('領収書待ちで開く期間: 今月を含む直近 12 か月（年をまたぐ）。明細へは period=year', () => {
+    assert.deepEqual(expensesYear(TODAY), { from: '2025-12', to: '2026-11' });
+    assert.deepEqual(expensesYear('2026-01-15'), { from: '2025-02', to: '2026-01' });
+    assert.equal(expensesUrl(null, TODAY), '/api/expenses?from=2025-12&to=2026-11');
+    assert.deepEqual(periodRange('year', TODAY), { from: '2025-12-01', to: TODAY });
+    const f = vendorFilter(vendor(), null, true)!;
+    assert.deepEqual([f.period, f.month, f.receipt], ['year', undefined, 'waiting']);
+    assert.equal(new URL(txnsUrl({ period: 'all', accountId: '', tag: '', category: '', q: '', ...f }, TODAY, null), 'http://x').searchParams.get('from'), '2025-12-01');
+  });
+  test('「未設定だけ」に切り替えると経費の絞り込み（receipt・vendor_key・excluded・side）を外す。戻すとタグだけ外す', () => {
+    const f = { period: 'month' as const, month: '2026-10', accountId: 'A1', tag: 'business' as const, category: '', q: 'x', side: 'expense' as const, excluded: '0' as const, vendorKey: 'K', vendorLabel: 'L', receipt: 'waiting' as const };
+    const on = toggleUnset(f);
+    assert.equal(new URL(txnsUrl(on, TODAY, null), 'http://x').search, '?limit=50&from=2026-10-01&to=2026-10-31&account_id=A1&tag=unset&q=x');
+    assert.equal(expenseFilterText(on), null);
+    assert.equal(toggleUnset(on).tag, '');
+  });
   test('紐付け/解除の後の行: 確認済みの証憑で matched、確認前だけなら pending_review、無くなれば candidate / waiting', () => {
     const t = txn({ receipt: 'candidate', receipt_hint: null });
     const done: Matches = { links: [link(doc({ id: 'D0', status: 'needs_review' }), '2026-11-05T00:00:00Z'), link(doc())], candidates: [] };
@@ -1088,6 +1106,8 @@ describe('SSR スナップショット', () => {
     assert.match(all, /<div class="m-nav-row">[\s\S]*その他/, '「その他」は押せない');
     assert.doesNotMatch(waiting, /カ）エービーシー/, '待ちだけなら待ちの無い相手を隠す');
     assert.match(none, /領収書待ちはありません/);
+    assert.match(html(m.YearBar!, { from: '2025-12', to: '2026-11', onMonth: noop }), /直近 12 か月<\/b><span class="m-sub">2025-12〜2026-11<\/span>[\s\S]*今月だけにする/);
+    assert.match(html(m.ExpensesView!, { data: expenses, month: null, cats, waitingOnly: true, onWaiting: noop, onTxns: noop }), /aria-label="直近 12 か月の経費"/);
     t.assert.snapshot(lines([all, waiting, none].join('\n')));
   });
 

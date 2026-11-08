@@ -34,6 +34,7 @@ import {
   TAG_LABELS,
   TAG_ORDER,
   TEXT_MAX,
+  toggleUnset,
   txnIncome,
   txnsUrl,
   txnSummary,
@@ -83,7 +84,7 @@ export function TxnFilters({
   onExpand: (v: boolean) => void;
 }) {
   const more = [f.accountId, f.tag && f.tag !== 'unset' ? f.tag : '', f.category, f.q.trim()].filter((x) => x !== '').length;
-  const month = f.period === 'month' && f.month;
+  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : undefined;
   const exp = expenseFilterText(f);
   return (
     <div class="m-filters">
@@ -95,7 +96,7 @@ export function TxnFilters({
         ))}
         {month && (
           <button type="button" aria-pressed="true">
-            {f.month}
+            {month}
           </button>
         )}
       </div>
@@ -106,7 +107,7 @@ export function TxnFilters({
             <Icon name="close" size={16} />
           </button>
         )}
-        <button type="button" class="m-pill m-pill-dashed" aria-pressed={f.tag === 'unset'} onClick={() => onChange({ ...f, tag: f.tag === 'unset' ? '' : 'unset' })}>
+        <button type="button" class="m-pill m-pill-dashed" aria-pressed={f.tag === 'unset'} onClick={() => onChange(toggleUnset(f))}>
           未設定だけ{unsetCount ? `（${unsetCount}）` : ''}
         </button>
         <button type="button" class="m-pill" aria-expanded={expanded} aria-controls="m-txn-more" onClick={() => onExpand(!expanded)}>
