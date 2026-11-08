@@ -9,8 +9,14 @@
 //   GET   /api/accounts/:id/imports → 200 {imports: [{id, imported_at, file_name, parser_id, rows_total, rows_new, rows_merged, rows_error}]} / 404
 //   POST  /api/bank/sync      → 200 {job_id, created}（今すぐ同期。未完了の sync_bank があるか、前回積んでから 10 分以内なら積まない）
 //   GET   /api/bank/status    → 200 {accounts: [{account_id, name, kind, source, active, last_sync_at, last_ok_at, last_error, last_csv_at, backfill_done_until}]}
-//   GET   /api/bank_txns      ?from&to（YYYY-MM-DD）&account_id&tag&category&side&amount_min&amount_max&q&cursor&limit（1〜100、既定 100）
+//   GET   /api/bank_txns      ?from&to（YYYY-MM-DD）&account_id&tag&category&side&amount_min&amount_max&q&excluded（0|1）&vendor_key
+//         &receipt（matched|pending_review|candidate|waiting）&cursor&limit（1〜100、既定 100）
 //         → 200 {items: [TxnView], next_cursor: string | null} / 400（T110。src/bank/summary.ts。category=none は未分類）
+//   GET   /api/bank_txns/:id/matches → 200 {links: [Link], candidates: [Candidate]} / 404 {error: not_found}（照合。src/bank/match.ts）
+//   POST  /api/bank_txns/:id/matches body {document_id} → 201 {link, warnings} / 400 / 404 {error: not_found | document_not_found}
+//         / 409 {error: already_linked} / 422 {error: document_not_matchable}
+//   POST  /api/bank_txns/:id/matches/:document_id/unlink → 200 {link} / 404 / 409 {error: not_linked}
+//   GET   /api/documents/:id/matches → 200 {links: [Link]} / 404 {error: not_found}
 //   GET   /api/summary/monthly ?month=YYYY-MM → 200 MonthlySummary
 //                              ?from=YYYY-MM&to=YYYY-MM（最大 36 か月）→ 200 {months: [MonthlySummary]} / 400
 //   GET   /api/bank/overview  → 200 Overview（お金タブのホーム。src/bank/overview.ts。[cashflow] の設定は deps.config.cashflow）
@@ -22,6 +28,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { BALANCE_HISTORY_DEFAULT_MONTHS, BALANCE_HISTORY_MAX_MONTHS, balanceHistory } from '../../bank/balanceHistory.ts';
 import { AccountError, accountView, createCsvAccount, listAccountViews, parseAccountPatch, updateAccount } from '../../bank/accounts.ts';
 import { CsvImportError, importCsv, listCsvImports } from '../../bank/csv/import.ts';
+import { documentMatches, linkDocument, MatchError, matchWindowsOf, txnMatches, unlinkDocument } from '../../bank/match.ts';
 import { buildOverview } from '../../bank/overview.ts';
 import { getAccount } from '../../bank/repo.ts';
 import { listTxns, monthlySummaries, monthlySummary, monthsBetween, parseTxnQuery, SummaryError } from '../../bank/summary.ts';
@@ -50,6 +57,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
   const providerKind = () => deps.config.provider?.kind ?? 'freee';
+  const matchWindows = () => matchWindowsOf(deps.config.bank);
 
   r.get('/accounts', (c) => c.json({ accounts: listAccountViews(deps.db) }));
 
@@ -100,6 +108,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
           user: c.req.header(USER_HEADER) ?? null,
           dedupDateWindowDays: bank?.dedupDateWindowDays ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
           transferWindowDays: bank?.transferWindowDays ?? DEFAULT_TRANSFER_WINDOW_DAYS,
+          matchWindows: matchWindows(),
           now: now(),
         });
         return c.json(res, 201);
@@ -143,6 +152,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
         unplannedLookbackMonths: cf.unplannedLookbackMonths,
         reserveMonths: cf.reserveMonths,
         includeUnplannedIncome: cf.includeUnplannedIncome,
+        matchWindows: matchWindows(),
       }),
     );
   });
@@ -156,11 +166,44 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
 
   r.get('/bank_txns', (c) => {
     try {
-      return c.json(listTxns(deps.db, parseTxnQuery(c.req.query())));
+      return c.json(listTxns(deps.db, parseTxnQuery(c.req.query()), { matchWindows: matchWindows() }));
     } catch (e) {
       if (e instanceof SummaryError) return c.json({ error: e.reason }, e.status);
       throw e;
     }
+  });
+
+  r.get('/bank_txns/:id/matches', (c) => {
+    const res = txnMatches(deps.db, c.req.param('id'), matchWindows());
+    if (!res) return c.json({ error: 'not_found' }, 404);
+    return c.json(res);
+  });
+
+  r.post('/bank_txns/:id/matches', async (c) => {
+    const body = await jsonBody(c.req.raw);
+    if (!body) return c.json({ error: 'invalid_json' }, 400);
+    try {
+      const res = linkDocument(deps.db, { txnId: c.req.param('id'), documentId: body.document_id, user: c.req.header(USER_HEADER) ?? null, now: now(), windows: matchWindows() });
+      return c.json(res, 201);
+    } catch (e) {
+      if (e instanceof MatchError) return c.json({ error: e.reason }, e.status);
+      throw e;
+    }
+  });
+
+  r.post('/bank_txns/:id/matches/:document_id/unlink', (c) => {
+    try {
+      return c.json(unlinkDocument(deps.db, { txnId: c.req.param('id'), documentId: c.req.param('document_id'), user: c.req.header(USER_HEADER) ?? null, now: now() }));
+    } catch (e) {
+      if (e instanceof MatchError) return c.json({ error: e.reason }, e.status);
+      throw e;
+    }
+  });
+
+  r.get('/documents/:id/matches', (c) => {
+    const res = documentMatches(deps.db, c.req.param('id'));
+    if (!res) return c.json({ error: 'not_found' }, 404);
+    return c.json(res);
   });
 
   r.get('/summary/monthly', (c) => {

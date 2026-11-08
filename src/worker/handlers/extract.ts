@@ -10,7 +10,9 @@
 //   extractions: 文書ごとに 1 行追加。tax_by_rate_json は [{category: '10'|'8r'|'exempt'|'na', amount_incl_tax, tax}]。
 //     raw_json は検証済みの GeminiResponse 全体 + ai_turn_id。
 //   classifications: source 'rule' | 'gemini'、candidates_json は [{account_id, tax_id（税率の区分）, confidence, reason?}] を確信度順。
+// - Gemini の抽出が成功したら明細 ⇔ 証憑の照合を動かす（src/bank/match.ts の runMatchingSafe。失敗しても抽出は失敗にしない）。
 import { appendAudit } from '../../audit.ts';
+import { runMatchingSafe, type MatchWindows } from '../../bank/match.ts';
 import { extractReceipt, GeminiError, type Gemini, type GenerateResult } from '../../ai/gemini/client.ts';
 import { buildDictionaryContext, type DictionarySummary } from '../../ai/gemini/prompt.ts';
 import { TAX_CATEGORIES, type GeminiResponse } from '../../ai/gemini/schema.ts';
@@ -42,6 +44,8 @@ export type ExtractDeps = {
   objectsDir: string;
   // Gemini に見せる科目。既定は enabled_accounts（対応表 + 同期済みの freee の勘定科目）。
   accounts?: (db: Db) => EnabledAccount[];
+  // 照合の日付の幅（[bank]。省略時は既定値）。
+  matchWindows?: MatchWindows;
 };
 
 export type Candidate = { account_id: string; tax_id: string | null; confidence: number | null; reason?: string };
@@ -225,6 +229,7 @@ export function createExtractHandler(getDeps: () => ExtractDeps): Handler {
         );
         setStatus(db, doc, REVIEW_STATUS, null, { extraction_id: extractionId }, now);
       });
+      runMatchingSafe(db, now, { windows: deps.matchWindows });
     } catch (e) {
       if (isLastAttempt) {
         const msg = (e instanceof Error ? e.message : String(e)).slice(0, 1000);

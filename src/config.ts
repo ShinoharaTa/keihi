@@ -46,6 +46,9 @@ export const DEFAULT_BACKFILL_FROM = '2025-01-01';
 export const DEFAULT_DEDUP_DATE_WINDOW_DAYS = 0;
 export const DEFAULT_TRANSFER_WINDOW_DAYS = 3;
 export const DEFAULT_MATCH_DATE_WINDOW_DAYS = 3;
+// カードの口座の照合の幅（Amazon は注文日と請求日がずれる。docs/cashflow.md §15）。
+export const DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS = 10;
+export const MAX_MATCH_CARD_DATE_WINDOW_DAYS = 31;
 // [cashflow]（docs/mvp-plan-v3.md T303、V11 の初期案）。予定外の支出の目安は直近 6 か月の中央値、残す額は今後 3 か月分の予定支出。
 export const DEFAULT_UNPLANNED_LOOKBACK_MONTHS = 6;
 export const DEFAULT_RESERVE_MONTHS = 3;
@@ -109,8 +112,8 @@ export type Config = {
   reconcile: { verifiedLookbackDays: number; maxListPages: number };
   // 明細（R-A）。backfillFrom: 過去の明細を取り始める日（YYYY-MM-DD）。
   // dedupDateWindowDays: API と CSV の重複を照合する日付の幅。transferWindowDays: 振替の入出金の日付差の上限。
-  // matchDateWindowDays: 領収書の日付から明細の日付までの幅。
-  bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number };
+  // matchDateWindowDays: 領収書の日付から明細の日付までの幅。matchCardDateWindowDays: 同じくカードの口座の幅。
+  bank: { backfillFrom: string; dedupDateWindowDays: number; transferWindowDays: number; matchDateWindowDays: number; matchCardDateWindowDays: number };
   // 資金繰り表（src/cashflow/forecast.ts）。unplannedLookbackMonths: 予定外の収支の目安を出すのに見る月数。
   // reserveMonths: 「月末に残す額」に積む予定支出の月数。includeUnplannedIncome: 予定外の収入の目安を残高に足すか（既定 false）。
   cashflow: { unplannedLookbackMonths: number; reserveMonths: number; includeUnplannedIncome: boolean };
@@ -157,7 +160,7 @@ const KNOWN: Record<string, string[]> = {
   retention: ['years', 'extra_years', 'start'],
   worker: ['linger_ms', 'reauth_wait_days'],
   reconcile: ['verified_lookback_days', 'max_list_pages'],
-  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days'],
+  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days', 'match_card_date_window_days'],
   cashflow: ['unplanned_lookback_months', 'reserve_months', 'include_unplanned_income'],
 };
 
@@ -228,6 +231,12 @@ function optNonNegativeInt(t: Table, sec: string, key: string): number | null {
   if (v === undefined) return null;
   if (typeof v === 'bigint') v = Number(v);
   if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new ConfigError(`config.toml の ${sec}.${key} は 0 以上の整数で指定する`);
+  return v;
+}
+
+function optNonNegativeIntUpTo(t: Table, sec: string, key: string, max: number): number | null {
+  const v = optNonNegativeInt(t, sec, key);
+  if (v !== null && v > max) throw new ConfigError(`config.toml の ${sec}.${key} は 0〜${max} で指定する`);
   return v;
 }
 
@@ -353,6 +362,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       dedupDateWindowDays: optNonNegativeInt(t, 'bank', 'dedup_date_window_days') ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
       transferWindowDays: optNonNegativeInt(t, 'bank', 'transfer_window_days') ?? DEFAULT_TRANSFER_WINDOW_DAYS,
       matchDateWindowDays: optNonNegativeInt(t, 'bank', 'match_date_window_days') ?? DEFAULT_MATCH_DATE_WINDOW_DAYS,
+      matchCardDateWindowDays: optNonNegativeIntUpTo(t, 'bank', 'match_card_date_window_days', MAX_MATCH_CARD_DATE_WINDOW_DAYS) ?? DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS,
     },
     cashflow: {
       unplannedLookbackMonths: optIntUpTo(t, 'cashflow', 'unplanned_lookback_months', MAX_UNPLANNED_LOOKBACK_MONTHS) ?? DEFAULT_UNPLANNED_LOOKBACK_MONTHS,

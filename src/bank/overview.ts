@@ -6,6 +6,7 @@
 //   all_income / all_expense は対象外の口座も含めた合計（monthlySummary の total）。
 // - untagged_count: 効くタグが unset の明細の件数（振替・引き落とし・チャージは数えない）。
 //   PWA の一覧（GET /api/bank_txns?tag=unset）と一致させるため全口座（active・include_in_cashflow で絞らない）。
+// - receipt_waiting_count: 今日の 12 か月前の月初〜今日の経費の明細のうち、receipt が waiting（領収書待ち。match.ts）の件数。
 // - cards_without_settlement: 使っているカードのうち、引き落とし口座かパターンが空のもの（二重計上になる。docs/cashflow.md §12）。
 // - open_candidates: open の周期の候補の件数。upcoming_due: 期日の近い予定の件数（upcoming.ts の dueSoonCount）。
 // - sync: 同期の要約（sync.ts の bankSummary の last_ok_at・errors）。
@@ -14,7 +15,8 @@ import { buildForecast, type ForecastOptions } from '../cashflow/forecast.ts';
 import { listCashflowAccounts, listRecurrenceCandidates } from '../cashflow/repo.ts';
 import { dueSoonCount } from '../cashflow/upcoming.ts';
 import type { Db } from '../db/index.ts';
-import { listAccounts, listAllBankTxnIds } from './repo.ts';
+import { createReceiptResolver, DEFAULT_MATCH_WINDOWS, type MatchWindows } from './match.ts';
+import { listAccounts, listAllBankTxnIds, listBankTxnsBetween } from './repo.ts';
 import { monthlySummary } from './summary.ts';
 import { bankSummary } from './sync.ts';
 import { resolveTagsBulk } from './tags.ts';
@@ -29,6 +31,7 @@ export type Overview = {
   reserve: number;
   available: number;
   untagged_count: number;
+  receipt_waiting_count: number;
   cards_without_settlement: { account_id: string; name: string }[];
   open_candidates: number;
   upcoming_due: number;
@@ -45,7 +48,16 @@ export type Overview = {
   sync: { last_ok_at: string | null; errors: number };
 };
 
-export type OverviewOptions = Omit<ForecastOptions, 'months'>;
+export type OverviewOptions = Omit<ForecastOptions, 'months'> & { matchWindows?: MatchWindows };
+
+// 領収書待ちを数える期間の月数（今日の 12 か月前の月初から）。
+export const RECEIPT_WAITING_MONTHS = 12;
+
+function monthsBeforeStart(today: string, months: number): string {
+  const [y, m] = today.split('-').map(Number) as [number, number];
+  const idx = y * 12 + (m - 1) - months;
+  return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}-01`;
+}
 
 export function buildOverview(db: Db, opts: OverviewOptions): Overview {
   const { today } = opts;
@@ -62,6 +74,10 @@ export function buildOverview(db: Db, opts: OverviewOptions): Overview {
   let untagged = 0;
   for (const t of resolveTagsBulk(db, ids).values()) if (t.tag === 'unset') untagged++;
 
+  const waitingIds = listBankTxnsBetween(db, monthsBeforeStart(today, RECEIPT_WAITING_MONTHS), today).map((r) => r.id);
+  let waiting = 0;
+  for (const m of createReceiptResolver(db, opts.matchWindows ?? DEFAULT_MATCH_WINDOWS)(waitingIds).values()) if (m.receipt === 'waiting') waiting++;
+
   const cards = listAccounts(db)
     .filter((a) => a.kind === 'card' && a.active === 1 && (!a.card_settlement_account_id || !a.card_settlement_pattern))
     .map((a) => ({ account_id: a.id, name: a.name }));
@@ -73,6 +89,7 @@ export function buildOverview(db: Db, opts: OverviewOptions): Overview {
     reserve: f.reserve,
     available: total - f.reserve,
     untagged_count: untagged,
+    receipt_waiting_count: waiting,
     cards_without_settlement: cards,
     open_candidates: listRecurrenceCandidates(db, { state: 'open' }).length,
     upcoming_due: dueSoonCount(db, today),

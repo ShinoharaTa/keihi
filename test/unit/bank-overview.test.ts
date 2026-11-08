@@ -65,6 +65,7 @@ function mkApp(db: Db): Hono {
 //   projected_end_balance = 1,250,000 − 110,000 − 24,000 = 1,116,000。
 // 今月の明細: A 入金 300,000・A 出金 20,000・振替 A → W 50,000（集計外）・W 出金 5,000（unset）・W 出金 7,000（private にした）・off 出金 1,000（unset）。
 //   income 300,000、expense 20,000 + 5,000 + 7,000 = 32,000（資金繰りの対象口座だけ）。all_income 300,000、all_expense 32,000 + off 1,000 = 33,000。untagged = W 5,000 と off 1,000 の 2 件（振替の入金側は数えない）。
+// 領収書待ち（2025-11-01〜今日の経費の明細で証憑なし）: A の出金 04/10・05〜10 の 6 件・11/03 の 8 件（振替の出金は除く。W・off は unset）。
 function setupOverview() {
   const b = base();
   const { db, mk, txn, bal, item } = b;
@@ -125,6 +126,7 @@ describe('GET /api/bank/overview', () => {
       reserve: 270_000,
       available: 980_000,
       untagged_count: 2,
+      receipt_waiting_count: 8,
       cards_without_settlement: [{ account_id: card1, name: 'カード1' }, { account_id: card4, name: 'カード4' }], // 口座の作成順
       open_candidates: 2,
       upcoming_due: 1,
@@ -143,6 +145,7 @@ describe('GET /api/bank/overview', () => {
       reserve: 0,
       available: 0,
       untagged_count: 0,
+      receipt_waiting_count: 0,
       cards_without_settlement: [],
       open_candidates: 0,
       upcoming_due: 0,

@@ -148,9 +148,9 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | PATCH /api/accounts/:id | default_tag・mcp_visibility・include_in_cashflow・card_settlement_account_id（bank の口座だけ）・card_settlement_pattern（1〜200 字）・active | 変わった列を `money_account.updated` に |
 | POST /api/bank/sync | ― | `{job_id, created}`。未完了があるか 10 分以内なら積まない |
 | GET /api/bank/status | ― | 口座ごとの last_sync_at・last_ok_at・last_error・last_csv_at・backfill_done_until |
-| GET /api/bank_txns | from・to・account_id・tag・category（none = 未分類）・side・amount_min・amount_max・q（正規化して部分一致）・cursor・limit（1〜100） | `{items, next_cursor}`。items に tag・category・tag_source・excluded・transfer_kind |
+| GET /api/bank_txns | from・to・account_id・tag・category（none = 未分類）・side・amount_min・amount_max・q（正規化して部分一致）・excluded（0/1）・vendor_key（description_norm の完全一致、1〜200 字）・receipt（§15）・cursor・limit（1〜100） | `{items, next_cursor}`。items に tag・category・tag_source・excluded・transfer_kind・receipt・receipt_hint |
 | GET /api/summary/monthly | `month=YYYY-MM` か `from&to`（最大 36 か月） | MonthlySummary か `{months}` |
-| GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は全口座、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）と一致させるため全口座・sync（`src/bank/overview.ts`） |
+| GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は全口座、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）と一致させるため全口座・sync・receipt_waiting_count（§15）（`src/bank/overview.ts`） |
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
@@ -175,7 +175,8 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | [bank] backfill_from | 2025-01-01 | 過去の明細を取り始める日（V8） |
 | [bank] dedup_date_window_days | 0 | API と CSV の照合の日付幅 |
 | [bank] transfer_window_days | 3 | 振替の日付差の上限 |
-| [bank] match_date_window_days | 3 | 明細⇔領収書の照合の幅（T206 用。今は未使用） |
+| [bank] match_date_window_days | 3 | 明細⇔証憑の照合の日付の幅（カード以外の口座。§15） |
+| [bank] match_card_date_window_days | 10（0〜31） | 同じくカードの口座の幅 |
 | [cashflow] unplanned_lookback_months | 6（最大 24） | 予定外の目安に見る月数 |
 | [cashflow] reserve_months | 3（最大 12） | 残す額に積む予定支出の月数 |
 | [cashflow] include_unplanned_income | false | 予定外の収入の目安を残高に足すか |
@@ -279,3 +280,37 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 | GET /api/cashflow | ― | months[].items に origin・estimate_key・pinned が増えた。warnings に `tax_profile_missing` / `consumption_tax_mode_unset` / `consumption_tax_not_implemented`（方式は設定済みだが PR1 は消費税を作らない） |
 
 PR1 の既定のプロファイル: blue_return='65'、consumption_mode='unset'、revenue_includes_tax=1、biz_tax_rate=NULL、resident_pay_mode='ordinary4'、nhi_preset='saitama-city-2026'、nhi_members=1、nhi_members_40_64=0、nhi_installments=8、nhi_first_month=7、pension_mode='monthly'、pension_addon=0、spouse=0、dependents=0、other_deductions=0、payment_account_id=NULL。
+
+## 15. 照合（`src/bank/match.ts`、T206・T207）
+明細と証憑（documents）の組を `txn_matches`（0009_matches。追記専用、組ごとに seq 最大の行が効く）に残す。候補は保存せず読むたびに計算する。
+
+| 用語 | 定義 |
+|---|---|
+| 経費の明細 | 効くタグが business・side = expense・振替の除外（§4）でない・active な口座の明細 |
+| 照合の候補にできる明細 | 経費の明細 + タグが unset の支出（private は入れない） |
+| 候補にできる証憑 | status が rejected / duplicate / personal 以外。値は最新の reviews の版、無ければ最新の extractions |
+| 有効な紐付け | 組の最新が auto か confirmed で、証憑が候補にできる状態。auto は証憑の今の金額 = 明細の金額のときだけ |
+| 候補 | 金額が等しく、証憑の日 − 1 ≤ 明細の日 ≤ 証憑の日 + W（カードは `match_card_date_window_days`、それ以外は `match_date_window_days`）。組に行がある（rejected を含む）か、どちらかが有効な紐付けを持つなら除く |
+| score | 相手名の一致（証憑の vendor を正規化し、短いほうが 3 文字以上でどちらかが他方を含む）で 50 + max(0, 50 − 5 × \|日付差\|) |
+
+| receipt（経費の明細だけ。それ以外は null） | 条件 |
+|---|---|
+| matched | 有効な紐付けの証憑のうち 1 件以上が approved / sent / verified |
+| pending_review | 有効な紐付けはあるが、証憑が確認前 |
+| candidate | 有効な紐付けが無く、候補が 1 件以上 |
+| waiting | どれでもない（領収書待ち） |
+
+- 自動照合（`runMatching`）: 明細から見ても証憑から見ても候補が 1 件ずつで、相手名が一致するか日付差が 1 日以内なら state=auto（actor=system）を追記し、監査 `txn_match.auto`（bank_txn_id・document_id・score だけ）。それ以外は書かない。外した組は作り直さない。
+- 呼ぶところ: sync_bank の振替検出の後・CSV 取り込みの後・extract の成功後・確定の後・daily の段 `match`。失敗しても呼び元は失敗にせず、ログと監査 `txn_match.failed` に残す。
+- receipt_hint: 経費か unset の支出に有効な紐付けがあるとき、最後に紐付けた証憑の `{document_id, status}`（unset の明細に証憑が付いたら「事業の候補」として目立たせる）。
+- 人の紐付けは 1 明細に複数の証憑・1 証憑に複数の明細でよい（分割の請求）。自動は 1 対 1 だけ。
+- 領収書待ちの一覧: `GET /api/bank_txns?tag=business&side=expense&excluded=0&receipt=waiting`。ホームの件数は overview の `receipt_waiting_count`（今日の 12 か月前の月初〜今日）。
+
+| メソッド・パス | 引数 | 応答の要点 |
+|---|---|---|
+| GET /api/bank_txns/:id/matches | ― | `{links: [Link], candidates: [Candidate]}`（候補は score の高い順・最大 10 件。照合の候補にできない明細なら空）/ 404 |
+| POST /api/bank_txns/:id/matches | `{document_id}` | 201 `{link, warnings}`（`amount_mismatch`・`date_out_of_window`。拒否はしない）/ 400 document_id_required / 404 not_found・document_not_found / 409 already_linked / 422 document_not_matchable。監査 `txn_match.linked` |
+| POST /api/bank_txns/:id/matches/:document_id/unlink | ― | 200 `{link}`（state=rejected を追記）/ 404 / 409 not_linked。監査 `txn_match.unlinked` |
+| GET /api/documents/:id/matches | ― | `{links: [Link]}`（有効な紐付けだけ）/ 404 |
+
+Link は `{bank_txn_id, document_id, state, actor, score, created_at, document: DocBrief, txn: TxnBrief}`、Candidate は `{document_id, score, date_diff, vendor_match, document: DocBrief}`。DocBrief は `{id, status, kind, source, txn_date, amount, vendor, thumbnail_url}`（PDF は thumbnail_url = null）、TxnBrief は `{id, account_name, txn_date, amount, description}`。

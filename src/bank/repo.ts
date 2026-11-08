@@ -273,6 +273,8 @@ export type BankTxnSqlFilter = {
   amountMax?: number;
   // description_norm に含まれる文字列（正規化済み）。
   descriptionNorm?: string;
+  // description_norm と完全に一致する文字列（vendor_key）。
+  descriptionNormExact?: string;
 };
 
 // txn_date DESC, id DESC の順で、after（その行より後ろ）から limit 件。
@@ -295,6 +297,7 @@ export function listBankTxnsPage(
   if (f.amountMin !== undefined) add('t.amount >= ?', f.amountMin);
   if (f.amountMax !== undefined) add('t.amount <= ?', f.amountMax);
   if (f.descriptionNorm !== undefined) add('instr(t.description_norm, ?) > 0', f.descriptionNorm);
+  if (f.descriptionNormExact !== undefined) add('t.description_norm = ?', f.descriptionNormExact);
   if (after) add('(t.txn_date < ? OR (t.txn_date = ? AND t.id < ?))', after.txnDate, after.txnDate, after.id);
   return db
     .prepare(
