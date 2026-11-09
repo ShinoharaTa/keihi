@@ -2490,6 +2490,7 @@ button:disabled {
     max-width: 720px;
     margin: 0 auto;
   }
+}
 /* 分析（#74。pwa/src/money/analysis/）。カテゴリの色 k-0〜k-11（台帳の color）・k-none（未分類・台帳に無い値）は analysis/colors.ts。PC 幅（1024px 以上）は 3 カラムで最大 1280px */
 :root {
   --m-k0: #2563eb;
