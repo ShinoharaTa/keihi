@@ -4,7 +4,7 @@
 // （36 か月の端の四半期・年）だけラベルに「（一部）」。
 // タグの絞り込みは by_tag_category から（月次集計にタグの引数は無い）。口座は月次集計に口座の引数が無く by_account からは作れないので出さない。
 // クロス表はタグで列を分けるので、タグの絞り込みは合計と推移にだけ効く。件数は向き（side）に合ったほう（income_count / expense_count）を使う。
-import { addMonth, periodRange, TAG_ORDER, TXN_PAGE, UNCATEGORIZED_QUERY, type MonthlySummary, type Tag, type TxnFilter } from '../model.ts';
+import { addMonth, periodRange, TAG_ORDER, TXN_PAGE, UNCATEGORIZED_QUERY, type Categories, type MonthlySummary, type Tag, type TxnFilter } from '../model.ts';
 import { categoryRank } from './colors.ts';
 
 export type Span = 'month' | 'quarter' | 'year';
@@ -75,10 +75,10 @@ const addTo = (a: Cell, b: Cell) => {
   a.income_count += b.income_count;
   a.expense_count += b.expense_count;
 };
-const rowOrder = (a: Row, b: Row) => TAG_ORDER.indexOf(a.tag) - TAG_ORDER.indexOf(b.tag) || categoryRank(a.category) - categoryRank(b.category);
+const rowOrder = (cats: Categories | null) => (a: Row, b: Row) => TAG_ORDER.indexOf(a.tag) - TAG_ORDER.indexOf(b.tag) || categoryRank(cats, a.category) - categoryRank(cats, b.category);
 
-// 期間のタグ × カテゴリ（月をまたいで足す）。並びは tag 順 → カテゴリの固定順 → 未分類最後。cur は今月（YYYY-MM）。
-export function slice(ms: readonly MonthlySummary[], span: Span, start: string, cur: string): Slice {
+// 期間のタグ × カテゴリ（月をまたいで足す）。並びは tag 順 → カテゴリの台帳の順（cats。colors.ts）→ 未分類最後。cur は今月（YYYY-MM）。
+export function slice(ms: readonly MonthlySummary[], span: Span, start: string, cur: string, cats: Categories | null = null): Slice {
   const months = periodMonths(span, start);
   const byMonth = new Map(ms.map((m) => [m.month, m]));
   const acc = new Map<string, Row>();
@@ -98,7 +98,7 @@ export function slice(ms: readonly MonthlySummary[], span: Span, start: string, 
   }
   const current = start <= cur && cur <= months[months.length - 1]!;
   const partial = missing > 0 && !current;
-  return { start, label: `${periodLabel(span, start)}${partial ? '（一部）' : ''}`, partial, rows: [...acc.values()].sort(rowOrder) };
+  return { start, label: `${periodLabel(span, start)}${partial ? '（一部）' : ''}`, partial, rows: [...acc.values()].sort(rowOrder(cats)) };
 }
 
 const byTag = (rows: readonly Row[], tag: '' | Tag) => (tag === '' ? rows : rows.filter((r) => r.tag === tag));
@@ -114,17 +114,17 @@ export function totals(rows: readonly Row[], tag: '' | Tag = ''): Totals {
 // ---- 推移 ----
 
 export type TrendBar = { start: string; label: string; short: string; yearMark: string | null; partial: boolean; amount: number; count: number; segs: { category: string | null; amount: number }[] };
-// 期間ごとのカテゴリの積み上げ（side の金額。下から固定順、未分類が上）。
-export function trend(ms: readonly MonthlySummary[], span: Span, base: string, side: Side, cur: string, tag: '' | Tag = ''): TrendBar[] {
+// 期間ごとのカテゴリの積み上げ（side の金額。下から台帳の順、未分類が上）。
+export function trend(ms: readonly MonthlySummary[], span: Span, base: string, side: Side, cur: string, tag: '' | Tag = '', cats: Categories | null = null): TrendBar[] {
   return trendStarts(span, base).map((start, i) => {
-    const s = slice(ms, span, start, cur);
-    const cats = new Map<string | null, number>();
+    const s = slice(ms, span, start, cur, cats);
+    const sums = new Map<string | null, number>();
     let count = 0;
     for (const r of byTag(s.rows, tag)) {
       count += r[countKey(side)];
-      if (r[side] > 0) cats.set(r.category, (cats.get(r.category) ?? 0) + r[side]);
+      if (r[side] > 0) sums.set(r.category, (sums.get(r.category) ?? 0) + r[side]);
     }
-    const segs = [...cats].sort(([a], [b]) => categoryRank(a) - categoryRank(b)).map(([category, amount]) => ({ category, amount }));
+    const segs = [...sums].sort(([a], [b]) => categoryRank(cats, a) - categoryRank(cats, b)).map(([category, amount]) => ({ category, amount }));
     const yearMark = span !== 'year' && (i === 0 || monOf(start) === 1) ? String(yearOf(start)) : null;
     return { start, label: s.label, short: periodShort(span, start), yearMark, partial: s.partial, amount: segs.reduce((a, x) => a + x.amount, 0), count, segs };
   });
@@ -141,8 +141,8 @@ export type CrossRow = { category: string | null; cells: CrossCells };
 export type Cross = { rows: CrossRow[]; total: CrossCells };
 const emptyCells = (): CrossCells => ({ all: { amount: 0, count: 0 }, business: { amount: 0, count: 0 }, private: { amount: 0, count: 0 }, unset: { amount: 0, count: 0 } });
 
-// 行 = カテゴリ（固定順 + 未分類最後。side の金額がある行だけ）、列 = 事業 / 私用 / 未設定 / 計。セルは side の金額と件数。
-export function crossTable(rows: readonly Row[], side: Side): Cross {
+// 行 = カテゴリ（台帳の順 + 未分類最後。side の金額がある行だけ）、列 = 事業 / 私用 / 未設定 / 計。セルは side の金額と件数。
+export function crossTable(rows: readonly Row[], side: Side, cats: Categories | null = null): Cross {
   const m = new Map<string | null, CrossCells>();
   const total = emptyCells();
   for (const r of rows) {
@@ -156,7 +156,7 @@ export function crossTable(rows: readonly Row[], side: Side): Cross {
       total[col].count += r[countKey(side)];
     }
   }
-  return { rows: [...m].sort(([a], [b]) => categoryRank(a) - categoryRank(b)).map(([category, cells]) => ({ category, cells })), total };
+  return { rows: [...m].sort(([a], [b]) => categoryRank(cats, a) - categoryRank(cats, b)).map(([category, cells]) => ({ category, cells })), total };
 }
 // 列の中での割合（%、小数 1 桁）。
 export const share = (v: number, total: number) => (total > 0 ? Math.round((v / total) * 1000) / 10 : 0);

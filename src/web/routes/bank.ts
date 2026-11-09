@@ -167,7 +167,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
 
   r.get('/bank_txns', (c) => {
     try {
-      return c.json(listTxns(deps.db, parseTxnQuery(c.req.query()), { matchWindows: matchWindows() }));
+      return c.json(listTxns(deps.db, parseTxnQuery(deps.db, c.req.query()), { matchWindows: matchWindows() }));
     } catch (e) {
       if (e instanceof SummaryError) return c.json({ error: e.reason }, e.status);
       throw e;

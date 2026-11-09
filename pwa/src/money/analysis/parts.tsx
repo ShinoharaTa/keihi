@@ -127,7 +127,7 @@ export function TrendChart({
 }) {
   const p = TREND;
   // 段の順は固定（下から固定 13 種の順、未分類が上）。未分類のキーは ''。
-  const keys = [...new Set(bars.flatMap((b) => b.segs.map((s) => s.category ?? '')))].sort((a, b) => categoryRank(a || null) - categoryRank(b || null));
+  const keys = [...new Set(bars.flatMap((b) => b.segs.map((s) => s.category ?? '')))].sort((a, b) => categoryRank(cats, a || null) - categoryRank(cats, b || null));
   const rows = bars.map((b) => Object.fromEntries(keys.map((k) => [k, b.segs.find((s) => (s.category ?? '') === k)?.amount ?? 0])) as Record<string, number>);
   const g = stackBars(rows, keys, p);
   const slot = (p.w - p.l - p.r) / Math.max(1, bars.length);
@@ -141,7 +141,7 @@ export function TrendChart({
       {bars.map((b, i) => (
         <g key={b.start} class={b.partial ? 'm-an-partial' : undefined}>
           {g[i]!.segs.map((s) => (
-            <rect key={s.key} class={categoryColor(s.key === '' ? null : s.key)} x={r1(g[i]!.cx - BAR_W / 2)} y={s.y} width={BAR_W} height={s.h} />
+            <rect key={s.key} class={categoryColor(cats, s.key === '' ? null : s.key)} x={r1(g[i]!.cx - BAR_W / 2)} y={s.y} width={BAR_W} height={s.h} />
           ))}
           {b.amount > 0 && (
             <text class="c-fg2" x={g[i]!.cx} y={g[i]!.top - 6} font-size="10" text-anchor="middle">
@@ -194,7 +194,7 @@ export function TrendChart({
       <div class="m-legend" aria-hidden="true">
         {keys.map((k) => (
           <span key={k || 'none'}>
-            <span class={`m-sw ${categoryColor(k === '' ? null : k)}`} />
+            <span class={`m-sw ${categoryColor(cats, k === '' ? null : k)}`} />
             {categoryLabel(cats, k === '' ? null : k)}
           </span>
         ))}
@@ -283,7 +283,7 @@ export function CrossTable({
               return (
                 <tr key={r.category ?? 'none'}>
                   <th scope="row">
-                    <span class={`m-sw ${categoryColor(r.category)}`} />
+                    <span class={`m-sw ${categoryColor(cats, r.category)}`} />
                     {label}
                   </th>
                   {cols.map((k) => (
@@ -326,13 +326,13 @@ export function CrossTable({
             <li key={r.category ?? 'none'}>
               <button type="button" class="m-an-row" aria-pressed={samePick(selected, p)} aria-label={`${label} ${COL_LABELS[col]} ${yen(c.amount)} 円 ${count(c.count)} ${pct}%。明細を見る`} onClick={() => onPick(p)}>
                 <span class="m-an-name">
-                  <span class={`m-sw ${categoryColor(r.category)}`} />
+                  <span class={`m-sw ${categoryColor(cats, r.category)}`} />
                   {label}
                 </span>
                 <b>{yen(c.amount)}</b>
                 <span class="m-an-n">{count(c.count)}</span>
                 <span class="m-an-pct">{pct}%</span>
-                <ColBar cls={categoryColor(r.category)} pct={pct} />
+                <ColBar cls={categoryColor(cats, r.category)} pct={pct} />
               </button>
             </li>
           );
@@ -483,9 +483,11 @@ export type AnalysisProps = {
   onMore: () => void;
   onTxns: () => void;
   onFilter: (open: boolean) => void;
+  // カテゴリの管理（Categories.tsx）へ
+  onCategories: () => void;
 };
 
-// 画面全体（PC は 3 カラム: 左 = 期間・向き・タグ、中央 = 合計 → 推移 → クロス表、右 = ドリルダウン。スマホは 1 カラムで、上の帯に期間と絞り込み）。
+// 画面全体（PC は 3 カラム: 左 = 期間・向き・タグとその下に「カテゴリの管理」、中央 = 合計 → 推移 → クロス表、右 = ドリルダウン。スマホは 1 カラムで、上の帯に期間と絞り込み・その横に「カテゴリの管理」）。
 export function AnalysisView(p: AnalysisProps) {
   const barSel = p.pick && p.pick.category === undefined && p.pick.tag === (p.tag || undefined) ? p.pick.start : null;
   const center = p.view ? (
@@ -500,12 +502,20 @@ export function AnalysisView(p: AnalysisProps) {
   const drill = p.pick && p.drill && p.pickCell ? <DrillList cell={p.pickCell} drill={p.drill} cats={p.cats} today={p.today} onMore={p.onMore} /> : null;
   const period = <PeriodSwitch span={p.span} label={p.label} canNext={p.canNext} onSpan={p.onSpan} onShift={p.onShift} />;
   const filters = <FilterControls side={p.side} tag={p.tag} onSide={p.onSide} onTag={p.onTag} />;
+  const manage = (
+    <button type="button" class="m-pill m-an-manage" onClick={p.onCategories}>
+      カテゴリの管理
+    </button>
+  );
   if (p.wide) {
     return (
       <div class="m-an-cols">
-        <div class="m-an-left m-card m-pad12 m-gap8">
-          {period}
-          {filters}
+        <div class="m-an-left">
+          <div class="m-card m-pad12 m-gap8">
+            {period}
+            {filters}
+          </div>
+          {manage}
         </div>
         <div class="m-an-center">
           {p.msg && <p class="m-msg">{p.msg}</p>}
@@ -521,10 +531,13 @@ export function AnalysisView(p: AnalysisProps) {
     <>
       <div class="m-an-band">
         {period}
-        <button type="button" class="m-pill" aria-haspopup="dialog" onClick={() => p.onFilter(true)}>
-          <Icon name="filter" size={18} />
-          {filterText(p.side, p.tag)}
-        </button>
+        <div class="m-an-bandrow">
+          <button type="button" class="m-pill" aria-haspopup="dialog" onClick={() => p.onFilter(true)}>
+            <Icon name="filter" size={18} />
+            {filterText(p.side, p.tag)}
+          </button>
+          {manage}
+        </div>
       </div>
       <div class="m-main">
         {p.msg && <p class="m-msg">{p.msg}</p>}

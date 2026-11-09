@@ -18,7 +18,9 @@ const TABLES = ['documents', 'reviews', 'deals', 'audit_log', 'extractions', 'cl
   // 0012_mail（docs/cashflow.md §17）
   'mail_messages', 'mail_attachments',
   // 0013_txn_tags_batch（docs/cashflow.md §5）
-  'txn_tag_batch_reverts'];
+  'txn_tag_batch_reverts',
+  // 0014_bank_categories（docs/cashflow.md §5。アーカイブだけ）
+  'bank_categories'];
 // 表名の前の `main.` と、" ` ' [ の引用にも当たる。
 const DELETE_RE = new RegExp(`DELETE\\s+FROM\\s+(?:main\\.)?["\`'\\[]?(${TABLES.join('|')})\\b`, 'i');
 

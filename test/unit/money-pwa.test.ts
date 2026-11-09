@@ -150,11 +150,11 @@ const noop = () => {};
 
 const cats: Categories = {
   items: [
-    { id: 'food', label: '食費' },
-    { id: 'daily', label: '日用品' },
-    { id: 'telecom', label: '通信' },
-    { id: 'tax', label: '税金' },
-    { id: 'car', label: '車' },
+    { id: 'food', label: '食費', color: 0 },
+    { id: 'daily', label: '日用品', color: 1 },
+    { id: 'telecom', label: '通信', color: 3 },
+    { id: 'tax', label: '税金', color: 7 },
+    { id: 'car', label: '車', color: 8 },
   ],
   uncategorized_label: '未分類',
 };
@@ -1106,6 +1106,22 @@ describe('SSR スナップショット', () => {
     assert.match(html(ch.CatBar!, { value: 100, avg: 50, max: 100 }), /class="f-avg" x1="50"/);
     assert.match(html(m.MonthlyView!, { months: [], selected: '2026-10', cats, uncat: null, unset: null, onSelect: noop, onTxns: noop }), /この月の集計はありません/);
     t.assert.snapshot(lines(out));
+  });
+
+  test('タグ付けシートのカテゴリの段: 台帳の色の点、アーカイブ済みは選択肢に出さない（ラベルは引ける）。絞り込みは選んでいるときだけ出す', async () => {
+    const m = await load('/src/money/Txns.tsx');
+    const ledger: Categories = { ...cats, items: [...cats.items, { id: 'c_OLD', label: '昔の', color: 4, archived: true }] };
+    const t0 = txn({ id: 'T9', category: 'c_OLD' });
+    // TagSheet は幅で変わらない（wide を受けない。スマホも PC も同じボトムシート）
+    const out = html(m.TagSheet!, { txn: t0, draft: { tag: 'business', category: 'c_OLD', rule: true }, pos: { index: 0, total: 0 }, cats: ledger, saving: false, error: '', onDraft: noop, onSave: noop, onClose: noop });
+    const grid = out.slice(out.indexOf('<legend>カテゴリ</legend>'), out.indexOf('同じ摘要にも適用'));
+    assert.deepEqual([...grid.matchAll(/<span class="m-dot (k-\d+)" aria-hidden="true"><\/span>([^<]+)<\/button>/g)].map((x) => `${x[1]} ${x[2]}`), ['k-0 食費', 'k-1 日用品', 'k-3 通信', 'k-7 税金', 'k-8 車']);
+    assert.doesNotMatch(grid, /昔の/);
+    assert.match(out, /事業 · 昔の にします/, '今の値のラベルはアーカイブ済みでも引ける');
+    const f = { period: 'this', accountId: '', tag: '', category: '', q: '' };
+    const opts = (category: string) => html(m.TxnFilters!, { f: { ...f, category }, q: '', expanded: true, unsetCount: '', accounts: [], cats: ledger, onChange: noop, onQ: noop, onExpand: noop });
+    assert.doesNotMatch(opts(''), /昔の/);
+    assert.match(opts('c_OLD'), /<option value="c_OLD">昔の<\/option>/);
   });
 
   test('明細: 期間・未設定だけ・折りたたみ、日付ごとの行（タグ・集計外）、タグ付けシート', async (t) => {

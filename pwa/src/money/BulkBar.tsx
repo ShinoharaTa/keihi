@@ -3,11 +3,14 @@
 // - SelectBand: 上の帯。スマホは画面のヘッダの代わりに「n 件選択中 ・ すべて選択 ・ 完了」。PC は一覧の上の行で、チェック（見えている行をすべて）・件数・完了。
 // - SelectTools: 一覧の上の小さな段。「絞り込み結果をすべて選択（n 件）」・その案内（500 件を超えた等）・「直前の一括を元に戻す」。
 // - BulkBar: 選択中に画面の下（下タブのすぐ上）に固定する操作の帯。「n 件」/ 事業・私用・未設定 /「カテゴリ ▾」/「選択を外す」。
-// - CategoryPicker: カテゴリ（固定 13 種 + 未分類）。スマホはボトムシート、PC は「カテゴリ ▾」の上の小さなポップオーバー。
+// - CategoryPicker: カテゴリ（台帳のうちアーカイブしていないもの + 未分類 + 最後に「新しく作る…」）。スマホはボトムシート、
+//   PC は「カテゴリ ▾」の上の小さなポップオーバー。「新しく作る…」を押すと同じ所が名前と色の入力（CategoryForm）に変わる。
 // - BulkNoticeBand: 結果の帯。「n 件を変えました（m 件は変わらず）・元に戻す」「ルールを k 件作りました・消す」。
 import type { ComponentChildren } from 'preact';
+import { categoryColor } from './analysis/colors.ts';
+import { CategoryForm, Dot, type CategoryDraft } from './CategoryForm.tsx';
 import { Icon } from './Icons.tsx';
-import { categoryLabel, TAG_LABELS, TAG_ORDER, type Categories, type Tag } from './model.ts';
+import { assignable, CATEGORY_COLORS, categoryLabel, TAG_LABELS, TAG_ORDER, type Categories, type Tag } from './model.ts';
 import type { BulkNotice } from './selection.ts';
 
 export function SelectBand({
@@ -137,32 +140,53 @@ export function CategoryPicker({
   wide,
   count,
   cats,
+  create = null,
+  busy = false,
   onPick,
+  onCreate,
+  onCreateSubmit,
   onClose,
 }: {
   wide: boolean;
   count: number;
   cats: Categories | null;
+  // 「新しく作る…」の入力中（null は一覧）
+  create?: CategoryDraft | null;
+  busy?: boolean;
   onPick: (category: string | null) => void;
+  // 入力を開く・書き換える・やめる（null）
+  onCreate?: (d: CategoryDraft | null) => void;
+  // 作って選択中の明細に付ける
+  onCreateSubmit?: () => void;
   onClose: () => void;
 }) {
-  const grid = (
-    <div class="m-catgrid">
-      {(cats?.items ?? []).map((c) => (
-        <button type="button" key={c.id} onClick={() => onPick(c.id)}>
-          {c.label}
+  const grid =
+    create && onCreate && onCreateSubmit ? (
+      <CategoryForm idp="m-catpick-new" draft={create} busy={busy} submitLabel={`作って ${count} 件に付ける`} onDraft={onCreate} onSubmit={onCreateSubmit} onCancel={() => onCreate(null)} />
+    ) : (
+      <div class="m-catgrid">
+        {assignable(cats).map((c) => (
+          <button type="button" key={c.id} onClick={() => onPick(c.id)}>
+            <Dot cls={categoryColor(cats, c.id)} />
+            {c.label}
+          </button>
+        ))}
+        <button type="button" onClick={() => onPick(null)}>
+          {categoryLabel(cats, null)}
         </button>
-      ))}
-      <button type="button" onClick={() => onPick(null)}>
-        {categoryLabel(cats, null)}
-      </button>
-    </div>
-  );
+        {onCreate && (
+          <button type="button" class="m-catnew" onClick={() => onCreate({ label: '', color: assignable(cats).length % CATEGORY_COLORS, error: '' })}>
+            新しく作る…
+          </button>
+        )}
+      </div>
+    );
+  const title = create ? '新しいカテゴリ' : `カテゴリを変える（${count} 件）`;
   if (wide)
     return (
       <>
         <div class="m-pop-catch" onClick={onClose} />
-        <div class="m-pop" role="dialog" aria-label={`カテゴリを変える（${count} 件）`}>
+        <div class="m-pop" role="dialog" aria-label={title}>
           {grid}
         </div>
       </>
@@ -175,7 +199,7 @@ export function CategoryPicker({
           <span />
         </div>
         <div class="m-sheet-head">
-          <h2 id="m-catpick-title">カテゴリを変える（{count} 件）</h2>
+          <h2 id="m-catpick-title">{title}</h2>
           <button type="button" class="m-icon" aria-label="閉じる" onClick={onClose}>
             <Icon name="close" size={22} />
           </button>

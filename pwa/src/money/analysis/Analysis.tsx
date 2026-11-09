@@ -3,6 +3,7 @@
 // タグの絞り込み・スマホのクロス表の列・選んだ所（ドリルダウン）。口座の絞り込みは月次集計に口座の引数が無いので出さない。
 // 月次集計は GET /api/summary/monthly?from&to を 1 回（推移の 12 本分。最大 36 か月 = API の上限）。期間の種類か基準を変えたら読み直し、
 // 向き・タグは読んだ分から作り直す。ドリルダウンは GET /api/bank_txns（excluded=0）の最初の 1 ページ +「もっと見る」。応答は連番で古いものを捨てる。
+// 「カテゴリの管理」（onCategories）は Categories.tsx の画面へ。同じチャンクに置くためここから出す（Money が動的 import する）。
 // 「明細で開く」は明細の画面へ同じ期間・カテゴリ・タグ・向きで移る（Money の go('txns', {filter})）。
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { getJson } from '../../api.ts';
@@ -30,7 +31,25 @@ import {
 } from './aggregate.ts';
 import { AnalysisView, pickTitle, type Drill } from './parts.tsx';
 
-export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: { today: string; cats: Categories | null; initialMonth?: string; backLabel?: string; onBack: () => void; go: Go }) {
+export { Categories } from './Categories.tsx';
+
+export function Analysis({
+  today,
+  cats,
+  initialMonth,
+  backLabel,
+  onBack,
+  onCategories,
+  go,
+}: {
+  today: string;
+  cats: Categories | null;
+  initialMonth?: string;
+  backLabel?: string;
+  onBack: () => void;
+  onCategories: () => void;
+  go: Go;
+}) {
   const cur = today.slice(0, 7);
   const wide = useWide();
   const [span, setSpan] = useState<Span>('month');
@@ -66,9 +85,9 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
 
   const view = useMemo(() => {
     if (!months) return null;
-    const s = slice(months, span, start, cur);
-    return { slice: s, totals: totals(s.rows, tag), bars: trend(months, span, start, side, cur, tag), cross: crossTable(s.rows, side) };
-  }, [months, span, start, side, tag, cur]);
+    const s = slice(months, span, start, cur, cats);
+    return { slice: s, totals: totals(s.rows, tag), bars: trend(months, span, start, side, cur, tag, cats), cross: crossTable(s.rows, side, cats) };
+  }, [months, span, start, side, tag, cur, cats]);
 
   const loadDrill = async (p: Pick, cursor: string | null) => {
     const n = ++drillSeq.current;
@@ -97,7 +116,7 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
   const onBar = (s: string) => choose({ start: s, ...(tag ? { tag } : {}) });
   const label = periodLabel(span, start);
   const barLabel = (s: string) => (view?.bars.find((b) => b.start === s)?.label ?? periodLabel(span, s));
-  const rowsOf = (s: string) => (s === start ? view?.slice.rows : months ? slice(months, span, s, cur).rows : undefined) ?? [];
+  const rowsOf = (s: string) => (s === start ? view?.slice.rows : months ? slice(months, span, s, cur, cats).rows : undefined) ?? [];
 
   return (
     <div class={wide ? 'm-an m-wide' : 'm-an'}>
@@ -144,6 +163,7 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
         onMore={() => pick && drill?.cursor && void loadDrill(pick, drill.cursor)}
         onTxns={() => pick && go('txns', { filter: txnsFilter(span, pick, side) })}
         onFilter={setFilterOpen}
+        onCategories={onCategories}
       />
     </div>
   );
