@@ -316,7 +316,7 @@ describe('src/bank/repo.ts', () => {
     assert.equal(appendTxnTag(db, { bankTxnId: t.id, tag: 'business', source: 'rule', actor: 'system', decidedAt: now }).version, 1);
     const v2 = appendTxnTag(db, { bankTxnId: t.id, tag: 'private', category: '食費', source: 'human', actor: 'user', decidedAt: later });
     assert.equal(v2.version, 2);
-    assert.deepEqual({ ...latestTxnTag(db, t.id)! }, { bank_txn_id: t.id, version: 2, tag: 'private', category: '食費', source: 'human', actor: 'user', decided_at: later });
+    assert.deepEqual({ ...latestTxnTag(db, t.id)! }, { bank_txn_id: t.id, version: 2, tag: 'private', category: '食費', source: 'human', actor: 'user', decided_at: later, batch_id: null, cleared: 0 });
   });
 
   test('sync_status: 無ければ作り、渡したキーだけ書く', () => {

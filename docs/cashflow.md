@@ -35,7 +35,7 @@ V4・V5・V7・V8・V10・V11 は初期案のまま実装した（2026-11-06 暫
 | 残高 | 明細の後に `listWalletables` の last_balance を as_of_date=今日・source=freee_walletable で追記。カードと残高 null は追記しない。予算で止まった回は取らない |
 | 一部失敗 | 他の口座は続け、最後に例外を投げてジョブの再試行に回す |
 
-## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2・0010_large_expenses）
+## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2・0010_large_expenses・0013_txn_tags_batch）
 日付は JST の暦日 `YYYY-MM-DD`、時刻は UTC ISO8601、金額は整数の円。追記専用・不変の列は SQLite のトリガで拒否する。
 mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにしたので 0006_cashflow に繰り上げた（`0006_cashflow.sql` 冒頭）。
 
@@ -46,7 +46,8 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | bank_txn_sources | 明細の取得元。`UNIQUE(account_id, source, external_id)` | 追記専用。口座が明細と違うと INSERT を拒否 |
 | csv_imports | CSV 取り込み 1 回。`UNIQUE(account_id, file_sha256)` | 追記専用（書く処理は T105 で未実装） |
 | account_balances | 残高の記録。最新は as_of_date 最大 → seq 最大 | 追記専用 |
-| txn_tags | 明細のタグの版。version 最大が最新 | 追記専用 |
+| txn_tags | 明細のタグの版。version 最大が最新。batch_id（一括の上書き・取り消しで書いた版の ULID）と cleared（1 = 上書きを外す版）は 0013 | 追記専用 |
+| txn_tag_batch_reverts | 取り消した一括 1 つ（batch_id が主キー、revert_batch_id は取り消しで書いた版の batch_id）（0013） | 追記専用（更新・削除のトリガで拒否） |
 | tag_rules | タグのルール。account_id NULL は全口座 | 更新・削除可（監査に残す。削除時のパターンは sha256 の先頭 16 桁だけ） |
 | transfer_links | 振替・引き落とし・チャージの組。組ごとに seq 最大が有効。card_settlement は in_txn_id NULL | 追記専用 |
 | sync_status | 口座ごとの取得状況（A5） | 更新可 |
@@ -83,12 +84,25 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 効くタグの決定順（読むたびに計算）:
 | 順 | 出どころ | tag_source |
 |---|---|---|
-| 1 | txn_tags の最新版のうち source が human / agent のもの（rule の版は上書きとみなさない） | override |
+| 1 | txn_tags の最新版のうち source が human / agent のもの（rule の版は上書きとみなさない）。その版が cleared = 1 なら上書き無し（2 以降で決まる） | override |
 | 2 | tag_rules: 口座のルール > 全口座 → exact > prefix > partial → hit_count が多い → 新しい | rule |
 | 3 | 口座の default_tag（unset 以外） | account |
 | 4 | どれも無い | none（tag = unset） |
 
-学習: 人（human）の上書きで、同じ口座・同じ正規化摘要の**別々の明細 3 件**の最新の上書きがすべて同じ tag と category なら、match=exact・origin=learned のルールを作る。同じ口座・同じパターンの learned が既にあれば、同じ中身なら hit_count +1、違えば置き換える（2 件目は作らない）。agent の上書き・unset・空の摘要は数えない。監査に摘要は入れない。
+学習: 人（human）の上書きで、同じ口座・同じ正規化摘要の**別々の明細 3 件**の最新の上書きがすべて同じ tag と category なら、match=exact・origin=learned のルールを作る。同じ口座・同じパターンの learned が既にあれば、同じ中身なら hit_count +1、違えば置き換える（2 件目は作らない）。agent の上書き・unset・空の摘要は数えない。cleared の版も数えない。監査に摘要は入れない。
+
+一括の上書き（`POST /api/bank_txns/bulk_tag`。`bulkSetTxnTags`）:
+- ids は 1〜500 件（`BULK_MAX`。重複を除いた後）。tag と category の少なくとも一方を指定し、省いた側は明細ごとの今の効く値（ルール・口座の既定を含む）を引き継ぐ。category の null は未分類。
+- 検証は書く前に全部（全部か無し）。見つからない明細が 1 件でもあれば 404（missing は最大 20 件）で何も書かない。
+- 新しい値が今の効く値と同じ明細は書かない（unchanged）。それ以外に source=human・共通の batch_id の版を追記し、明細ごとに `bank_txn.tag_set`（payload に batch_id）、最後に `bank_txn.bulk_tag_set`（entity = bank_txn_batch。count・changed・unchanged・set・user だけで、明細 id・摘要は入れない）。changed が 0 なら何も書かず batch_id は null。
+- 学習は書いた明細の (口座, 正規化摘要) の組ごとに 1 回だけ試す（判定は 1 件のときと同じ。5 件を一度に直してもルールは 1 件・hit_count 0）。tag_rule.* の監査に batch_id。
+
+一括の取り消し（`POST /api/bank_txns/bulk_tag/:batch_id/revert`。`revertTagBatch`。期限なし）:
+- その一括で書いた明細のうち、最新の版がまだその一括の版のものだけを戻す（後から別に直した明細は skipped）。戻す版は取り消し用の新しい batch_id を持つ。
+- 一つ前に上書き（human / agent、cleared でない）があればその tag・category・source の版（agent の版は agent のまま戻し、人の上書きとして学習に数えない）。無ければ「上書きを外す」版（cleared = 1、tag = unset、category = NULL、source = human。cleared の版は学習の材料にならない）を書き、ルール・口座の既定で決まる状態に戻る。
+- 学習は取り消さない。応答の learned_rule_ids はその一括で作られた（`tag_rule.learned` の payload.batch_id が一致する）ルールのうち今もあるもの。
+- txn_tag_batch_reverts に 1 行。監査は `bank_txn.bulk_tag_reverted`（entity = bank_txn_batch。batch_id・revert_batch_id・reverted・skipped・user）と、戻した明細ごとの `bank_txn.tag_set`（payload に revert_of、cleared の版は cleared: true）。
+- 同じ一括の 2 回目は 409 `already_reverted`、取り消しの一括への取り消しは 409 `not_revertible`、無い一括は 404。全部 skipped（後から全部直されていて戻せる明細が無い）なら 409 `nothing_to_revert` で、txn_tag_batch_reverts も監査も書かない（取り消し済みにはならない）。
 
 カテゴリ（固定 13 種 + 未分類 = null。DB に CHECK は無く、コードで検証）:
 food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / savings 積立 / other その他。
@@ -172,6 +186,8 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は使っている口座（active=1）すべて、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）の既定と一致させるため使っている口座（active=1）すべて・sync・receipt_waiting_count（§16）（`src/bank/overview.ts`） |
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
+| POST /api/bank_txns/bulk_tag | `{ids（1〜500）, tag?, category?}`（少なくとも一方。知らないキーは 400 `invalid_field`） | `{batch_id, changed, unchanged, learned_rules, effective: [{id, tag, category, tag_source}]}`。400 `invalid_ids`・`too_many_ids`・`nothing_to_set`・`invalid_tag`・`invalid_category`、404 `{error: not_found, missing}`（§5） |
+| POST /api/bank_txns/bulk_tag/:batch_id/revert | ― | `{batch_id, revert_batch_id, reverted, skipped, learned_rule_ids}`。404 `not_found`、409 `already_reverted`・`not_revertible`・`nothing_to_revert`（全部 skipped。何も書かない）（§5） |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
 | GET /api/categories | ― | 13 種と未分類のラベル |
 | GET /api/scheduled_items | `all=1` で停止中も | `{items}`。各項目に amount_kind |
