@@ -399,7 +399,7 @@ describe('無効にした口座（active=0）の明細', () => {
       // 同じチャージが 2 つの active な組に入っても、月次の excluded は二重にならない（無効な口座の出金は集計に入らない）。
       const m = monthlySummary(db, '2026-10');
       assert.deepEqual(m.excluded.find((e) => e.kind === 'charge'), { kind: 'charge', count: 2, income: 5000, expense: 5000 });
-      assert.deepEqual(m.total, { income: 0, expense: 0, net: 0 });
+      assert.deepEqual(m.total, { income: 0, expense: 0, count: 0, net: 0 });
     } finally {
       db.close();
     }

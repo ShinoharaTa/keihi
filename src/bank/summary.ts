@@ -6,6 +6,7 @@
 //   excluded（0 = 振替の除外を外す / 1 = 除外だけ）と receipt（match.ts の receipt）も同じく JS 側で絞る。vendor_key は
 //   description_norm の完全一致（SQL）。各行に receipt・receipt_hint・mail_hint（match.ts の createReceiptResolver）を付ける。
 // - 月次: その月の active = 1 の口座の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
+//   by_category・by_tag・total に件数（count）、by_tag_category にタグ × カテゴリの組（分析の画面。#74）。どれも同じ 1 回のループで数える。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
 // - 除く明細は有効な組（listActiveTransfers）の両側。transfers.ts の excludedFromCashflow と同じ集合を、kind 付きで 1 回で読む。
@@ -235,12 +236,16 @@ export function listTxns(db: Db, q: TxnQuery, opts: { matchWindows?: MatchWindow
 // ---- 月次の集計 ----
 
 export type Amounts = { income: number; expense: number };
+// count は入金 + 出金の件数。
+type Counted = Amounts & { count: number };
 export type MonthlySummary = {
   month: string;
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
-  by_category: ({ category: string | null } & Amounts)[];
-  by_tag: ({ tag: Tag } & Amounts)[];
-  total: Amounts & { net: number };
+  by_category: ({ category: string | null } & Counted)[];
+  by_tag: ({ tag: Tag } & Counted)[];
+  // タグ × カテゴリ（分析の画面のクロス表。#74）。件数のある組だけ。tag 順 → カテゴリの固定順 → 未分類（null）最後。
+  by_tag_category: ({ tag: Tag; category: string | null } & Counted)[];
+  total: Counted & { net: number };
   // その月に除いた明細の行数と入金・出金。
   excluded: ({ kind: TransferKind; count: number } & Amounts)[];
 };
@@ -277,6 +282,11 @@ const add = (a: Amounts, side: TxnSide, amount: number) => {
   if (side === 'income') a.income += amount;
   else a.expense += amount;
 };
+const addCounted = (a: Counted, side: TxnSide, amount: number) => {
+  add(a, side, amount);
+  a.count++;
+};
+const zero = (): Counted => ({ income: 0, expense: 0, count: 0 });
 
 type AccountInfo = { order: number; includeInCashflow: boolean; active: boolean };
 
@@ -285,20 +295,25 @@ function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, acco
   const all = listBankTxnsBetween(db, from, to);
   const rows = all.filter((r) => !kinds.has(r.id));
   const tags = resolveTagsBulk(db, rows.map((r) => r.id));
-  const total: Amounts = { income: 0, expense: 0 };
+  const total = zero();
   const accounts = new Map<string, { name: string } & Amounts>();
-  const categories = new Map<string | null, Amounts>();
-  const byTag = new Map<Tag, Amounts>(TAGS.map((t) => [t, { income: 0, expense: 0 }]));
+  const categories = new Map<string | null, Counted>();
+  const byTag = new Map<Tag, Counted>(TAGS.map((t) => [t, zero()]));
+  const byTagCat = new Map<Tag, Map<string | null, Counted>>(TAGS.map((t) => [t, new Map()]));
   for (const r of rows) {
     const t = tags.get(r.id)!;
-    add(total, r.side, r.amount);
+    addCounted(total, r.side, r.amount);
     let a = accounts.get(r.account_id);
     if (!a) accounts.set(r.account_id, (a = { name: r.account_name, income: 0, expense: 0 }));
     add(a, r.side, r.amount);
     let c = categories.get(t.category);
-    if (!c) categories.set(t.category, (c = { income: 0, expense: 0 }));
-    add(c, r.side, r.amount);
-    add(byTag.get(t.tag)!, r.side, r.amount);
+    if (!c) categories.set(t.category, (c = zero()));
+    addCounted(c, r.side, r.amount);
+    addCounted(byTag.get(t.tag)!, r.side, r.amount);
+    const tc = byTagCat.get(t.tag)!;
+    let x = tc.get(t.category);
+    if (!x) tc.set(t.category, (x = zero()));
+    addCounted(x, r.side, r.amount);
   }
   const excluded = new Map<TransferKind, { count: number } & Amounts>(TRANSFER_KINDS.map((k) => [k, { count: 0, income: 0, expense: 0 }]));
   for (const r of all) {
@@ -325,6 +340,7 @@ function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, acco
       })),
     by_category: [...categories].sort(([a], [b]) => catRank(a) - catRank(b)).map(([category, a]) => ({ category, ...a })),
     by_tag: [...byTag].map(([tag, a]) => ({ tag, ...a })),
+    by_tag_category: [...byTagCat].flatMap(([tag, m]) => [...m].sort(([a], [b]) => catRank(a) - catRank(b)).map(([category, a]) => ({ tag, category, ...a }))),
     total: { ...total, net: total.income - total.expense },
     excluded: [...excluded].map(([kind, e]) => ({ kind, ...e })),
   };
