@@ -2468,3 +2468,26 @@ button:disabled {
     animation: none;
   }
 }
+/* 広い画面（900px 以上）: 中身と画面下の固定要素を 720px の中央に揃える。背景は body のまま全幅。
+   899px 以下は変化なし。ボトムシート .m-sheet は従来どおり 640px。 */
+@media (min-width: 900px) {
+  .top,
+  .screen,
+  .m-head,
+  .m-monthbar,
+  .m-filters,
+  .m-main {
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .tabs,
+  .bottom,
+  .sheet,
+  .m-dock {
+    left: 0;
+    right: 0;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+}
