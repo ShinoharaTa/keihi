@@ -98,11 +98,11 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 - 学習は書いた明細の (口座, 正規化摘要) の組ごとに 1 回だけ試す（判定は 1 件のときと同じ。5 件を一度に直してもルールは 1 件・hit_count 0）。tag_rule.* の監査に batch_id。
 
 一括の取り消し（`POST /api/bank_txns/bulk_tag/:batch_id/revert`。`revertTagBatch`。期限なし）:
-- その一括で書いた明細のうち、最新の版がまだその一括の版のものだけを戻す（後から別に直した明細は skipped）。戻す版は source=human で、取り消し用の新しい batch_id を持つ。
-- 一つ前に上書き（human / agent、cleared でない）があればその tag・category の版。無ければ「上書きを外す」版（cleared = 1、tag = unset、category = NULL）を書き、ルール・口座の既定で決まる状態に戻る。
+- その一括で書いた明細のうち、最新の版がまだその一括の版のものだけを戻す（後から別に直した明細は skipped）。戻す版は取り消し用の新しい batch_id を持つ。
+- 一つ前に上書き（human / agent、cleared でない）があればその tag・category・source の版（agent の版は agent のまま戻し、人の上書きとして学習に数えない）。無ければ「上書きを外す」版（cleared = 1、tag = unset、category = NULL、source = human。cleared の版は学習の材料にならない）を書き、ルール・口座の既定で決まる状態に戻る。
 - 学習は取り消さない。応答の learned_rule_ids はその一括で作られた（`tag_rule.learned` の payload.batch_id が一致する）ルールのうち今もあるもの。
 - txn_tag_batch_reverts に 1 行。監査は `bank_txn.bulk_tag_reverted`（entity = bank_txn_batch。batch_id・revert_batch_id・reverted・skipped・user）と、戻した明細ごとの `bank_txn.tag_set`（payload に revert_of、cleared の版は cleared: true）。
-- 同じ一括の 2 回目は 409 `already_reverted`、取り消しの一括への取り消しは 409 `not_revertible`、無い一括は 404。
+- 同じ一括の 2 回目は 409 `already_reverted`、取り消しの一括への取り消しは 409 `not_revertible`、無い一括は 404。全部 skipped（後から全部直されていて戻せる明細が無い）なら 409 `nothing_to_revert` で、txn_tag_batch_reverts も監査も書かない（取り消し済みにはならない）。
 
 カテゴリ（固定 13 種 + 未分類 = null。DB に CHECK は無く、コードで検証）:
 food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / savings 積立 / other その他。
@@ -187,7 +187,7 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
 | POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
 | POST /api/bank_txns/bulk_tag | `{ids（1〜500）, tag?, category?}`（少なくとも一方。知らないキーは 400 `invalid_field`） | `{batch_id, changed, unchanged, learned_rules, effective: [{id, tag, category, tag_source}]}`。400 `invalid_ids`・`too_many_ids`・`nothing_to_set`・`invalid_tag`・`invalid_category`、404 `{error: not_found, missing}`（§5） |
-| POST /api/bank_txns/bulk_tag/:batch_id/revert | ― | `{batch_id, revert_batch_id, reverted, skipped, learned_rule_ids}`。404 `not_found`、409 `already_reverted`・`not_revertible`（§5） |
+| POST /api/bank_txns/bulk_tag/:batch_id/revert | ― | `{batch_id, revert_batch_id, reverted, skipped, learned_rule_ids}`。404 `not_found`、409 `already_reverted`・`not_revertible`・`nothing_to_revert`（全部 skipped。何も書かない）（§5） |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
 | GET /api/categories | ― | 13 種と未分類のラベル |
 | GET /api/scheduled_items | `all=1` で停止中も | `{items}`。各項目に amount_kind |

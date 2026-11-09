@@ -257,6 +257,58 @@ describe('POST /api/bank_txns/bulk_tag/:batch_id/revert', () => {
     assert.deepEqual(recentHumanOverrides(db, acc, 'gym example', 3), []);
   });
 
+  test('全部 skipped なら 409 nothing_to_revert で、取り消しの行も監査も書かない', async () => {
+    const id = txn();
+    const b = await bulk({ ids: [id], tag: 'private' });
+    assert.equal((await send('POST', `/api/bank_txns/${id}/tag`, { tag: 'business' })).status, 200);
+    const [tags, logs] = [rows('txn_tags'), rows('audit_log')];
+    const res = await send('POST', `/api/bank_txns/bulk_tag/${b.batch_id}/revert`);
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { error: 'nothing_to_revert' });
+    assert.deepEqual([rows('txn_tags'), rows('audit_log'), rows('txn_tag_batch_reverts')], [tags, logs, 0]);
+  });
+
+  test('直前の版が cleared の明細を一括 → 取り消すと、また cleared の版が足されて上書き無しに戻る', async () => {
+    const id = txn();
+    const first = await bulk({ ids: [id], tag: 'private' });
+    assert.equal((await send('POST', `/api/bank_txns/bulk_tag/${first.batch_id}/revert`)).status, 200);
+    assert.equal(resolveTag(db, id)!.source, 'none');
+    const second = await bulk({ ids: [id], tag: 'business', category: 'telecom' });
+    assert.equal(resolveTag(db, id)!.source, 'override');
+    const r = (await (await send('POST', `/api/bank_txns/bulk_tag/${second.batch_id}/revert`)).json()) as Revert;
+    assert.equal(r.reverted, 1);
+    const versions = db.prepare('SELECT version, tag, source, cleared FROM txn_tags WHERE bank_txn_id = ? ORDER BY version').all(id) as object[];
+    assert.deepEqual(versions.map((v) => ({ ...v })), [
+      { version: 1, tag: 'private', source: 'human', cleared: 0 },
+      { version: 2, tag: 'unset', source: 'human', cleared: 1 },
+      { version: 3, tag: 'business', source: 'human', cleared: 0 },
+      { version: 4, tag: 'unset', source: 'human', cleared: 1 },
+    ]);
+    assert.deepEqual(resolveTag(db, id), { tag: 'unset', category: null, source: 'none' });
+  });
+
+  test('一つ前が agent の版なら agent のまま戻し、その後の人の上書きの学習に agent の値が混ざらない', async () => {
+    const agentIds = Array.from({ length: 3 }, () => txn('gym example'));
+    for (const id of agentIds) setTxnTag(db, { txnId: id, tag: 'business', category: 'other', actor: 'agent', source: 'agent', now: T0 });
+    const b = await bulk({ ids: agentIds, tag: 'private', category: 'leisure' });
+    const ruleId = b.learned_rules[0].rule.id;
+    assert.equal((await send('POST', `/api/bank_txns/bulk_tag/${b.batch_id}/revert`)).status, 200);
+    const last = db.prepare('SELECT tag, category, source, cleared FROM txn_tags WHERE bank_txn_id = ? ORDER BY version DESC LIMIT 1');
+    for (const id of agentIds) assert.deepEqual({ ...(last.get(id) as object) }, { tag: 'business', category: 'other', source: 'agent', cleared: 0 });
+    assert.deepEqual(recentHumanOverrides(db, acc, 'gym example', 3), []);
+    // 人が agent と同じ値を 3 件付ける。2 件目までは学習せず、3 件目で人の 3 件だけから置き換える。
+    const humanIds = Array.from({ length: 3 }, () => txn('gym example'));
+    const learned: unknown[] = [];
+    for (const id of humanIds) {
+      const res = await send('POST', `/api/bank_txns/${id}/tag`, { tag: 'business', category: 'other' });
+      learned.push(((await res.json()) as { learned_rule: { action: string } | null }).learned_rule?.action ?? null);
+    }
+    assert.deepEqual(learned, [null, null, 'superseded']);
+    assert.deepEqual(new Set(recentHumanOverrides(db, acc, 'gym example', 10).map((r) => r.bank_txn_id)), new Set(humanIds));
+    const rules = (await (await send('GET', '/api/tag_rules')).json()) as { items: { id: string; tag: string; category: string }[] };
+    assert.deepEqual(rules.items.map((r) => [r.id, r.tag, r.category]), [[ruleId, 'business', 'other']]);
+  });
+
   test('txn_tag_batch_reverts は更新・削除できない', async () => {
     const b = await bulk({ ids: [txn()], tag: 'private' });
     assert.equal((await send('POST', `/api/bank_txns/bulk_tag/${b.batch_id}/revert`)).status, 200);

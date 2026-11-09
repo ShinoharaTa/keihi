@@ -351,7 +351,9 @@ export function bulkSetTxnTags(db: Db, input: BulkSetTxnTagsInput): BulkSetTxnTa
 export type RevertTagBatchResult = { batch_id: string; revert_batch_id: string; reverted: number; skipped: number; learned_rule_ids: string[] };
 
 // 一括で書いた明細のうち、最新の版がまだその一括の版のものを一つ前の状態に戻す。後から別の版が足された明細は skipped。
-// 一つ前に上書き（human / agent、cleared でない）があればその tag・category の版、無ければ「上書きを外す」版（cleared = 1）。
+// 一つ前に上書き（human / agent、cleared でない）があればその tag・category・source の版（agent の値を人の上書きとして学習に数えない）、
+// 無ければ「上書きを外す」版（cleared = 1、source = human。cleared の版は学習の材料にならない）。
+// 戻せる明細が 1 件も無い（全部 skipped）なら 409 nothing_to_revert で、何も書かない。
 // 学習は取り消さない（その一括で作られたルールのうち今もあるものの ID を返す）。
 export function revertTagBatch(db: Db, batchId: string, by: { actor: string; user?: string | null; now?: Date }): RevertTagBatchResult {
   const now = by.now ?? new Date();
@@ -366,11 +368,15 @@ export function revertTagBatch(db: Db, batchId: string, by: { actor: string; use
     for (const row of rows) {
       if (latestTxnTag(db, row.bank_txn_id)!.version !== row.version) continue;
       const prev = previousOverride(db, row.bank_txn_id, row.version);
-      const base = { txnId: row.bank_txn_id, source: 'human' as const, actor: by.actor, user, now, batchId: revertBatchId };
-      if (prev && prev.cleared === 0) appendTagVersion(db, { ...base, tag: prev.tag, category: prev.category, extra: { revert_of: batchId } });
-      else appendTagVersion(db, { ...base, tag: 'unset', category: null, cleared: true, extra: { revert_of: batchId, cleared: true } });
+      const base = { txnId: row.bank_txn_id, actor: by.actor, user, now, batchId: revertBatchId };
+      if (prev && prev.cleared === 0) {
+        // previousOverride は source が human / agent の版だけを返す。
+        const source = prev.source as 'human' | 'agent';
+        appendTagVersion(db, { ...base, source, tag: prev.tag, category: prev.category, extra: { revert_of: batchId } });
+      } else appendTagVersion(db, { ...base, source: 'human', tag: 'unset', category: null, cleared: true, extra: { revert_of: batchId, cleared: true } });
       reverted++;
     }
+    if (reverted === 0) throw new TagError(409, 'nothing_to_revert');
     const skipped = rows.length - reverted;
     insertTagBatchRevert(db, { batchId, revertBatchId, now: now.toISOString() });
     appendAudit(

@@ -8,7 +8,7 @@
 //          / 404 {error: not_found, missing: [id（最大 20 件）]}
 //   POST   /api/bank_txns/bulk_tag/:batch_id/revert  最新の版がまだその一括の版の明細を一つ前の状態に戻す（後から直した明細は skipped）。
 //          → 200 {batch_id, revert_batch_id, reverted, skipped, learned_rule_ids} / 404 {error: not_found}
-//          / 409 {error: not_revertible（取り消しの一括）| already_reverted}
+//          / 409 {error: not_revertible（取り消しの一括）| already_reverted | nothing_to_revert（全部後から直されていて戻せない。何も書かない）}
 //   GET    /api/tag_rules            → 200 {items: [TagRule]}
 //   POST   /api/tag_rules            body {account_id?: string|null, pattern, match: 'exact'|'prefix'|'partial', tag, category?}
 //          → 201 TagRule（origin=manual）/ 400
