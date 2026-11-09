@@ -1,7 +1,7 @@
 // 明細（モック Txns・TagSheet。GET /api/bank_txns）。日付の新しい順に 50 件ずつ、日付ごとにまとめ、「続きを読み込む」で続き（keyset cursor）。
 // 上に 期間 と「未設定だけ（n）」の 1 タップ絞り込み、口座・タグ・カテゴリ・検索は折りたたむ。絞り込みを変えたら cursor を捨てて読み直す。応答は連番で古いものを捨てる。
 // 行の右端のタグを押すと 事業 ⇄ 私用（未設定は事業）をその場で保存（POST /api/bank_txns/:id/tag。押した行だけ busy）。行を押すとタグ付けシート（暗幕つき）。
-// シート: 事業/私用/未設定・カテゴリ 12 種・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
+// シート: 事業/私用/未設定・カテゴリ（台帳のうちアーカイブしていないもの。色の点つき）・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
 // 「保存して閉じる」「保存して次の未設定へ」。
 // 照合（docs/cashflow.md §16）: 行の右に証憑の印（receiptMark）。シートを開いたら GET /api/bank_txns/:id/matches を読み、支出なら「証憑」の段
 // （紐付いた証憑と「外す」・候補（押すと紐付け）・撮影タブへ）。紐付け/解除の後は読み直して行の印も差し替える（applyMatches）。
@@ -12,11 +12,14 @@
 // 絞り込みを変えたら選択を捨てる。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { deleteJson, getJson, postJson } from '../api.ts';
+import { categoryColor } from './analysis/colors.ts';
 import { BulkBar, BulkNoticeBand, CategoryPicker, SelectBand, SelectTools } from './BulkBar.tsx';
+import { Dot, type CategoryDraft } from './CategoryForm.tsx';
 import { Icon } from './Icons.tsx';
 import {
   applyMatches,
   applyRuleLocally,
+  categoryLabelError,
   docLine,
   expenseFilterText,
   linkedText,
@@ -166,7 +169,7 @@ export function TxnFilters({
           <select class="m-field" aria-label="カテゴリ" value={f.category} onChange={(e) => onChange({ ...f, category: e.currentTarget.value })}>
             <option value="">カテゴリ: 全部</option>
             <option value={UNCATEGORIZED_QUERY}>{categoryLabel(cats, null)}</option>
-            {(cats?.items ?? []).map((c) => (
+            {(cats?.items ?? []).filter((c) => !c.archived || c.id === f.category).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
               </option>
@@ -489,8 +492,10 @@ export function TagSheet({
           <fieldset class="m-fs">
             <legend>カテゴリ</legend>
             <div class="m-catgrid">
-              {(cats?.items ?? []).map((c) => (
+              {/* アーカイブ済みは出さない。ただし明細の今のカテゴリなら、その 1 件だけ出す（今の値のままタグだけ変えられる） */}
+              {(cats?.items ?? []).filter((c) => !c.archived || c.id === txn.category).map((c) => (
                 <button type="button" key={c.id} aria-pressed={draft.category === c.id} onClick={() => onDraft({ ...draft, category: draft.category === c.id ? null : c.id })}>
+                  <Dot cls={categoryColor(cats, c.id)} />
                   {c.label}
                 </button>
               ))}
@@ -534,6 +539,7 @@ export function Txns({
   initial,
   onBack,
   onCapture,
+  onCatsChanged,
 }: {
   today: string;
   accounts: Account[];
@@ -541,6 +547,8 @@ export function Txns({
   initial?: Partial<TxnFilter>;
   onBack: () => void;
   onCapture?: () => void;
+  // カテゴリを作った後に台帳を読み直す（Money の loadCats）
+  onCatsChanged?: () => Promise<void>;
 }) {
   const [filter, setFilter] = useState<TxnFilter>(() => ({ ...emptyFilter(), ...initial }));
   const [q, setQ] = useState(filter.q);
@@ -564,6 +572,8 @@ export function Txns({
   const [sel, setSel] = useState<Selection>(emptySelection);
   const [mode, setMode] = useState(false);
   const [picker, setPicker] = useState(false);
+  // 一括の「新しく作る…」の入力（CategoryPicker の中。閉じたら捨てる）
+  const [creating, setCreating] = useState<CategoryDraft | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [notice, setNotice] = useState<BulkNotice | null>(null);
   const [lastBatch, setLastBatch] = useState<string | null>(null);
@@ -755,6 +765,11 @@ export function Txns({
     return () => document.removeEventListener('keydown', onKey);
   }, [open, picker, selecting]);
 
+  // カテゴリの一覧を閉じたら「新しく作る…」の入力を捨てる。
+  useEffect(() => {
+    if (!picker) setCreating(null);
+  }, [picker]);
+
   // 結果の帯は 10 秒で消す（消えた後も「直前の一括を元に戻す」から戻せる）。
   useEffect(() => {
     if (!notice) return;
@@ -776,15 +791,22 @@ export function Txns({
   };
 
   // 一括（tag だけか category だけ）。確定前の確認は出さない。選択はそのまま残す（続けてカテゴリも変えられる）。
-  const runBulk = async (change: BulkChange) => {
-    if (bulkBusy || collecting || sel.ids.size === 0) return;
+  // 一括が書けたら true（結果の帯を出す）。
+  const runBulk = async (change: BulkChange, force = false): Promise<boolean> => {
+    if ((bulkBusy && !force) || collecting || sel.ids.size === 0) return false;
     setPicker(false);
-    if (sel.ids.size > BULK_MAX) return setNotice(plainNotice(TOO_MANY_TEXT));
+    if (sel.ids.size > BULK_MAX) {
+      setNotice(plainNotice(TOO_MANY_TEXT));
+      return false;
+    }
     setBulkBusy(true);
     setNotice(null);
     const r = await postJson('/api/bank_txns/bulk_tag', bulkBody(sel.ids, change));
     setBulkBusy(false);
-    if (r.status !== 200) return setNotice(plainNotice(failText(r.status, r.body)));
+    if (r.status !== 200) {
+      setNotice(plainNotice(failText(r.status, r.body)));
+      return false;
+    }
     const res = r.body as BulkTagResult;
     const n = bulkNotice(res);
     setNotice(n);
@@ -792,6 +814,31 @@ export function Txns({
     // ルールを学んだら同じ摘要の他の行も変わりうるので読み直す。それ以外は応答の effective で行だけ差し替える。
     if (res.learned_rules.length > 0) void reload();
     else setItems((cur) => (cur ? applyEffective(cur, res.effective) : cur));
+    return true;
+  };
+
+  // 「新しく作る…」: POST /api/categories → 台帳を読み直す → そのまま選択中の明細に一括（category = 新しい id）。
+  // 作るのに失敗したら入力に理由を出す（何も書かない）。作れて一括が失敗したらカテゴリは残し、入れ直しを頼む。
+  const createAndApply = async () => {
+    if (!creating || bulkBusy || collecting || sel.ids.size === 0) return;
+    // 一括で付けられない件数なら作りもしない（runBulk と同じ案内）
+    if (sel.ids.size > BULK_MAX) {
+      setPicker(false);
+      return setNotice(plainNotice(TOO_MANY_TEXT));
+    }
+    const bad = categoryLabelError(creating.label);
+    if (bad) return setCreating({ ...creating, error: bad });
+    setBulkBusy(true);
+    try {
+      const r = await postJson('/api/categories', { label: creating.label.trim(), color: creating.color });
+      if (r.status !== 201) return setCreating({ ...creating, error: failText(r.status, r.body) });
+      const item = (r.body as { item: { id: string; label: string } }).item;
+      await onCatsChanged?.();
+      const ok = await runBulk({ category: item.id }, true);
+      if (!ok) setNotice(plainNotice(`カテゴリ『${item.label}』は作りました。入れ直してください`));
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   const revert = async (batchId: string) => {
@@ -827,6 +874,14 @@ export function Txns({
     void reload();
   };
 
+  const pickerCreate = {
+    create: creating,
+    busy: bulkBusy,
+    onPick: (category: string | null) => void runBulk({ category }),
+    onCreate: setCreating,
+    onCreateSubmit: () => void createAndApply(),
+    onClose: () => setPicker(false),
+  };
   const dock = sel.ids.size > 0 || notice !== null;
   const undoLast = lastBatch !== null && notice?.undo !== lastBatch;
   const filtered = (wide || selecting) && cursor !== null && items ? countLabel({ n: items.length, more: true }) : null;
@@ -893,12 +948,12 @@ export function Txns({
           {notice && <BulkNoticeBand wide={wide} notice={notice} busy={bulkBusy} onUndo={(id) => void revert(id)} onDeleteRules={(ids) => void deleteRules(ids)} />}
           {sel.ids.size > 0 && (
             <BulkBar wide={wide} count={sel.ids.size} busy={bulkBusy || collecting} picker={picker} onTag={(tag) => void runBulk({ tag })} onPicker={setPicker} onClear={endSelect}>
-              {picker && wide && <CategoryPicker wide count={sel.ids.size} cats={cats} onPick={(category) => void runBulk({ category })} onClose={() => setPicker(false)} />}
+              {picker && wide && <CategoryPicker wide count={sel.ids.size} cats={cats} {...pickerCreate} />}
             </BulkBar>
           )}
         </div>
       )}
-      {picker && !wide && sel.ids.size > 0 && <CategoryPicker wide={false} count={sel.ids.size} cats={cats} onPick={(category) => void runBulk({ category })} onClose={() => setPicker(false)} />}
+      {picker && !wide && sel.ids.size > 0 && <CategoryPicker wide={false} count={sel.ids.size} cats={cats} {...pickerCreate} />}
       {open && (
         <TagSheet
           txn={open.txn}

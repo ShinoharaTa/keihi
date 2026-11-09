@@ -35,7 +35,7 @@ V4・V5・V7・V8・V10・V11 は初期案のまま実装した（2026-11-06 暫
 | 残高 | 明細の後に `listWalletables` の last_balance を as_of_date=今日・source=freee_walletable で追記。カードと残高 null は追記しない。予算で止まった回は取らない |
 | 一部失敗 | 他の口座は続け、最後に例外を投げてジョブの再試行に回す |
 
-## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2・0010_large_expenses・0013_txn_tags_batch）
+## 2. テーブル（0005_bank・0006_cashflow・0009_recurrence_v2・0010_large_expenses・0013_txn_tags_batch・0014_bank_categories）
 日付は JST の暦日 `YYYY-MM-DD`、時刻は UTC ISO8601、金額は整数の円。追記専用・不変の列は SQLite のトリガで拒否する。
 mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにしたので 0006_cashflow に繰り上げた（`0006_cashflow.sql` 冒頭）。
 
@@ -49,6 +49,7 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | txn_tags | 明細のタグの版。version 最大が最新。batch_id（一括の上書き・取り消しで書いた版の ULID）と cleared（1 = 上書きを外す版）は 0013 | 追記専用 |
 | txn_tag_batch_reverts | 取り消した一括 1 つ（batch_id が主キー、revert_batch_id は取り消しで書いた版の batch_id）（0013） | 追記専用（更新・削除のトリガで拒否） |
 | tag_rules | タグのルール。account_id NULL は全口座 | 更新・削除可（監査に残す。削除時のパターンは sha256 の先頭 16 桁だけ） |
+| bank_categories | 明細のカテゴリ 1 つ（固定 13 種は builtin = 1、ユーザー定義は id = `c_` + ULID）。color は 0〜11、並びは sort_order → id（0014。§5） | label・color・sort_order・archived_at・updated_at だけ更新可（id・builtin・created_at はトリガで不変）。削除禁止（トリガで拒否。アーカイブする）。変更は監査 |
 | transfer_links | 振替・引き落とし・チャージの組。組ごとに seq 最大が有効。card_settlement は in_txn_id NULL | 追記専用 |
 | sync_status | 口座ごとの取得状況（A5） | 更新可 |
 | freee_rule_links | keihi が freee に作ったルール（act 4 / 12） | 追記専用（書く処理は T109 で未実装） |
@@ -104,15 +105,22 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 - txn_tag_batch_reverts に 1 行。監査は `bank_txn.bulk_tag_reverted`（entity = bank_txn_batch。batch_id・revert_batch_id・reverted・skipped・user）と、戻した明細ごとの `bank_txn.tag_set`（payload に revert_of、cleared の版は cleared: true）。
 - 同じ一括の 2 回目は 409 `already_reverted`、取り消しの一括への取り消しは 409 `not_revertible`、無い一括は 404。全部 skipped（後から全部直されていて戻せる明細が無い）なら 409 `nothing_to_revert` で、txn_tag_batch_reverts も監査も書かない（取り消し済みにはならない）。
 
-カテゴリ（固定 13 種 + 未分類 = null。DB に CHECK は無く、コードで検証）:
-food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / savings 積立 / other その他。
+カテゴリ（台帳 bank_categories。0014。`src/bank/categories.ts`）:
+- 固定 13 種（builtin = 1）+ ユーザー定義 + 未分類（= null。台帳には無い）。種は移行で入れる: food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住居 / utilities 水道光熱 / insurance 保険 / tax 税金 / car 車 / leisure 娯楽 / medical 医療 / savings 積立 / other その他（sort_order = 10, 20, …, 130。color は分析の画面の今までの割り当て 0〜11、13 番目の other は 0）。`tags.ts` の `CATEGORIES`・`CATEGORY_LABELS` は種の定義（マイグレーションとテスト用）としてだけ残す。
+- ユーザー定義の id は `c_` + ULID（不変）。label は前後の空白を落として 1〜20 字、アーカイブしていないものの中で重複不可（400 `duplicate_label`。戻すときも同じ）。color は 0〜11 の整数（400 `invalid_color`）。新しく作ったものは今の最大の sort_order + 10（最後）。
+- アーカイブしていないカテゴリは 40 件まで（作成・戻すで超えるなら 409 `too_many_categories`）。
+- builtin も label・color・sort_order は変えられる（id は不変）。`other` だけアーカイブ不可（400 `cannot_archive`）。削除はしない（アーカイブだけ）。親子は持たない（後から parent_id を足せるよう、id は不変・並びは sort_order だけ）。
+- 検証: 台帳に無い id は 400 `invalid_category`（`isCategory(db, v)`。アーカイブ済みも含む）。アーカイブ済みは新しく付けられない（`isAssignableCategory(db, v)`）: 1 件の上書き・一括（bulk_tag）・ルールの作成で 400 `category_archived`。既存の明細・ルールの値としては有効のまま（集計・一覧の `category=<id>`・表示のラベルにそのまま出る）。txn_tags・tag_rules の category に FK は無い。
+- ただし 1 件の上書き・一括では、送られた category がアーカイブ済みでもその明細の今の効く値（resolve 後）と同じなら通す（カテゴリは変えずにタグだけ変えられる。一括は全件が同じときだけ。1 件でも違えば 400 `category_archived` で何も書かない）。ルールの作成は今の値に関係なく 400。学習はアーカイブ済みのカテゴリのルールを新しく作らず、既存の learned をそれに置き換えもしない（同じ中身の hit は数える）。明細のシートのカテゴリの段は、アーカイブ済みでも明細の今のカテゴリならその 1 件だけ出す。
+- 監査（entity = bank_category、entity_id = id）: `bank_category.created`（label・color・sort_order）/ `bank_category.updated`（`changes` に変わった列の from/to。同じ値だけの PATCH は書かない）/ `bank_category.archived` / `bank_category.unarchived`（label）。どれも user を含む。既にアーカイブ済みの archive・アーカイブしていない unarchive は 200 のままで書かない。
+- 画面: 分析の画面の「カテゴリの管理」（`pwa/src/money/analysis/Categories.tsx`。分析と同じチャンク）で一覧・新しく作る・改名・色・上へ / 下へ（隣と sort_order を入れ替える 2 件の PATCH）・アーカイブ / 戻す。明細の一括の「カテゴリ ▾」の最後の「新しく作る…」は作成（POST）→ そのまま選択中の明細に bulk_tag。作れて一括が失敗したらカテゴリは残す。
 予定台帳の category（tax / insurance / car / savings / other / income）はこれとは別の一覧。savings は direction=out だけ（in は 400 `invalid_category_for_direction`）。資金繰りの計算では他の支出と同じく残高から引く。
 
 ## 6. 月次集計（`src/bank/summary.ts`、T110）
 - その月の、使っている口座（active=1）の明細から、§4 の除外を除いて合計する。`include_in_cashflow` では絞らない。active=0 の口座は by_account にも出さないので、`by_account[].active` は常に true（互換のため残している）。
-- 出すもの: by_account（income・expense・net と include_in_cashflow・active）、by_category（固定順、未分類は最後）、by_tag、total。
+- 出すもの: by_account（income・expense・net と include_in_cashflow・active）、by_category（台帳の順 = sort_order → id。台帳に無い値はその後、未分類は最後。移行直後は固定 13 種の順のまま）、by_tag、total。
 - 件数: by_category・by_tag・total に `income_count`・`expense_count`（入金・出金それぞれの件数）。
-- `by_tag_category`（分析の画面のクロス表。#74）: `[{tag, category, income, expense, income_count, expense_count}]`。件数のある組だけ（金額が 0 でも件数があれば出す）。並びは tag 順（business → private → unset）→ カテゴリの固定順 → 未分類（null）最後。各月で「合計 = total」「tag ごとの合計 = by_tag」「category ごとの合計 = by_category」が成り立ち、各セルの金額と件数は `GET /api/bank_txns?from&to&tag&category&side&excluded=0` の合計・件数と一致する（side=expense なら expense と expense_count）。集計は by_category などと同じ 1 回のループ。
+- `by_tag_category`（分析の画面のクロス表。#74）: `[{tag, category, income, expense, income_count, expense_count}]`。件数のある組だけ（金額が 0 でも件数があれば出す）。並びは tag 順（business → private → unset）→ カテゴリの台帳の順（by_category と同じ）→ 未分類（null）最後。各月で「合計 = total」「tag ごとの合計 = by_tag」「category ごとの合計 = by_category」が成り立ち、各セルの金額と件数は `GET /api/bank_txns?from&to&tag&category&side&excluded=0` の合計・件数と一致する（side=expense なら expense と expense_count）。集計は by_category などと同じ 1 回のループ。
 - `excluded`: kind ごとに「その月に除いた明細」の行数・入金・出金。月をまたぐ組でも、各月で「除く前の合計 = total + excluded」が成り立つ。
 - カードは利用分（カード口座の出金）を数え、銀行の引き落としを除く。**引き落とし口座とパターンを設定しないと両方が支出に入る（二重計上）。**
 
@@ -187,11 +195,14 @@ food 食費 / daily 日用品 / transport 交通 / telecom 通信 / housing 住�
 | GET /api/summary/monthly | `month=YYYY-MM` か `from&to`（最大 36 か月） | MonthlySummary か `{months}`。by_category・by_tag・total に income_count・expense_count、by_tag_category（§6） |
 | GET /api/bank/overview | ― | ホーム用。balances（対象口座の最新残高。カードは null で total に入れない）・reserve・available（total − reserve）・untagged_count・cards_without_settlement・open_candidates・upcoming_due・this_month（income・expense は月次集計のうち対象口座の分、all_income・all_expense は使っている口座（active=1）すべて、残りは今月 1 か月の資金繰り表）。untagged_count は一覧（`tag=unset`）の既定と一致させるため使っている口座（active=1）すべて・sync・receipt_waiting_count（§16）（`src/bank/overview.ts`） |
 | GET /api/balance_history | months（1〜60、既定 12） | `{months: [{month, total, by_account}]}`。対象口座のうちカード以外の月末残高（月末〈今月は今日〉までの account_balances の最後と、明細の最後の balance のうち日付が新しいほう。同じ日なら account_balances。今日より後は見ない。無ければ 0）（`src/bank/balanceHistory.ts`） |
-| POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective |
-| POST /api/bank_txns/bulk_tag | `{ids（1〜500）, tag?, category?}`（少なくとも一方。知らないキーは 400 `invalid_field`） | `{batch_id, changed, unchanged, learned_rules, effective: [{id, tag, category, tag_source}]}`。400 `invalid_ids`・`too_many_ids`・`nothing_to_set`・`invalid_tag`・`invalid_category`、404 `{error: not_found, missing}`（§5） |
+| POST /api/bank_txns/:id/tag | `{tag, category?}` | version・learned_rule・effective。400 `invalid_category`（台帳に無い）・`category_archived`（§5） |
+| POST /api/bank_txns/bulk_tag | `{ids（1〜500）, tag?, category?}`（少なくとも一方。知らないキーは 400 `invalid_field`） | `{batch_id, changed, unchanged, learned_rules, effective: [{id, tag, category, tag_source}]}`。400 `invalid_ids`・`too_many_ids`・`nothing_to_set`・`invalid_tag`・`invalid_category`・`category_archived`、404 `{error: not_found, missing}`（§5） |
 | POST /api/bank_txns/bulk_tag/:batch_id/revert | ― | `{batch_id, revert_batch_id, reverted, skipped, learned_rule_ids}`。404 `not_found`、409 `already_reverted`・`not_revertible`・`nothing_to_revert`（全部 skipped。何も書かない）（§5） |
 | GET / POST /api/tag_rules、DELETE /api/tag_rules/:id | account_id?・pattern・match・tag・category? | 手で作るのは origin=manual |
-| GET /api/categories | ― | 13 種と未分類のラベル |
+| GET /api/categories | `all=1` でアーカイブ済みも（既定は除く） | `{items: [{id, label, color, sort_order, builtin, archived}], uncategorized_label}`。並びは sort_order → id（§5） |
+| POST /api/categories | `{label, color}`（知らないキーは 400 `invalid_field`） | 201 `{item}`。400 `invalid_label`・`invalid_color`・`duplicate_label`、409 `too_many_categories` |
+| PATCH /api/categories/:id | `{label?, color?, sort_order?}`（知らないキーは 400 `invalid_field`、無ければ `nothing_to_update`） | `{item}`。400 `invalid_label`・`invalid_color`・`invalid_sort_order`・`duplicate_label`、404 |
+| POST /api/categories/:id/archive・/unarchive | ― | `{item}`（済みならそのまま）。archive は other に 400 `cannot_archive`、unarchive は 409 `too_many_categories`・400 `duplicate_label`。404 |
 | GET /api/scheduled_items | `all=1` で停止中も | `{items}`。各項目に amount_kind |
 | POST /api/scheduled_items、PATCH /api/scheduled_items/:id | name・amount・direction・category（tax/insurance/car/savings/other/income）・recurrence（once/monthly/bimonthly/quarterly/yearly/biennial）・anchor_date・account_id?・end_date?・notify_days_before?（0〜365、既定 14）・amount_kind?（fixed/variable、既定 fixed。それ以外は 400 `invalid_amount_kind`） | out に income、in に savings は不可（`invalid_category_for_direction`）。origin は変えられない |
 | POST /api/scheduled_items/:id/deactivate・/activate | ― | active を切り替え |

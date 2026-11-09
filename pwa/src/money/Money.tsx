@@ -7,6 +7,8 @@
 // フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。税・保険の見積もり（tax）は予定から開き、「戻る」で予定に戻る。
 // 税の試算（tax_sim）は予定のカードと見積もりの画面から開き、「戻る」で呼んだ画面（intent.back、既定は予定）に戻る。
 // 分析（analysis。#74）はホームの「分析」と月次の「分析で見る」（intent.month の月で開き、「戻る」で月次へ。intent.back）から開く。
+// カテゴリの管理（categories）は分析の画面の「カテゴリの管理」から開き、「戻る」で分析へ。分析と同じチャンク（Analysis.tsx が Categories を出す）。
+// カテゴリは GET /api/categories?all=1（アーカイブ済みも。ラベルを引くため）。選択肢はアーカイブを除く（model.ts の assignable）。作る・変えたら読み直す（loadCats）。
 // 経費・メール・試算・分析は別チャンク（お金のチャンクを軽くする）。初めて開いたときに読む（main.tsx のお金タブと同じ形）。
 // 税・保険の見積もり（Tax.tsx）は予定（Schedule.tsx）が TaxCard を静的に読むのでお金のチャンクに残る。
 import { h, type ComponentChildren } from 'preact';
@@ -22,13 +24,13 @@ import { Schedule } from './Schedule.tsx';
 import { Tax } from './Tax.tsx';
 import { Txns } from './Txns.tsx';
 
-export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail' | 'analysis';
+export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail' | 'analysis' | 'categories';
 export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string; receipt?: 'waiting'; back?: MoneyView };
 export type Go = (view: MoneyView, intent?: Intent) => void;
 type ExpensesComponent = (typeof import('./Expenses.tsx'))['Expenses'];
 type MailComponent = (typeof import('./Mail.tsx'))['Mail'];
 type TaxSimComponent = (typeof import('./TaxSim.tsx'))['TaxSim'];
-type AnalysisComponent = (typeof import('./analysis/Analysis.tsx'))['Analysis'];
+type AnalysisModule = typeof import('./analysis/Analysis.tsx');
 
 // 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ形）。label は画面の名前（経費・メール・試算・分析）。
 export function Pending({ label, failed }: { label: string; failed: boolean }) {
@@ -80,7 +82,7 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
   const [expenses, setExpenses] = useState<ExpensesComponent | 'error' | null>(null);
   const [mail, setMail] = useState<MailComponent | 'error' | null>(null);
   const [taxSim, setTaxSim] = useState<TaxSimComponent | 'error' | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisComponent | 'error' | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisModule | 'error' | null>(null);
 
   const go: Go = (view, intent = {}) => {
     setLocked(false);
@@ -93,12 +95,14 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
     if (r.ok) setAccounts(r.data.accounts);
   }, []);
 
-  useEffect(() => {
-    void (async () => {
-      const r = await getJson<Categories>('/api/categories');
-      if (r.ok) setCats(r.data);
-    })();
+  const loadCats = useCallback(async () => {
+    const r = await getJson<Categories>('/api/categories?all=1');
+    if (r.ok) setCats(r.data);
   }, []);
+
+  useEffect(() => {
+    void loadCats();
+  }, [loadCats]);
 
   useEffect(() => {
     if (nav.view === 'home') void loadAccounts();
@@ -127,10 +131,10 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
         () => setTaxSim('error'),
       );
     }
-    if (nav.view === 'analysis' && typeof analysis !== 'function') {
+    if ((nav.view === 'analysis' || nav.view === 'categories') && (analysis === null || analysis === 'error')) {
       setAnalysis(null);
       import('./analysis/Analysis.tsx').then(
-        (m) => setAnalysis(() => m.Analysis),
+        (m) => setAnalysis(m),
         () => setAnalysis('error'),
       );
     }
@@ -141,22 +145,29 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
     <section class="m">
       {view === 'home' && <Home key={key} today={today} accounts={accounts} cats={cats} go={go} />}
       {view === 'monthly' && <Monthly key={key} today={today} cats={cats} initialMonth={intent.month} onBack={home} go={go} />}
-      {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} onCapture={onCapture} />}
+      {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} onCapture={onCapture} onCatsChanged={loadCats} />}
       {view === 'expenses' &&
         (typeof expenses === 'function' ? h(expenses, { key, today, cats, initialWaiting: intent.receipt === 'waiting', onBack: home, go }) : <Pending label="経費" failed={expenses === 'error'} />)}
       {view === 'analysis' &&
-        (typeof analysis === 'function' ? (
-          h(analysis, {
+        (analysis !== null && analysis !== 'error' ? (
+          h(analysis.Analysis, {
             key,
             today,
             cats,
             initialMonth: intent.month,
             backLabel: intent.back === 'monthly' ? '月次に戻る' : undefined,
             onBack: () => (intent.back === 'monthly' ? go('monthly', { month: intent.month }) : home()),
+            onCategories: () => go('categories', { month: intent.month, back: intent.back }),
             go,
           })
         ) : (
           <Pending label="分析" failed={analysis === 'error'} />
+        ))}
+      {view === 'categories' &&
+        (analysis !== null && analysis !== 'error' ? (
+          h(analysis.Categories, { key, cats, onChanged: loadCats, onBack: () => go('analysis', { month: intent.month, back: intent.back }) })
+        ) : (
+          <Pending label="カテゴリの管理" failed={analysis === 'error'} />
         ))}
       {view === 'mail' && (typeof mail === 'function' ? h(mail, { key, today, onBack: home }) : <Pending label="メール" failed={mail === 'error'} />)}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}

@@ -12,6 +12,7 @@
 //   最新の上書きが cleared = 1 の明細は上書き無しとして扱う（tagRepo.ts の latestOverrides・recentHumanOverrides）。学習は取り消さない。
 import { createHash } from 'node:crypto';
 import { appendAudit } from '../audit.ts';
+import { isAssignableCategory, isCategory } from './categories.ts';
 import { tx, type Db } from '../db/index.ts';
 import { normalizeVendor } from '../vendors/normalize.ts';
 import { ulid } from '../db/ids.ts';
@@ -39,7 +40,10 @@ import {
   type TagRuleRow,
 } from './tagRepo.ts';
 
-// カテゴリ（V10。固定 13 種 + 未分類 = null）。DB に CHECK は無いので、ここで検証する。
+// カテゴリの種（V10。固定 13 種 + 未分類 = null）。0014_bank_categories.sql で台帳 bank_categories に入れたものと同じ id・ラベル・順。
+// 検証は台帳を引く isCategory(db, v)（アーカイブ済みも含む）・isAssignableCategory(db, v)（新しく付けられる）。categories.ts。
+// txn_tags・tag_rules の category に FK は無いので、ここで検証する。
+export { isAssignableCategory, isCategory };
 export const CATEGORIES = ['food', 'daily', 'transport', 'telecom', 'housing', 'utilities', 'insurance', 'tax', 'car', 'leisure', 'medical', 'savings', 'other'] as const;
 export type Category = (typeof CATEGORIES)[number];
 export const CATEGORY_LABELS: Record<Category, string> = {
@@ -65,9 +69,6 @@ export const LEARN_THRESHOLD = 3;
 export function isTag(v: unknown): v is Tag {
   return (TAGS as readonly unknown[]).includes(v);
 }
-export function isCategory(v: unknown): v is Category {
-  return (CATEGORIES as readonly unknown[]).includes(v);
-}
 export function isRuleMatch(v: unknown): v is RuleMatch {
   return (RULE_MATCHES as readonly unknown[]).includes(v);
 }
@@ -82,9 +83,25 @@ export class TagError extends Error {
   }
 }
 
-function checkTagAndCategory(tag: unknown, category: unknown): void {
+// 台帳に無い category は invalid_category、アーカイブ済みは category_archived（既存の値としては有効だが、新しく付けられない）。
+function checkCategory(db: Db, category: unknown): void {
+  if (category === null) return;
+  if (!isCategory(db, category)) throw new TagError(400, 'invalid_category');
+  if (!isAssignableCategory(db, category)) throw new TagError(400, 'category_archived');
+}
+
+function checkTagAndCategory(db: Db, tag: unknown, category: unknown): void {
   if (!isTag(tag)) throw new TagError(400, 'invalid_tag');
-  if (category !== null && !isCategory(category)) throw new TagError(400, 'invalid_category');
+  checkCategory(db, category);
+}
+
+// 明細への上書き（1 件・一括）の category。台帳に無い id は invalid_category。アーカイブ済みは、その明細の今の効く値（resolve 後）と
+// 同じなら通す（カテゴリは変えずにタグだけ変えられるように）。違うなら category_archived。current は明細 id → 今の効く値（アーカイブ済みのときだけ呼ぶ）。
+function checkTxnCategory(db: Db, category: unknown, ids: readonly string[], current: () => Map<string, ResolvedTag>): void {
+  if (category === null || isAssignableCategory(db, category)) return;
+  if (!isCategory(db, category)) throw new TagError(400, 'invalid_category');
+  const cur = current();
+  if (!ids.every((id) => cur.get(id)?.category === category)) throw new TagError(400, 'category_archived');
 }
 
 export type TagDecisionSource = 'override' | 'rule' | 'account' | 'none';
@@ -158,11 +175,13 @@ export type SetTxnTagResult = { version: TxnTagRow; learned: LearnedRule | null 
 // 上書きの版を追記し、監査に残す。人の上書きなら学習を試す。
 export function setTxnTag(db: Db, input: SetTxnTagInput): SetTxnTagResult {
   const category = input.category ?? null;
-  checkTagAndCategory(input.tag, category);
+  if (!isTag(input.tag)) throw new TagError(400, 'invalid_tag');
+  if (category !== null && !isCategory(db, category)) throw new TagError(400, 'invalid_category');
   const now = input.now ?? new Date();
   return tx(db, () => {
     const txn = getBankTxn(db, input.txnId);
     if (!txn) throw new TagError(404, 'not_found');
+    checkTxnCategory(db, category, [txn.id], () => resolveTagsBulk(db, [txn.id]));
     const version = appendTagVersion(db, { txnId: txn.id, tag: input.tag, category, source: input.source, actor: input.actor, user: input.user ?? null, now });
     const learned = input.source === 'human' ? learn(db, txn.account_id, txn.description_norm, input.tag, category, input.actor, now) : null;
     return { version, learned };
@@ -241,6 +260,8 @@ function learn(
     appendAudit(db, { actor, action: 'tag_rule.hit', entity: 'tag_rule', entityId: rule.id, payload: { ...ruleAuditPayload(rule), hit_count: rule.hit_count, ...b } }, now);
     return { rule, action: 'hit' };
   }
+  // アーカイブ済みのカテゴリでは置き換えも新規作成もしない（hit は上のとおり）。
+  if (category !== null && !isAssignableCategory(db, category)) return null;
   if (cur) {
     const rule = replaceTagRule(db, cur.id, { tag, category, now: at })!;
     appendAudit(
@@ -290,7 +311,7 @@ export function bulkSetTxnTags(db: Db, input: BulkSetTxnTagsInput): BulkSetTxnTa
   if (ids.length > BULK_MAX) throw new TagError(400, 'too_many_ids');
   if (input.tag === undefined && input.category === undefined) throw new TagError(400, 'nothing_to_set');
   if (input.tag !== undefined && !isTag(input.tag)) throw new TagError(400, 'invalid_tag');
-  if (input.category !== undefined && input.category !== null && !isCategory(input.category)) throw new TagError(400, 'invalid_category');
+  if (input.category !== undefined && input.category !== null && !isCategory(db, input.category)) throw new TagError(400, 'invalid_category');
   const now = input.now ?? new Date();
   const user = input.user ?? null;
   return tx(db, () => {
@@ -298,6 +319,7 @@ export function bulkSetTxnTags(db: Db, input: BulkSetTxnTagsInput): BulkSetTxnTa
     const missing = ids.filter((id) => !txns.has(id));
     if (missing.length) throw new BulkNotFoundError(missing.slice(0, MISSING_MAX));
     const current = resolveTagsBulk(db, ids);
+    if (input.category !== undefined) checkTxnCategory(db, input.category, ids, () => current);
     const batchId = ulid();
     const written: { accountId: string; descriptionNorm: string; tag: Tag; category: string | null }[] = [];
     for (const id of ids) {
@@ -424,7 +446,7 @@ export type CreateRuleInput = {
 // 手で作るルール（origin=manual）。パターンは明細の description_norm と同じ正規化を通す。
 export function createRule(db: Db, input: CreateRuleInput): TagRuleRow {
   const category = input.category ?? null;
-  checkTagAndCategory(input.tag, category);
+  checkTagAndCategory(db, input.tag, category);
   if (!isRuleMatch(input.match)) throw new TagError(400, 'invalid_match');
   if (typeof input.pattern !== 'string') throw new TagError(400, 'invalid_pattern');
   const pattern = normalizeVendor(input.pattern);

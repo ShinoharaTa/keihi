@@ -5,8 +5,21 @@ export type TransferKind = 'transfer' | 'card_settlement' | 'charge';
 export type Amounts = { income: number; expense: number };
 // 入金・出金それぞれの件数（月次集計）。
 export type Counts = { income_count: number; expense_count: number };
-export type CategoryItem = { id: string; label: string };
+// カテゴリの台帳（GET /api/categories?all=1。src/bank/categories.ts）。並びは sort_order → id（サーバーの順のまま）。
+// color（0〜11 → style.css の k-*）・sort_order・builtin・archived は台帳（0014）から。古いサーバーには無い。
+export type CategoryItem = { id: string; label: string; color?: number; sort_order?: number; builtin?: boolean; archived?: boolean };
 export type Categories = { items: CategoryItem[]; uncategorized_label: string };
+// 新しく付けられる（選択肢に出す）カテゴリ。アーカイブ済みを除く。ラベルの表示（categoryLabel）はアーカイブ済みも引く。
+export const assignable = (cats: Categories | null): CategoryItem[] => (cats?.items ?? []).filter((c) => !c.archived);
+// カテゴリの名前（POST・PATCH /api/categories の label）の上限と色の数。
+export const CATEGORY_LABEL_MAX = 20;
+export const CATEGORY_COLORS = 12;
+// 名前の検査（前後の空白を落として 1〜20 字）。正しければ ''、だめなら文言。
+export function categoryLabelError(label: string): string {
+  const n = [...label.trim()].length;
+  if (n === 0) return '名前を入れてください。';
+  return n > CATEGORY_LABEL_MAX ? `名前は ${CATEGORY_LABEL_MAX} 字までです。` : '';
+}
 
 export type Txn = {
   id: string;
@@ -240,6 +253,12 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_from: '期間の始まりが正しくありません。',
   invalid_to: '期間の終わりが正しくありません。',
   invalid_category: 'カテゴリが正しくありません。',
+  category_archived: 'このカテゴリはアーカイブしてあります。戻してから使ってください。',
+  duplicate_label: '同じ名前のカテゴリがあります。',
+  invalid_label: `名前は 1〜${CATEGORY_LABEL_MAX} 字にしてください。`,
+  invalid_color: '色が正しくありません。',
+  too_many_categories: 'カテゴリが多すぎます（使っているものは 40 件まで）。使わないものをアーカイブしてください。',
+  cannot_archive: '「その他」はアーカイブできません。',
   invalid_tag: 'タグが正しくありません。',
   invalid_name: '名称を入れてください（200 文字まで）。',
   invalid_amount: '金額は 1 円以上の整数で入れてください。',

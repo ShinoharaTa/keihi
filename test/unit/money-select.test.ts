@@ -42,9 +42,9 @@ const ids = (s: Selection) => [...s.ids].sort();
 
 const cats: Categories = {
   items: [
-    { id: 'food', label: '食費' },
-    { id: 'daily', label: '日用品' },
-    { id: 'telecom', label: '通信' },
+    { id: 'food', label: '食費', color: 0 },
+    { id: 'daily', label: '日用品', color: 1 },
+    { id: 'telecom', label: '通信', color: 3 },
   ],
   uncategorized_label: '未分類',
 };
@@ -278,7 +278,8 @@ describe('SSR スナップショット（選択モード・一括）', () => {
   const listProps = { items: rows, f, today: TODAY, more: true, cats, busyIds: [], hint: false, onHint: noop, onOpen: noop, onToggle: noop, onCheck: noop };
   const amounts = ['−1,300', '−2,000', '+300,000', '10,000'];
   const BUTTONS = ['事業', '私用', '未設定', 'カテゴリ ▾', '選択を外す'];
-  const buttonTexts = (s: string) => [...s.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1]!.trim());
+  // ボタンの文言（中の色の点・アイコンのタグは落とす）。
+  const buttonTexts = (s: string) => [...s.matchAll(/<button[^>]*>(.*?)<\/button>/gs)].map((m) => m[1]!.replace(/<[^>]*>/g, '').trim());
 
   test('一覧: 通常（モード外のスマホは今までと同じ）・スマホの選択モード・PC（行頭に常にチェック）。同じ金額', async (t) => {
     const m = await load('/src/money/Txns.tsx');
@@ -342,6 +343,37 @@ describe('SSR スナップショット（選択モード・一括）', () => {
     assert.match(pop, /class="m-pop" role="dialog" aria-label="カテゴリを変える（12 件）"/);
     assert.doesNotMatch(pop + sheet, /新しく作る/);
     t.assert.snapshot(lines([phone, pc, sheet, pop].join('\n')));
+  });
+
+  test('カテゴリの一覧の「新しく作る…」と名前・色の入力（wide=false / true）。同じ項目・同じボタン。アーカイブ済みは出さない', async (t) => {
+    const m = await load('/src/money/BulkBar.tsx');
+    const withArchived: Categories = { ...cats, items: [...cats.items, { id: 'c_OLD', label: '昔の', color: 4, archived: true }] };
+    const base = { count: 12, cats: withArchived, onPick: noop, onCreate: noop, onCreateSubmit: noop, onClose: noop };
+    const list = (wide: boolean) => html(m.CategoryPicker!, { ...base, wide });
+    const LIST = ['食費', '日用品', '通信', '未分類', '新しく作る…'];
+    for (const out of [list(false), list(true)]) {
+      assert.deepEqual(buttonTexts(out).filter((x) => x !== ''), LIST);
+      assert.doesNotMatch(out, /昔の/);
+      assert.match(out, /<button type="button"><span class="m-dot k-0" aria-hidden="true"><\/span>食費<\/button>/);
+      assert.match(out, /<button type="button" class="m-catnew">新しく作る…<\/button>/);
+    }
+    const draft = { label: 'ペット', color: 5, error: '同じ名前のカテゴリがあります。' };
+    const form = (wide: boolean) => html(m.CategoryPicker!, { ...base, wide, create: draft });
+    const sheet = form(false);
+    const pop = form(true);
+    const FORM = [...Array.from({ length: 12 }, () => ''), 'やめる', '作って 12 件に付ける'];
+    assert.deepEqual(buttonTexts(pop), FORM);
+    assert.deepEqual(buttonTexts(sheet), ['', ...FORM], 'シートは閉じる（アイコン）が先');
+    for (const out of [sheet, pop]) {
+      assert.match(out, /<input id="m-catpick-new-label" class="m-field" maxLength="20" placeholder="例: ペット" value="ペット">/);
+      assert.equal((out.match(/aria-pressed="true"/g) ?? []).length, 1);
+      assert.match(out, /class="k-5" aria-label="色 6" aria-pressed="true"/);
+      assert.match(out, /role="alert">同じ名前のカテゴリがあります。</);
+      assert.doesNotMatch(out, /m-catgrid/);
+    }
+    assert.match(sheet, /class="m-sheet" role="dialog" aria-modal="true"[\s\S]*<h2 id="m-catpick-title">新しいカテゴリ<\/h2>/);
+    assert.match(pop, /class="m-pop" role="dialog" aria-label="新しいカテゴリ"/);
+    t.assert.snapshot(lines([list(false), list(true), sheet, pop].join('\n')));
   });
 
   test('結果の帯: 「n 件を変えました（m 件は変わらず）・元に戻す」「ルールを k 件作りました・消す」。同じ文と同じボタン', async (t) => {
