@@ -156,6 +156,13 @@ exports[`SSR スナップショット > 予定: 提案・12 か月の山・台�
 ]
 `;
 
+exports[`SSR スナップショット > 別チャンクの画面を読んでいる間・読めなかったとき 1`] = `
+[
+  "<p class=\\"empty\\">読み込み中…</p>",
+  "<p class=\\"empty\\">経費の画面を読めませんでした。電波の良い所で開き直してください。</p>"
+]
+`;
+
 exports[`SSR スナップショット > 口座: 引落元が未設定のカードはその場で直す、設定を開いたカード、CSV の取り込みと結果、CSV だけの口座の追加 1`] = `
 [
   "<article class=\\"m-acct m-acct-warn\\" aria-labelledby=\\"m-a-C2-name\\"><button type=\\"button\\" class=\\"m-acct-head\\" aria-expanded=\\"false\\"><span class=\\"m-acct-icon\\"><svg aria-hidden=\\"true\\" width=\\"20\\" height=\\"20\\" viewBox=\\"0 0 24 24\\" fill=\\"none\\" stroke=\\"currentColor\\" stroke-width=\\"2\\" stroke-linecap=\\"round\\" stroke-linejoin=\\"round\\"><path d=\\"M3 6h18v13H3z\\"></path><path d=\\"M3 10h18\\"></path><path d=\\"M7 15h3\\"></path></svg></span><span class=\\"m-acct-text\\"><b id=\\"m-a-C2-name\\">PayPay カード</b><span class=\\"m-sub\\">カード · 同期 —</span></span><span class=\\"m-acct-bal\\">0<br><span class=\\"m-sub\\">今月の利用</span></span></button>",

@@ -1076,6 +1076,14 @@ describe('SSR スナップショット', () => {
     t.assert.snapshot(lines(out));
   });
 
+  test('別チャンクの画面を読んでいる間・読めなかったとき', async (t) => {
+    const m = await load('/src/money/Money.tsx');
+    const out = [html(m.Pending!, { label: '経費', failed: false }), html(m.Pending!, { label: '経費', failed: true })].join('\n');
+    assert.match(out, /読み込み中…/);
+    assert.match(out, /経費の画面を読めませんでした/);
+    t.assert.snapshot(lines(out));
+  });
+
   test('月次: 月の切り替え・合計・カテゴリ別の横棒・事業/私用・集計外・6 か月の棒', async (t) => {
     const m = await load('/src/money/Monthly.tsx');
     const ms = ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].map((x, i) => monthly(x, 680000, [612000, 745000, 650000, 735000, 648000, 700000][i]!, x === '2026-10' ? 98000 : 46000));

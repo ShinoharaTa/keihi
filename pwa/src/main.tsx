@@ -92,6 +92,7 @@ function App() {
 
   useEffect(() => {
     if (tab !== 'money' || (money !== null && money !== 'error')) return;
+    setMoney(null);
     import('./money/Money.tsx').then(
       (m) => setMoney(() => m.Money),
       () => setMoney('error'),
