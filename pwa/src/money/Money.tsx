@@ -6,25 +6,32 @@
 // onCapture は撮影タブへ移る（明細のシートの「領収書を撮る」）。
 // フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。税・保険の見積もり（tax）は予定から開き、「戻る」で予定に戻る。
 // 税の試算（tax_sim）は予定のカードと見積もりの画面から開き、「戻る」で呼んだ画面（intent.back、既定は予定）に戻る。
-import type { ComponentChildren } from 'preact';
+// 経費・メール・試算は別チャンク（お金のチャンクを軽くする）。初めて開いたときに読む（main.tsx のお金タブと同じ形）。
+// 税・保険の見積もり（Tax.tsx）は予定（Schedule.tsx）が TaxCard を静的に読むのでお金のチャンクに残る。
+import { h, type ComponentChildren } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson } from '../api.ts';
 import { Accounts } from './Accounts.tsx';
 import { Cashflow } from './Cashflow.tsx';
-import { Expenses } from './Expenses.tsx';
 import { Home } from './Home.tsx';
 import { Icon } from './Icons.tsx';
-import { Mail } from './Mail.tsx';
 import type { Account, Categories, Direction, TxnFilter } from './model.ts';
 import { Monthly } from './Monthly.tsx';
 import { Schedule } from './Schedule.tsx';
 import { Tax } from './Tax.tsx';
-import { TaxSim } from './TaxSim.tsx';
 import { Txns } from './Txns.tsx';
 
 export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail';
 export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string; receipt?: 'waiting'; back?: MoneyView };
 export type Go = (view: MoneyView, intent?: Intent) => void;
+type ExpensesComponent = (typeof import('./Expenses.tsx'))['Expenses'];
+type MailComponent = (typeof import('./Mail.tsx'))['Mail'];
+type TaxSimComponent = (typeof import('./TaxSim.tsx'))['TaxSim'];
+
+// 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ）。
+export function Pending({ failed }: { failed: boolean }) {
+  return <p class="empty">{failed ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>;
+}
 
 // 各画面の上の帯: 「戻る」・題・右端（任意）。
 export function ScreenHead({
@@ -68,6 +75,9 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
   const [locked, setLocked] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [cats, setCats] = useState<Categories | null>(null);
+  const [expenses, setExpenses] = useState<ExpensesComponent | 'error' | null>(null);
+  const [mail, setMail] = useState<MailComponent | 'error' | null>(null);
+  const [taxSim, setTaxSim] = useState<TaxSimComponent | 'error' | null>(null);
 
   const go: Go = (view, intent = {}) => {
     setLocked(false);
@@ -92,20 +102,46 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
     window.scrollTo(0, 0);
   }, [nav.view, nav.key, loadAccounts]);
 
+  useEffect(() => {
+    if (nav.view === 'expenses' && typeof expenses !== 'function') {
+      import('./Expenses.tsx').then(
+        (m) => setExpenses(() => m.Expenses),
+        () => setExpenses('error'),
+      );
+    }
+    if (nav.view === 'mail' && typeof mail !== 'function') {
+      import('./Mail.tsx').then(
+        (m) => setMail(() => m.Mail),
+        () => setMail('error'),
+      );
+    }
+    if (nav.view === 'tax_sim' && typeof taxSim !== 'function') {
+      import('./TaxSim.tsx').then(
+        (m) => setTaxSim(() => m.TaxSim),
+        () => setTaxSim('error'),
+      );
+    }
+  }, [nav.view, nav.key]);
+
   const { view, intent, key } = nav;
   return (
     <section class="m">
       {view === 'home' && <Home key={key} today={today} accounts={accounts} cats={cats} go={go} />}
       {view === 'monthly' && <Monthly key={key} today={today} cats={cats} initialMonth={intent.month} onBack={home} go={go} />}
       {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} onCapture={onCapture} />}
-      {view === 'expenses' && <Expenses key={key} today={today} cats={cats} initialWaiting={intent.receipt === 'waiting'} onBack={home} go={go} />}
-      {view === 'mail' && <Mail key={key} today={today} onBack={home} />}
+      {view === 'expenses' &&
+        (typeof expenses === 'function' ? h(expenses, { key, today, cats, initialWaiting: intent.receipt === 'waiting', onBack: home, go }) : <Pending failed={expenses === 'error'} />)}
+      {view === 'mail' && (typeof mail === 'function' ? h(mail, { key, today, onBack: home }) : <Pending failed={mail === 'error'} />)}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
       {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} onTaxSim={() => go('tax_sim', { back: 'schedule' })} />}
       {view === 'accounts' && <Accounts key={key} today={today} accounts={accounts} focus={intent.account} locked={locked} onChanged={loadAccounts} onLock={setLocked} onBack={home} />}
       {view === 'tax' && <Tax key={key} today={today} accounts={accounts} locked={locked} onLock={setLocked} onBack={() => go('schedule')} onSim={() => go('tax_sim', { back: 'tax' })} />}
       {view === 'tax_sim' && (
-        <TaxSim key={key} today={today} backLabel={intent.back === 'tax' ? '見積もりに戻る' : '予定に戻る'} onBack={() => go(intent.back ?? 'schedule')} />
+        typeof taxSim === 'function' ? (
+          h(taxSim, { key, today, backLabel: intent.back === 'tax' ? '見積もりに戻る' : '予定に戻る', onBack: () => go(intent.back ?? 'schedule') })
+        ) : (
+          <Pending failed={taxSim === 'error'} />
+        )
       )}
     </section>
   );
