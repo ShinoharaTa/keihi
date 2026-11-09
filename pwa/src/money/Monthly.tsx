@@ -1,6 +1,7 @@
 // 月次（モック Monthly。GET /api/summary/monthly?from&to で、選んだ月で終わる 6 か月を読む）。上で月を切り替える（既定は締まった先月、今月より先へは進めない）。
 // 収入 / 支出 / 差額 → カテゴリ別の横棒（6 か月平均の縦線と差。押すとその月・そのカテゴリの明細へ。未分類は最後に「n 件を分類する」）
 // → 事業 / 私用 / 未設定の帯（未設定の明細へ）→ 集計に入れていないもの（振替・引落・チャージ）→ 6 か月の収支の棒（押すとその月へ）。
+// 合計の下に「分析で見る」（同じ月で分析の画面を開く。#74）。
 // 未分類・未設定の件数は GET /api/bank_txns?category=none / tag=unset（上限 100 件、超えたら「100+」）。月を速く切り替えたときは連番で古い応答を捨てる。
 import { Fragment } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -64,6 +65,7 @@ export function MonthlyView({
   unset,
   onSelect,
   onTxns,
+  onAnalysis,
 }: {
   months: MonthlySummary[];
   selected: string;
@@ -72,6 +74,7 @@ export function MonthlyView({
   unset: Count;
   onSelect: (m: string) => void;
   onTxns: (f: Partial<TxnFilter>) => void;
+  onAnalysis?: () => void;
 }) {
   const cur = months.find((m) => m.month === selected) ?? null;
   if (!cur) return <p class="m-empty">この月の集計はありません。</p>;
@@ -100,6 +103,11 @@ export function MonthlyView({
           <b>{yen(cur.total.net)}</b>
         </div>
       </section>
+      {onAnalysis && (
+        <button type="button" class="m-link" onClick={onAnalysis}>
+          分析で見る
+        </button>
+      )}
 
       <section class="m-card m-pad12 m-gap6" aria-labelledby="m-cat">
         <div class="m-row">
@@ -259,7 +267,7 @@ export function Monthly({ today, cats, initialMonth, onBack, go }: { today: stri
       <div class="m-main">
         {msg && <p class="m-msg">{msg}</p>}
         {data ? (
-          <MonthlyView months={data.months} selected={selected} cats={cats} uncat={data.uncat} unset={data.unset} onSelect={select} onTxns={(filter) => go('txns', { filter })} />
+          <MonthlyView months={data.months} selected={selected} cats={cats} uncat={data.uncat} unset={data.unset} onSelect={select} onTxns={(filter) => go('txns', { filter })} onAnalysis={() => go('analysis', { month: selected, back: 'monthly' })} />
         ) : (
           !msg && <p class="m-empty">読み込み中…</p>
         )}

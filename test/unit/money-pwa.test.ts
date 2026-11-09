@@ -1090,7 +1090,7 @@ describe('SSR スナップショット', () => {
     const out = [
       html(m.MonthBar!, { month: '2026-10', today: TODAY, onSelect: noop }),
       html(m.MonthBar!, { month: '2026-11', today: TODAY, onSelect: noop }),
-      html(m.MonthlyView!, { months: ms, selected: '2026-10', cats, uncat: { n: 100, more: true }, unset: { n: 23, more: false }, onSelect: noop, onTxns: noop }),
+      html(m.MonthlyView!, { months: ms, selected: '2026-10', cats, uncat: { n: 100, more: true }, unset: { n: 23, more: false }, onSelect: noop, onTxns: noop, onAnalysis: noop }),
     ].join('\n');
     assert.match(out, /締まった月/);
     assert.match(out, /aria-label="次の月（12 月）" disabled/);

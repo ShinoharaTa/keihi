@@ -258,6 +258,7 @@ export function HomeView({ today, d, accounts, cats, go }: { today: string; d: H
 
       <nav class="m-nav" aria-label="お金の画面">
         <NavRow title="月次" sub={monthlyLine(d.months.filter((m) => m.month <= last), last, cats) ?? '月ごとの収入と支出'} onClick={() => go('monthly')} />
+        <NavRow title="分析" sub="月・四半期・年ごとのカテゴリと事業/私用" onClick={() => go('analysis')} />
         <NavRow
           title="明細"
           sub={untagged > 0 ? `事業/私用が未設定 ${untaggedText} 件` : '未設定はありません'}

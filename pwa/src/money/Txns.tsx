@@ -122,7 +122,7 @@ export function TxnFilters({
   onExpand: (v: boolean) => void;
 }) {
   const more = [f.accountId, f.tag && f.tag !== 'unset' ? f.tag : '', f.category, f.q.trim()].filter((x) => x !== '').length;
-  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : undefined;
+  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : f.period === 'range' ? f.rangeLabel : undefined;
   const exp = expenseFilterText(f);
   return (
     <div class="m-filters">
@@ -140,7 +140,7 @@ export function TxnFilters({
       </div>
       <div class="m-pills">
         {exp && (
-          <button type="button" class="m-pill" aria-pressed="true" aria-label={`${exp}。押すと外す`} onClick={() => onChange({ ...f, side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined })}>
+          <button type="button" class="m-pill" aria-pressed="true" aria-label={`${exp}。押すと外す`} onClick={() => onChange({ ...f, side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined, pillLabel: undefined })}>
             {exp}
             <Icon name="close" size={16} />
           </button>
@@ -608,7 +608,7 @@ export function Txns({
       if (n !== countSeq.current) return;
       setUnsetCount(r.ok ? countLabel(pageCount(r.data, 100)) : '');
     })();
-  }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, filter.side, filter.excluded, filter.vendorKey, today]);
+  }, [filter.period, filter.month, filter.range, filter.accountId, filter.category, filter.q, filter.side, filter.excluded, filter.vendorKey, today]);
 
   // 開いた明細の照合を読む（支出だけ）。読み終える前に別の明細を開いたら古い応答を捨てる。
   const loadMatches = async (t: Txn): Promise<Matches | null> => {

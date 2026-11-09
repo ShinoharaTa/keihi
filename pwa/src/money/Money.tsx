@@ -6,7 +6,8 @@
 // onCapture は撮影タブへ移る（明細のシートの「領収書を撮る」）。
 // フォームを開いている間（onLock）は「戻る」を押せない（入力を失わないため）。税・保険の見積もり（tax）は予定から開き、「戻る」で予定に戻る。
 // 税の試算（tax_sim）は予定のカードと見積もりの画面から開き、「戻る」で呼んだ画面（intent.back、既定は予定）に戻る。
-// 経費・メール・試算は別チャンク（お金のチャンクを軽くする）。初めて開いたときに読む（main.tsx のお金タブと同じ形）。
+// 分析（analysis。#74）はホームの「分析」と月次の「分析で見る」（intent.month の月で開き、「戻る」で月次へ。intent.back）から開く。
+// 経費・メール・試算・分析は別チャンク（お金のチャンクを軽くする）。初めて開いたときに読む（main.tsx のお金タブと同じ形）。
 // 税・保険の見積もり（Tax.tsx）は予定（Schedule.tsx）が TaxCard を静的に読むのでお金のチャンクに残る。
 import { h, type ComponentChildren } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
@@ -21,14 +22,15 @@ import { Schedule } from './Schedule.tsx';
 import { Tax } from './Tax.tsx';
 import { Txns } from './Txns.tsx';
 
-export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail';
+export type MoneyView = 'home' | 'monthly' | 'txns' | 'forecast' | 'schedule' | 'accounts' | 'tax' | 'tax_sim' | 'expenses' | 'mail' | 'analysis';
 export type Intent = { filter?: Partial<TxnFilter>; account?: string; add?: Direction; month?: string; receipt?: 'waiting'; back?: MoneyView };
 export type Go = (view: MoneyView, intent?: Intent) => void;
 type ExpensesComponent = (typeof import('./Expenses.tsx'))['Expenses'];
 type MailComponent = (typeof import('./Mail.tsx'))['Mail'];
 type TaxSimComponent = (typeof import('./TaxSim.tsx'))['TaxSim'];
+type AnalysisComponent = (typeof import('./analysis/Analysis.tsx'))['Analysis'];
 
-// 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ形）。label は画面の名前（経費・メール・試算）。
+// 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ形）。label は画面の名前（経費・メール・試算・分析）。
 export function Pending({ label, failed }: { label: string; failed: boolean }) {
   return <p class="empty">{failed ? `${label}の画面を読めませんでした。電波の良い所で開き直してください。` : '読み込み中…'}</p>;
 }
@@ -78,6 +80,7 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
   const [expenses, setExpenses] = useState<ExpensesComponent | 'error' | null>(null);
   const [mail, setMail] = useState<MailComponent | 'error' | null>(null);
   const [taxSim, setTaxSim] = useState<TaxSimComponent | 'error' | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisComponent | 'error' | null>(null);
 
   const go: Go = (view, intent = {}) => {
     setLocked(false);
@@ -124,6 +127,13 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
         () => setTaxSim('error'),
       );
     }
+    if (nav.view === 'analysis' && typeof analysis !== 'function') {
+      setAnalysis(null);
+      import('./analysis/Analysis.tsx').then(
+        (m) => setAnalysis(() => m.Analysis),
+        () => setAnalysis('error'),
+      );
+    }
   }, [nav.view, nav.key]);
 
   const { view, intent, key } = nav;
@@ -134,6 +144,20 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
       {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} onCapture={onCapture} />}
       {view === 'expenses' &&
         (typeof expenses === 'function' ? h(expenses, { key, today, cats, initialWaiting: intent.receipt === 'waiting', onBack: home, go }) : <Pending label="経費" failed={expenses === 'error'} />)}
+      {view === 'analysis' &&
+        (typeof analysis === 'function' ? (
+          h(analysis, {
+            key,
+            today,
+            cats,
+            initialMonth: intent.month,
+            backLabel: intent.back === 'monthly' ? '月次に戻る' : undefined,
+            onBack: () => (intent.back === 'monthly' ? go('monthly', { month: intent.month }) : home()),
+            go,
+          })
+        ) : (
+          <Pending label="分析" failed={analysis === 'error'} />
+        ))}
       {view === 'mail' && (typeof mail === 'function' ? h(mail, { key, today, onBack: home }) : <Pending label="メール" failed={mail === 'error'} />)}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
       {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} onTaxSim={() => go('tax_sim', { back: 'schedule' })} />}
