@@ -111,6 +111,7 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 - アーカイブしていないカテゴリは 40 件まで（作成・戻すで超えるなら 409 `too_many_categories`）。
 - builtin も label・color・sort_order は変えられる（id は不変）。`other` だけアーカイブ不可（400 `cannot_archive`）。削除はしない（アーカイブだけ）。親子は持たない（後から parent_id を足せるよう、id は不変・並びは sort_order だけ）。
 - 検証: 台帳に無い id は 400 `invalid_category`（`isCategory(db, v)`。アーカイブ済みも含む）。アーカイブ済みは新しく付けられない（`isAssignableCategory(db, v)`）: 1 件の上書き・一括（bulk_tag）・ルールの作成で 400 `category_archived`。既存の明細・ルールの値としては有効のまま（集計・一覧の `category=<id>`・表示のラベルにそのまま出る）。txn_tags・tag_rules の category に FK は無い。
+- ただし 1 件の上書き・一括では、送られた category がアーカイブ済みでもその明細の今の効く値（resolve 後）と同じなら通す（カテゴリは変えずにタグだけ変えられる。一括は全件が同じときだけ。1 件でも違えば 400 `category_archived` で何も書かない）。ルールの作成は今の値に関係なく 400。学習はアーカイブ済みのカテゴリのルールを新しく作らない（hit・superseded の判定は変えない）。
 - 監査（entity = bank_category、entity_id = id）: `bank_category.created`（label・color・sort_order）/ `bank_category.updated`（`changes` に変わった列の from/to。同じ値だけの PATCH は書かない）/ `bank_category.archived` / `bank_category.unarchived`（label）。どれも user を含む。既にアーカイブ済みの archive・アーカイブしていない unarchive は 200 のままで書かない。
 - 画面: 分析の画面の「カテゴリの管理」（`pwa/src/money/analysis/Categories.tsx`。分析と同じチャンク）で一覧・新しく作る・改名・色・上へ / 下へ（隣と sort_order を入れ替える 2 件の PATCH）・アーカイブ / 戻す。明細の一括の「カテゴリ ▾」の最後の「新しく作る…」は作成（POST）→ そのまま選択中の明細に bulk_tag。作れて一括が失敗したらカテゴリは残す。
 予定台帳の category（tax / insurance / car / savings / other / income）はこれとは別の一覧。savings は direction=out だけ（in は 400 `invalid_category_for_direction`）。資金繰りの計算では他の支出と同じく残高から引く。

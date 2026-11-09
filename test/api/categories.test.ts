@@ -227,6 +227,65 @@ describe('アーカイブ', () => {
   });
 });
 
+describe('アーカイブ済みが今の効く値のとき', () => {
+  test('1 件の上書き: 同じアーカイブ済み（今の値）ならタグだけ変えられる。別のアーカイブ済みは 400', async () => {
+    const t1 = txn('2026-11-02', 1000);
+    assert.equal((await send('POST', `/api/bank_txns/${t1}/tag`, { tag: 'business', category: 'food' })).status, 200);
+    assert.equal((await send('POST', '/api/categories/food/archive')).status, 200);
+    assert.equal((await send('POST', '/api/categories/car/archive')).status, 200);
+    const r = await send<{ tag: string; category: string | null }>('POST', `/api/bank_txns/${t1}/tag`, { tag: 'private', category: 'food' });
+    assert.equal(r.status, 200);
+    assert.deepEqual([r.body.tag, r.body.category], ['private', 'food']);
+    const bad = await send('POST', `/api/bank_txns/${t1}/tag`, { tag: 'private', category: 'car' });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error, 'category_archived');
+    // 無い明細は（アーカイブ済みでも）404
+    assert.equal((await send('POST', '/api/bank_txns/nope/tag', { tag: 'private', category: 'food' })).status, 404);
+  });
+
+  test('bulk_tag: tag だけ（category は引き継ぎ）は 200。全部の今の値と同じアーカイブ済みは 200、1 件でも違えば 400 で何も書かない', async () => {
+    const a = txn('2026-11-02', 1000);
+    const b = txn('2026-11-03', 2000, 'ｽｰﾊﾟｰ');
+    const c = txn('2026-11-04', 3000, 'ﾅﾆｶ');
+    for (const id of [a, b]) assert.equal((await send('POST', `/api/bank_txns/${id}/tag`, { tag: 'business', category: 'food' })).status, 200);
+    assert.equal((await send('POST', '/api/categories/food/archive')).status, 200);
+    type B = { changed: number; effective: { tag: string; category: string | null }[]; error?: string };
+    const r1 = await send<B>('POST', '/api/bank_txns/bulk_tag', { ids: [a, b], tag: 'private' });
+    assert.equal(r1.status, 200);
+    assert.deepEqual(r1.body.effective.map((e) => [e.tag, e.category]), [
+      ['private', 'food'],
+      ['private', 'food'],
+    ]);
+    const r2 = await send<B>('POST', '/api/bank_txns/bulk_tag', { ids: [a, b], category: 'food' });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.body.changed, 0);
+    const before = audits().length;
+    const r3 = await send<B>('POST', '/api/bank_txns/bulk_tag', { ids: [a, c], category: 'food' });
+    assert.equal(r3.status, 400);
+    assert.equal(r3.body.error, 'category_archived');
+    assert.equal(audits().length, before);
+  });
+
+  test('学習: アーカイブ済みのカテゴリのルールは新しく作らない', async () => {
+    const pet = (await create('ペット')).body.item;
+    const ids = [txn('2026-11-02', 1000, 'ﾍﾟｯﾄｼｮｯﾌﾟ'), txn('2026-11-03', 1100, 'ﾍﾟｯﾄｼｮｯﾌﾟ'), txn('2026-11-04', 1200, 'ﾍﾟｯﾄｼｮｯﾌﾟ')];
+    // 3 件目は別のタグにしておき、アーカイブ後にタグだけ揃える（3 件が同じ上書きになる）
+    for (const [i, tag] of [[0, 'private'], [1, 'private'], [2, 'business']] as const) {
+      assert.equal((await send('POST', `/api/bank_txns/${ids[i]}/tag`, { tag, category: pet.id })).status, 200);
+    }
+    assert.equal((await send('POST', `/api/categories/${pet.id}/archive`)).status, 200);
+    const r = await send<{ learned_rule: unknown }>('POST', `/api/bank_txns/${ids[2]}/tag`, { tag: 'private', category: pet.id });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.learned_rule, null);
+    assert.equal(audits('tag_rule.learned').length, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM tag_rules').get() as { n: number }).n, 0);
+    // 戻せば同じ操作で学習する（判定そのものは変えていない）
+    assert.equal((await send('POST', `/api/categories/${pet.id}/unarchive`)).status, 200);
+    const r2 = await send<{ learned_rule: { action: string } | null }>('POST', `/api/bank_txns/${ids[2]}/tag`, { tag: 'private', category: pet.id });
+    assert.equal(r2.body.learned_rule?.action, 'created');
+  });
+});
+
 describe('ユーザー定義のカテゴリが集計・一覧・経費に出る', () => {
   test('by_category・by_tag_category は台帳の順（ユーザー定義は builtin の後、未分類は最後）。一覧の category=<id>・経費の vendors[].category', async () => {
     const pet = (await create('ペット')).body.item;

@@ -4,6 +4,7 @@
 //   POST   /api/bank_txns/bulk_tag  body {ids: string[]（1〜500 件。重複は 1 件に）, tag?, category?: string|null}（tag と category の少なくとも一方。
 //          省いた側は明細ごとの今の効く値を引き継ぐ）。全部か無し。今の効く値と同じ明細は書かない。
 //          → 200 {batch_id（changed が 0 なら null）, changed, unchanged, learned_rules: [{rule, action}], effective: [{id, tag, category, tag_source}]}
+//          （アーカイブ済みの category は、全件の今の効く値と同じときだけ通す）
 //          / 400 {error: invalid_json|invalid_field|invalid_ids|too_many_ids|nothing_to_set|invalid_tag|invalid_category|category_archived}
 //          / 404 {error: not_found, missing: [id（最大 20 件）]}
 //   POST   /api/bank_txns/bulk_tag/:batch_id/revert  最新の版がまだその一括の版の明細を一つ前の状態に戻す（後から直した明細は skipped）。
