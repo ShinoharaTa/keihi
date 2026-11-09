@@ -2283,3 +2283,188 @@ button:disabled {
   margin-left: 6px;
   font-size: 12px;
 }
+/* 明細の選択モードと一括の操作（#74 PR4。BulkBar.tsx）。スマホと PC で中身は同じで、並べ方だけ変える（PC は .m-bulkbar-wide など）。
+   操作の帯は下タブのすぐ上に固定（.bottom と同じ位置）。長押しで行の文字を選ばない。 */
+.m-txn-main {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.m-head-act {
+  margin-right: 4px;
+}
+.m-selhead h1 {
+  padding-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.m-selhead .m-btn {
+  flex: none;
+}
+.m-selrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 16px 0 4px;
+  background: var(--m-card);
+  border-bottom: 1px solid var(--m-line);
+  font-size: 14px;
+}
+.m-selrow-text {
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.m-seltools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+}
+.m-seltools .m-msg {
+  flex: 1 1 100%;
+}
+.m-checkwrap {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.m-check {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--m-accent);
+}
+.m-txn-sel {
+  padding-left: 4px;
+}
+.m-txn-sel:not(:has(.m-tagbtn, .m-tagspace)) {
+  padding-right: 16px;
+}
+.m-txn-on {
+  background: var(--m-accent-soft);
+}
+.m-main-dock {
+  padding-bottom: 160px;
+}
+.m-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(64px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+}
+.m-bulkbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'count clear'
+    'tags cat';
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--m-card);
+  border-top: 1px solid var(--m-line);
+  box-shadow: 0 -4px 12px rgb(0 0 0 / 0.06);
+}
+.m-bulk-count {
+  grid-area: count;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.m-bulk-tags {
+  grid-area: tags;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.m-bulkbar .m-btn {
+  padding: 0 10px;
+  white-space: nowrap;
+}
+.m-bulk-catwrap {
+  grid-area: cat;
+  position: relative;
+  display: flex;
+}
+.m-bulk-clear {
+  grid-area: clear;
+}
+.m-bulkbar-wide {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+.m-bulkbar-wide .m-bulk-tags {
+  display: flex;
+}
+.m-bulknote {
+  margin: 0 16px 8px;
+  padding: 0 4px 0 12px;
+  border-radius: 10px;
+  background: var(--m-fg);
+  color: var(--m-card);
+  font-size: 14px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.16);
+  animation: m-fade 200ms var(--m-ease);
+}
+.m-bulknote-wide {
+  align-self: center;
+  min-width: 420px;
+}
+.m-bulknote p {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+}
+.m-bulknote-act {
+  flex: none;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: underline;
+}
+.m-pop-catch {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+}
+.m-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 2;
+  width: 360px;
+  padding: 12px;
+  background: var(--m-card);
+  border: 1px solid var(--m-line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.16);
+  transform-origin: bottom right;
+  animation: m-pop 160ms var(--m-ease);
+}
+@keyframes m-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-pop,
+  .m-bulknote {
+    animation: none;
+  }
+}
