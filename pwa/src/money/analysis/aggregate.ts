@@ -1,6 +1,7 @@
 // 分析の画面（#74）の純関数。月次集計（GET /api/summary/monthly?from&to の MonthlySummary[]、by_tag_category を使う）を
 // 期間（月 / 四半期 1〜3・4〜6・7〜9・10〜12 月 / 暦年）に束ね、合計・推移の棒・クロス表・ドリルダウンの URL を作る。
-// 期間は最初の月（YYYY-MM）で表す。読んだ範囲に無い月がある期間（範囲の端・今日より先）はラベルに「（一部）」。
+// 期間は最初の月（YYYY-MM）で表す。今期（今月・今四半期・今年。cur を含む期間）は「（一部）」を付けず、過去の期間で読んだ範囲に無い月があるとき
+// （36 か月の端の四半期・年）だけラベルに「（一部）」。
 // タグの絞り込みは by_tag_category から（月次集計にタグの引数は無い）。口座は月次集計に口座の引数が無く by_account からは作れないので出さない。
 // クロス表はタグで列を分けるので、タグの絞り込みは合計と推移にだけ効く。件数は向き（side）に合ったほう（income_count / expense_count）を使う。
 import { addMonth, periodRange, TAG_ORDER, TXN_PAGE, UNCATEGORIZED_QUERY, type MonthlySummary, type Tag, type TxnFilter } from '../model.ts';
@@ -76,8 +77,8 @@ const addTo = (a: Cell, b: Cell) => {
 };
 const rowOrder = (a: Row, b: Row) => TAG_ORDER.indexOf(a.tag) - TAG_ORDER.indexOf(b.tag) || categoryRank(a.category) - categoryRank(b.category);
 
-// 期間のタグ × カテゴリ（月をまたいで足す）。並びは tag 順 → カテゴリの固定順 → 未分類最後。
-export function slice(ms: readonly MonthlySummary[], span: Span, start: string): Slice {
+// 期間のタグ × カテゴリ（月をまたいで足す）。並びは tag 順 → カテゴリの固定順 → 未分類最後。cur は今月（YYYY-MM）。
+export function slice(ms: readonly MonthlySummary[], span: Span, start: string, cur: string): Slice {
   const months = periodMonths(span, start);
   const byMonth = new Map(ms.map((m) => [m.month, m]));
   const acc = new Map<string, Row>();
@@ -95,7 +96,8 @@ export function slice(ms: readonly MonthlySummary[], span: Span, start: string):
       addTo(a, r);
     }
   }
-  const partial = missing > 0;
+  const current = start <= cur && cur <= months[months.length - 1]!;
+  const partial = missing > 0 && !current;
   return { start, label: `${periodLabel(span, start)}${partial ? '（一部）' : ''}`, partial, rows: [...acc.values()].sort(rowOrder) };
 }
 
@@ -113,9 +115,9 @@ export function totals(rows: readonly Row[], tag: '' | Tag = ''): Totals {
 
 export type TrendBar = { start: string; label: string; short: string; yearMark: string | null; partial: boolean; amount: number; count: number; segs: { category: string | null; amount: number }[] };
 // 期間ごとのカテゴリの積み上げ（side の金額。下から固定順、未分類が上）。
-export function trend(ms: readonly MonthlySummary[], span: Span, base: string, side: Side, tag: '' | Tag = ''): TrendBar[] {
+export function trend(ms: readonly MonthlySummary[], span: Span, base: string, side: Side, cur: string, tag: '' | Tag = ''): TrendBar[] {
   return trendStarts(span, base).map((start, i) => {
-    const s = slice(ms, span, start);
+    const s = slice(ms, span, start, cur);
     const cats = new Map<string | null, number>();
     let count = 0;
     for (const r of byTag(s.rows, tag)) {
@@ -179,6 +181,11 @@ export function drillUrl(span: Span, p: Pick, side: Side, cursor: string | null,
   if (p.tag) q.set('tag', p.tag);
   if (cursor) q.set('cursor', cursor);
   return `/api/bank_txns?${q.toString()}`;
+}
+
+// ドリルダウンの読み込みに失敗したときの状態。「もっと見る」（cursor あり）の失敗は読んだ分と cursor を残し、もう一度押せるようにする。
+export function drillFailed<T>(prev: { items: T[] } | null, cursor: string | null, msg: string): { items: T[]; more: boolean; loading: false; msg: string; cursor: string | null } {
+  return { items: cursor ? (prev?.items ?? []) : [], more: cursor !== null, loading: false, msg, cursor };
 }
 
 // 選んだ所の金額と件数（集計の値。一覧の合計と一致する）。

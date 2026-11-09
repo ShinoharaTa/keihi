@@ -9,6 +9,7 @@ import {
   COLS,
   COL_LABELS,
   crossTable,
+  drillFailed,
   drillUrl,
   fetchRange,
   MAX_FETCH_MONTHS,
@@ -32,6 +33,7 @@ import { lines, pretty, renderHtml, startSsr } from './pwa-ssr-helpers.ts';
 
 process.env.TZ = 'Asia/Tokyo';
 const TODAY = '2026-11-06';
+const CUR = '2026-11';
 const noop = () => {};
 
 const cats: Categories = {
@@ -105,8 +107,8 @@ describe('分析の純関数（aggregate.ts）', () => {
     assert.equal(trendStarts('quarter', '2026-10')[0], '2024-01');
   });
 
-  test('束ね: 月 / 四半期 / 年。月をまたいで足し、並びは tag → カテゴリの固定順 → 未分類最後。端で月が欠けたら「（一部）」', () => {
-    const m = slice(ms, 'month', '2026-11');
+  test('束ね: 月 / 四半期 / 年。月をまたいで足し、並びは tag → カテゴリの固定順 → 未分類最後。過去の期間で月が欠けたら「（一部）」、今期は付けない', () => {
+    const m = slice(ms, 'month', '2026-11', CUR);
     assert.equal(m.label, '2026 年 11 月');
     assert.equal(m.partial, false);
     assert.deepEqual(m.rows.map((r) => [r.tag, r.category]), [
@@ -119,21 +121,25 @@ describe('分析の純関数（aggregate.ts）', () => {
       ['unset', 'food'],
       ['unset', null],
     ]);
-    const q = slice(ms, 'quarter', '2026-07');
+    const q = slice(ms, 'quarter', '2026-07', CUR);
     assert.equal(q.partial, false);
     assert.deepEqual(q.rows.find((r) => r.tag === 'private' && r.category === 'food'), { tag: 'private', category: 'food', income: 0, expense: 120000, income_count: 0, expense_count: 36 });
-    // 10〜12 月は 12 月が無い。2025 年は 12 月だけ。
-    assert.equal(slice(ms, 'quarter', '2026-10').label, '2026 年 10〜12 月（一部）');
-    assert.equal(slice(ms, 'year', '2025-01').label, '2025 年（一部）');
-    assert.equal(slice(ms, 'year', '2026-01').label, '2026 年（一部）');
-    const y = slice(ms, 'year', '2026-01');
+    // 今期（今四半期・今年）は 12 月が無くても付けない。過去の 2025 年は 12 月だけなので付ける。
+    assert.equal(slice(ms, 'quarter', '2026-10', CUR).label, '2026 年 10〜12 月');
+    assert.equal(slice(ms, 'year', '2026-01', CUR).label, '2026 年');
+    assert.equal(slice(ms, 'year', '2025-01', CUR).label, '2025 年（一部）');
+    assert.equal(slice(ms, 'quarter', '2025-10', CUR).label, '2025 年 10〜12 月（一部）');
+    assert.equal(slice(ms, 'quarter', '2026-07', CUR).partial, false);
+    // 今月より前で読めていない月がある過去の期間は付ける（今月が 12 月より後なら 2026 年 10〜12 月も過去）
+    assert.equal(slice(ms, 'quarter', '2026-10', '2027-01').label, '2026 年 10〜12 月（一部）');
+    const y = slice(ms, 'year', '2026-01', CUR);
     assert.equal(totals(y.rows).expense, 10 * 69000 + 169000);
     // by_tag_category の無い古いサーバーの月は空
-    assert.deepEqual(slice([{ ...ms[0]!, by_tag_category: undefined }], 'month', '2025-12').rows, []);
+    assert.deepEqual(slice([{ ...ms[0]!, by_tag_category: undefined }], 'month', '2025-12', CUR).rows, []);
   });
 
   test('合計（収入・支出・差額・件数）とタグの絞り込み', () => {
-    const s = slice(ms, 'month', '2026-11');
+    const s = slice(ms, 'month', '2026-11', CUR);
     assert.deepEqual(totals(s.rows), { income: 301000, expense: 169000, income_count: 2, expense_count: 23, net: 132000 });
     assert.deepEqual(totals(s.rows, 'business'), { income: 300000, expense: 12000, income_count: 1, expense_count: 2, net: 288000 });
     // 月次集計の total と一致
@@ -142,28 +148,28 @@ describe('分析の純関数（aggregate.ts）', () => {
   });
 
   test('推移の棒: 期間ごとのカテゴリの積み上げ（向き・タグに従う）', () => {
-    const bars = trend(ms, 'month', '2026-11', 'expense');
+    const bars = trend(ms, 'month', '2026-11', 'expense', CUR);
     assert.equal(bars.length, 12);
     assert.deepEqual(bars.map((b) => b.start), months12.map((m) => m));
     const last = bars.at(-1)!;
     assert.deepEqual(last.segs.map((s) => s.category), ['food', 'daily', 'telecom', 'tax', null]);
     assert.equal(last.amount, 169000);
     assert.equal(last.count, 23, '件数は向きに合ったほう（出金の件数）');
-    assert.equal(trend(ms, 'month', '2026-11', 'income').at(-1)!.count, 2);
+    assert.equal(trend(ms, 'month', '2026-11', 'income', CUR).at(-1)!.count, 2);
     assert.equal(last.segs.find((s) => s.category === 'food')!.amount, 45000);
     assert.deepEqual([bars[0]!.yearMark, bars[1]!.yearMark, bars[2]!.yearMark], ['2025', '2026', null]);
-    assert.deepEqual(trend(ms, 'month', '2026-11', 'income').at(-1)!.segs, [{ category: 'food', amount: 1000 }, { category: null, amount: 300000 }]);
-    assert.equal(trend(ms, 'month', '2026-11', 'expense', 'unset').at(-1)!.amount, 4000);
-    const q = trend(ms, 'quarter', '2026-10', 'expense');
+    assert.deepEqual(trend(ms, 'month', '2026-11', 'income', CUR).at(-1)!.segs, [{ category: 'food', amount: 1000 }, { category: null, amount: 300000 }]);
+    assert.equal(trend(ms, 'month', '2026-11', 'expense', CUR, 'unset').at(-1)!.amount, 4000);
+    const q = trend(ms, 'quarter', '2026-10', 'expense', CUR);
     assert.equal(q.length, 12);
     assert.equal(q.filter((b) => b.amount > 0).length, 5, 'データのあるのは 2025 年 10〜12 月（12 月だけ）と 2026 年の各四半期');
-    assert.deepEqual(q.slice(-5).map((b) => [b.short, b.partial]), [['10-12月', true], ['1-3月', false], ['4-6月', false], ['7-9月', false], ['10-12月', true]]);
-    const y = trend(ms, 'year', '2026-01', 'expense');
-    assert.deepEqual(y.map((b) => [b.short, b.partial, b.amount]), [['2024年', true, 0], ['2025年', true, 69000], ['2026年', true, 10 * 69000 + 169000]]);
+    assert.deepEqual(q.slice(-5).map((b) => [b.short, b.partial]), [['10-12月', true], ['1-3月', false], ['4-6月', false], ['7-9月', false], ['10-12月', false]]);
+    const y = trend(ms, 'year', '2026-01', 'expense', CUR);
+    assert.deepEqual(y.map((b) => [b.short, b.partial, b.amount]), [['2024年', true, 0], ['2025年', true, 69000], ['2026年', false, 10 * 69000 + 169000]]);
   });
 
   test('クロス表: 行 = カテゴリ（固定順 + 未分類最後）、列 = 事業 / 私用 / 未設定 / 計。行・列の合計が一致', () => {
-    const s = slice(ms, 'month', '2026-11');
+    const s = slice(ms, 'month', '2026-11', CUR);
     const c = crossTable(s.rows, 'expense');
     assert.deepEqual(c.rows.map((r) => r.category), ['food', 'daily', 'telecom', 'tax', null]);
     for (const r of c.rows) {
@@ -186,13 +192,16 @@ describe('分析の純関数（aggregate.ts）', () => {
     assert.equal(drillUrl('month', { start: '2026-11', category: 'food', tag: 'private' }, 'expense', null), '/api/bank_txns?from=2026-11-01&to=2026-11-30&side=expense&excluded=0&limit=50&category=food&tag=private');
     assert.equal(drillUrl('quarter', { start: '2026-01', category: null }, 'income', 'CUR'), '/api/bank_txns?from=2026-01-01&to=2026-03-31&side=income&excluded=0&limit=50&category=none&cursor=CUR');
     assert.equal(drillUrl('year', { start: '2024-01' }, 'expense', null), '/api/bank_txns?from=2024-01-01&to=2024-12-31&side=expense&excluded=0&limit=50');
-    const s = slice(ms, 'month', '2026-11');
+    const s = slice(ms, 'month', '2026-11', CUR);
     assert.deepEqual(pickCell(s.rows, { start: '2026-11', category: 'food' }, 'expense'), { amount: 45000, count: 14 });
     assert.deepEqual(pickCell(s.rows, { start: '2026-11', tag: 'unset' }, 'expense'), { amount: 4000, count: 2 });
     const m = txnsFilter('month', { start: '2026-11', category: null, tag: 'business' }, 'expense');
     assert.deepEqual(m, { period: 'month', month: '2026-11', tag: 'business', category: 'none', side: 'expense', excluded: '0', pillLabel: '分析 · 支出' });
     const q = txnsFilter('quarter', { start: '2026-07', category: 'food' }, 'income');
     assert.deepEqual(q, { period: 'range', range: { from: '2026-07-01', to: '2026-09-30' }, rangeLabel: '2026 年 7〜9 月', tag: '', category: 'food', side: 'income', excluded: '0', pillLabel: '分析 · 収入' });
+    // 「もっと見る」の失敗は cursor と読んだ分を残して再試行できる。最初の 1 ページの失敗は空で「もっと見る」なし
+    assert.deepEqual(drillFailed({ items: ['a', 'b'] }, 'CUR', 'x'), { items: ['a', 'b'], more: true, loading: false, msg: 'x', cursor: 'CUR' });
+    assert.deepEqual(drillFailed({ items: ['a'] }, null, 'x'), { items: [], more: false, loading: false, msg: 'x', cursor: null });
     // 明細の画面の URL も同じ期間・絞り込みになる
     assert.equal(txnsUrl({ ...emptyFilter(), ...q }, TODAY, null), '/api/bank_txns?limit=50&from=2026-07-01&to=2026-09-30&category=food&side=income&excluded=0');
   });
@@ -233,9 +242,9 @@ describe('SSR スナップショット（分析）', () => {
     await vite.close();
   });
   const html = (c: (props: never) => unknown, props: object) => pretty(renderHtml(h(c as never, props as never)));
-  const s = slice(ms, 'month', '2026-11');
+  const s = slice(ms, 'month', '2026-11', CUR);
   const cross = crossTable(s.rows, 'expense');
-  const bars = trend(ms, 'month', '2026-11', 'expense');
+  const bars = trend(ms, 'month', '2026-11', 'expense', CUR);
   // aria-label の「カテゴリ 列 金額 円 n 件」を取り出す。
   const cellsOf = (out: string) => [...out.matchAll(/aria-label="(\S+) (計|事業|私用|未設定) ([\d,]+) 円 (\d+) 件[ 。]/g)].map((m) => `${m[1]}|${m[2]}|${m[3]}|${m[4]}`);
 

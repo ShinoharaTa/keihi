@@ -2493,32 +2493,32 @@ button:disabled {
 /* 分析（#74。pwa/src/money/analysis/）。カテゴリの色 k-0〜k-11・k-none は analysis/colors.ts の対応。PC 幅（1024px 以上）は 3 カラムで最大 1280px */
 :root {
   --m-k0: #2563eb;
-  --m-k1: #d97706;
-  --m-k2: #16a34a;
+  --m-k1: #f59e0b;
+  --m-k2: #15803d;
   --m-k3: #dc2626;
   --m-k4: #7c3aed;
   --m-k5: #0891b2;
   --m-k6: #db2777;
-  --m-k7: #65a30d;
+  --m-k7: #a3e635;
   --m-k8: #ea580c;
-  --m-k9: #0d9488;
-  --m-k10: #92400e;
-  --m-k11: #a21caf;
+  --m-k9: #475569;
+  --m-k10: #78350f;
+  --m-k11: #c026d3;
   --m-k-none: #9ca3af;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --m-k0: #60a5fa;
-    --m-k1: #fbbf24;
-    --m-k2: #4ade80;
+    --m-k1: #fde68a;
+    --m-k2: #16a34a;
     --m-k3: #f87171;
     --m-k4: #a78bfa;
     --m-k5: #22d3ee;
     --m-k6: #f472b6;
-    --m-k7: #a3e635;
+    --m-k7: #d9f99d;
     --m-k8: #fb923c;
-    --m-k9: #2dd4bf;
-    --m-k10: #d6a26c;
+    --m-k9: #94a3b8;
+    --m-k10: #b45309;
     --m-k11: #e879f9;
     --m-k-none: #6b7280;
   }
@@ -2740,14 +2740,25 @@ button:disabled {
     background: var(--m-chip);
   }
 }
+/* 900〜1023px（スマホ配置）: 上の帯も .m-main と同じ 720px の中央に */
+@media (min-width: 900px) {
+  .m-an-band {
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
 @media (min-width: 1024px) {
-  /* ページ幅の上限（中央寄せ）を分析の画面（殻に m-wide）のときだけ 1280px に */
-  :is(.app, main, .m):has(.m-wide),
+  /* 分析の画面（殻に m-wide）は最大 1280px。900px の規則（720px の中央寄せ）を見出しと中身だけ外す */
   .m-wide {
     max-width: 1280px;
-  }
-  .m-wide {
     margin: 0 auto;
+  }
+  .m-wide .m-head,
+  .m-wide .m-main {
+    max-width: none;
+    margin-left: 0;
+    margin-right: 0;
   }
   .m-an-cols {
     display: grid;

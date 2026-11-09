@@ -11,6 +11,7 @@ import { ScreenHead, type Go } from '../Money.tsx';
 import { useWide } from '../useWide.ts';
 import {
   crossTable,
+  drillFailed,
   drillUrl,
   fetchRange,
   periodLabel,
@@ -65,9 +66,9 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
 
   const view = useMemo(() => {
     if (!months) return null;
-    const s = slice(months, span, start);
-    return { slice: s, totals: totals(s.rows, tag), bars: trend(months, span, start, side, tag), cross: crossTable(s.rows, side) };
-  }, [months, span, start, side, tag]);
+    const s = slice(months, span, start, cur);
+    return { slice: s, totals: totals(s.rows, tag), bars: trend(months, span, start, side, cur, tag), cross: crossTable(s.rows, side) };
+  }, [months, span, start, side, tag, cur]);
 
   const loadDrill = async (p: Pick, cursor: string | null) => {
     const n = ++drillSeq.current;
@@ -75,7 +76,7 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
     const r = await getJson<TxnPage>(drillUrl(span, p, side, cursor));
     if (n !== drillSeq.current) return;
     if (!r.ok) {
-      setDrill((d) => ({ items: d?.items ?? [], more: false, loading: false, msg: failText(r.status, r.body), cursor: null }));
+      setDrill((d) => drillFailed(d, cursor, failText(r.status, r.body)));
       return;
     }
     setDrill((d) => ({ items: [...(cursor ? (d?.items ?? []) : []), ...r.data.items], more: r.data.next_cursor !== null, loading: false, msg: '', cursor: r.data.next_cursor }));
@@ -96,7 +97,7 @@ export function Analysis({ today, cats, initialMonth, backLabel, onBack, go }: {
   const onBar = (s: string) => choose({ start: s, ...(tag ? { tag } : {}) });
   const label = periodLabel(span, start);
   const barLabel = (s: string) => (view?.bars.find((b) => b.start === s)?.label ?? periodLabel(span, s));
-  const rowsOf = (s: string) => (s === start ? view?.slice.rows : months ? slice(months, span, s).rows : undefined) ?? [];
+  const rowsOf = (s: string) => (s === start ? view?.slice.rows : months ? slice(months, span, s, cur).rows : undefined) ?? [];
 
   return (
     <div class={wide ? 'm-an m-wide' : 'm-an'}>
