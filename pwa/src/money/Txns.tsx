@@ -19,7 +19,6 @@ import { Icon } from './Icons.tsx';
 import {
   applyMatches,
   applyRuleLocally,
-  assignable,
   categoryLabelError,
   docLine,
   expenseFilterText,
@@ -493,7 +492,8 @@ export function TagSheet({
           <fieldset class="m-fs">
             <legend>カテゴリ</legend>
             <div class="m-catgrid">
-              {assignable(cats).map((c) => (
+              {/* アーカイブ済みは出さない。ただし明細の今のカテゴリなら、その 1 件だけ出す（今の値のままタグだけ変えられる） */}
+              {(cats?.items ?? []).filter((c) => !c.archived || c.id === txn.category).map((c) => (
                 <button type="button" key={c.id} aria-pressed={draft.category === c.id} onClick={() => onDraft({ ...draft, category: draft.category === c.id ? null : c.id })}>
                   <Dot cls={categoryColor(cats, c.id)} />
                   {c.label}
@@ -765,11 +765,12 @@ export function Txns({
     return () => document.removeEventListener('keydown', onKey);
   }, [open, picker, selecting]);
 
-  // 結果の帯は 10 秒で消す（消えた後も「直前の一括を元に戻す」から戻せる）。
+  // カテゴリの一覧を閉じたら「新しく作る…」の入力を捨てる。
   useEffect(() => {
     if (!picker) setCreating(null);
   }, [picker]);
 
+  // 結果の帯は 10 秒で消す（消えた後も「直前の一括を元に戻す」から戻せる）。
   useEffect(() => {
     if (!notice) return;
     const h = setTimeout(() => setNotice(null), NOTICE_MS);
@@ -819,19 +820,25 @@ export function Txns({
   // 「新しく作る…」: POST /api/categories → 台帳を読み直す → そのまま選択中の明細に一括（category = 新しい id）。
   // 作るのに失敗したら入力に理由を出す（何も書かない）。作れて一括が失敗したらカテゴリは残し、入れ直しを頼む。
   const createAndApply = async () => {
-    if (!creating || bulkBusy) return;
+    if (!creating || bulkBusy || collecting || sel.ids.size === 0) return;
+    // 一括で付けられない件数なら作りもしない（runBulk と同じ案内）
+    if (sel.ids.size > BULK_MAX) {
+      setPicker(false);
+      return setNotice(plainNotice(TOO_MANY_TEXT));
+    }
     const bad = categoryLabelError(creating.label);
     if (bad) return setCreating({ ...creating, error: bad });
     setBulkBusy(true);
-    const r = await postJson('/api/categories', { label: creating.label.trim(), color: creating.color });
-    if (r.status !== 201) {
+    try {
+      const r = await postJson('/api/categories', { label: creating.label.trim(), color: creating.color });
+      if (r.status !== 201) return setCreating({ ...creating, error: failText(r.status, r.body) });
+      const item = (r.body as { item: { id: string; label: string } }).item;
+      await onCatsChanged?.();
+      const ok = await runBulk({ category: item.id }, true);
+      if (!ok) setNotice(plainNotice(`カテゴリ『${item.label}』は作りました。入れ直してください`));
+    } finally {
       setBulkBusy(false);
-      return setCreating({ ...creating, error: failText(r.status, r.body) });
     }
-    const item = (r.body as { item: { id: string; label: string } }).item;
-    await onCatsChanged?.();
-    const ok = await runBulk({ category: item.id }, true);
-    if (!ok) setNotice(plainNotice(`カテゴリ『${item.label}』は作りました。入れ直してください`));
   };
 
   const revert = async (batchId: string) => {

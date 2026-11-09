@@ -1,3 +1,16 @@
+exports[`SSR スナップショット > タグ付けシートのカテゴリの段: 台帳の色の点。アーカイブ済みは出さず、明細の今のカテゴリならその 1 件だけ押された状態で出す。絞り込みも同じ形 1`] = `
+[
+  "<legend>カテゴリ</legend><div class=\\"m-catgrid\\"><button type=\\"button\\" aria-pressed=\\"false\\"><span class=\\"m-dot k-0\\" aria-hidden=\\"true\\"></span>食費</button>",
+  "<button type=\\"button\\" aria-pressed=\\"false\\"><span class=\\"m-dot k-1\\" aria-hidden=\\"true\\"></span>日用品</button>",
+  "<button type=\\"button\\" aria-pressed=\\"false\\"><span class=\\"m-dot k-3\\" aria-hidden=\\"true\\"></span>通信</button>",
+  "<button type=\\"button\\" aria-pressed=\\"false\\"><span class=\\"m-dot k-7\\" aria-hidden=\\"true\\"></span>税金</button>",
+  "<button type=\\"button\\" aria-pressed=\\"false\\"><span class=\\"m-dot k-8\\" aria-hidden=\\"true\\"></span>車</button>",
+  "<button type=\\"button\\" aria-pressed=\\"true\\"><span class=\\"m-dot k-4\\" aria-hidden=\\"true\\"></span>昔の</button>",
+  "</div>",
+  "</fieldset><label class=\\"m-switchrow m-switchrow-box\\"><span><b>"
+]
+`;
+
 exports[`SSR スナップショット > ホーム: 今日使えるお金・今月の進み・残高の推移・確認すること・入口 1`] = `
 [
   "<section class=\\"m-card\\" aria-labelledby=\\"m-avail\\"><div class=\\"m-col m-gap2\\"><h2 id=\\"m-avail\\" class=\\"m-h2-sub\\">今日使えるお金</h2><p class=\\"m-big\\">830,000<small>円</small></p>",

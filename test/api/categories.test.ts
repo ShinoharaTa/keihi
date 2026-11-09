@@ -284,6 +284,23 @@ describe('アーカイブ済みが今の効く値のとき', () => {
     const r2 = await send<{ learned_rule: { action: string } | null }>('POST', `/api/bank_txns/${ids[2]}/tag`, { tag: 'private', category: pet.id });
     assert.equal(r2.body.learned_rule?.action, 'created');
   });
+
+  test('学習: 既存の learned をアーカイブ済みのカテゴリに置き換えない（superseded にしない）', async () => {
+    const pet = (await create('ペット')).body.item;
+    const ids = [txn('2026-11-02', 1000, 'ﾍﾟｯﾄｼｮｯﾌﾟ'), txn('2026-11-03', 1100, 'ﾍﾟｯﾄｼｮｯﾌﾟ'), txn('2026-11-04', 1200, 'ﾍﾟｯﾄｼｮｯﾌﾟ')];
+    for (const id of ids) assert.equal((await send('POST', `/api/bank_txns/${id}/tag`, { tag: 'private', category: 'food' })).status, 200);
+    const rule = db.prepare('SELECT id, category FROM tag_rules').get() as { id: string; category: string };
+    assert.equal(rule.category, 'food');
+    for (const [i, tag] of [[0, 'private'], [1, 'private'], [2, 'business']] as const) {
+      assert.equal((await send('POST', `/api/bank_txns/${ids[i]}/tag`, { tag, category: pet.id })).status, 200);
+    }
+    assert.equal((await send('POST', `/api/categories/${pet.id}/archive`)).status, 200);
+    const r = await send<{ learned_rule: unknown }>('POST', `/api/bank_txns/${ids[2]}/tag`, { tag: 'private', category: pet.id });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.learned_rule, null);
+    assert.equal(audits('tag_rule.superseded').length, 0);
+    assert.deepEqual({ ...(db.prepare('SELECT id, category FROM tag_rules').get() as object) }, { id: rule.id, category: 'food' });
+  });
 });
 
 describe('ユーザー定義のカテゴリが集計・一覧・経費に出る', () => {

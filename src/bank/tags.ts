@@ -96,11 +96,12 @@ function checkTagAndCategory(db: Db, tag: unknown, category: unknown): void {
 }
 
 // 明細への上書き（1 件・一括）の category。台帳に無い id は invalid_category。アーカイブ済みは、その明細の今の効く値（resolve 後）と
-// 同じなら通す（カテゴリは変えずにタグだけ変えられるように）。違うなら category_archived。current は明細 id → 今の効く値。
-function checkTxnCategory(db: Db, category: unknown, ids: readonly string[], current: Map<string, ResolvedTag>): void {
+// 同じなら通す（カテゴリは変えずにタグだけ変えられるように）。違うなら category_archived。current は明細 id → 今の効く値（アーカイブ済みのときだけ呼ぶ）。
+function checkTxnCategory(db: Db, category: unknown, ids: readonly string[], current: () => Map<string, ResolvedTag>): void {
   if (category === null || isAssignableCategory(db, category)) return;
   if (!isCategory(db, category)) throw new TagError(400, 'invalid_category');
-  if (!ids.every((id) => current.get(id)?.category === category)) throw new TagError(400, 'category_archived');
+  const cur = current();
+  if (!ids.every((id) => cur.get(id)?.category === category)) throw new TagError(400, 'category_archived');
 }
 
 export type TagDecisionSource = 'override' | 'rule' | 'account' | 'none';
@@ -180,7 +181,7 @@ export function setTxnTag(db: Db, input: SetTxnTagInput): SetTxnTagResult {
   return tx(db, () => {
     const txn = getBankTxn(db, input.txnId);
     if (!txn) throw new TagError(404, 'not_found');
-    checkTxnCategory(db, category, [txn.id], resolveTagsBulk(db, [txn.id]));
+    checkTxnCategory(db, category, [txn.id], () => resolveTagsBulk(db, [txn.id]));
     const version = appendTagVersion(db, { txnId: txn.id, tag: input.tag, category, source: input.source, actor: input.actor, user: input.user ?? null, now });
     const learned = input.source === 'human' ? learn(db, txn.account_id, txn.description_norm, input.tag, category, input.actor, now) : null;
     return { version, learned };
@@ -259,6 +260,8 @@ function learn(
     appendAudit(db, { actor, action: 'tag_rule.hit', entity: 'tag_rule', entityId: rule.id, payload: { ...ruleAuditPayload(rule), hit_count: rule.hit_count, ...b } }, now);
     return { rule, action: 'hit' };
   }
+  // アーカイブ済みのカテゴリでは置き換えも新規作成もしない（hit は上のとおり）。
+  if (category !== null && !isAssignableCategory(db, category)) return null;
   if (cur) {
     const rule = replaceTagRule(db, cur.id, { tag, category, now: at })!;
     appendAudit(
@@ -268,8 +271,6 @@ function learn(
     );
     return { rule, action: 'superseded' };
   }
-  // アーカイブ済みのカテゴリのルールは新しく作らない（hit・superseded は上のとおり）。
-  if (category !== null && !isAssignableCategory(db, category)) return null;
   const rule = insertTagRule(db, { accountId, pattern: descriptionNorm, match: 'exact', tag, category, origin: 'learned', now: at });
   appendAudit(db, { actor, action: 'tag_rule.learned', entity: 'tag_rule', entityId: rule.id, payload: { ...ruleAuditPayload(rule), ...b } }, now);
   return { rule, action: 'created' };
@@ -318,7 +319,7 @@ export function bulkSetTxnTags(db: Db, input: BulkSetTxnTagsInput): BulkSetTxnTa
     const missing = ids.filter((id) => !txns.has(id));
     if (missing.length) throw new BulkNotFoundError(missing.slice(0, MISSING_MAX));
     const current = resolveTagsBulk(db, ids);
-    if (input.category !== undefined) checkTxnCategory(db, input.category, ids, current);
+    if (input.category !== undefined) checkTxnCategory(db, input.category, ids, () => current);
     const batchId = ulid();
     const written: { accountId: string; descriptionNorm: string; tag: Tag; category: string | null }[] = [];
     for (const id of ids) {
