@@ -44,7 +44,8 @@ export function lazyChunks(dir: string): { name: string; file: string; size: num
     if (!e.isFile() || !/\.(js|css)$/.test(e.name)) continue;
     const file = path.relative(dir, path.join(e.parentPath, e.name)).split(path.sep).join('/');
     if (file === 'sw.js' || initial.has(file)) continue;
-    const name = e.name.replace(/-[\w-]+\.(js|css)$/, '');
+    // ハッシュは Vite 既定の 8 文字（名前にハイフンがあっても最後のハッシュだけを外す）。
+    const name = e.name.replace(/-[\w-]{8}\.(js|css)$/, '');
     out.push({ name, file, size: gz(path.join(dir, file)), limit: (LAZY_LIMITS[name] ?? LAZY_DEFAULT_LIMIT) * 1024 });
   }
   return out.sort((a, b) => b.size - a.size);

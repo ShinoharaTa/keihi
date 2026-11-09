@@ -28,9 +28,9 @@ type ExpensesComponent = (typeof import('./Expenses.tsx'))['Expenses'];
 type MailComponent = (typeof import('./Mail.tsx'))['Mail'];
 type TaxSimComponent = (typeof import('./TaxSim.tsx'))['TaxSim'];
 
-// 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ）。
-export function Pending({ failed }: { failed: boolean }) {
-  return <p class="empty">{failed ? 'お金の画面を読めませんでした。電波の良い所で開き直してください。' : '読み込み中…'}</p>;
+// 別チャンクの画面を読んでいる間・読めなかったときの表示（main.tsx のお金タブと同じ形）。label は画面の名前（経費・メール・試算）。
+export function Pending({ label, failed }: { label: string; failed: boolean }) {
+  return <p class="empty">{failed ? `${label}の画面を読めませんでした。電波の良い所で開き直してください。` : '読み込み中…'}</p>;
 }
 
 // 各画面の上の帯: 「戻る」・題・右端（任意）。
@@ -104,18 +104,21 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
 
   useEffect(() => {
     if (nav.view === 'expenses' && typeof expenses !== 'function') {
+      setExpenses(null);
       import('./Expenses.tsx').then(
         (m) => setExpenses(() => m.Expenses),
         () => setExpenses('error'),
       );
     }
     if (nav.view === 'mail' && typeof mail !== 'function') {
+      setMail(null);
       import('./Mail.tsx').then(
         (m) => setMail(() => m.Mail),
         () => setMail('error'),
       );
     }
     if (nav.view === 'tax_sim' && typeof taxSim !== 'function') {
+      setTaxSim(null);
       import('./TaxSim.tsx').then(
         (m) => setTaxSim(() => m.TaxSim),
         () => setTaxSim('error'),
@@ -130,8 +133,8 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
       {view === 'monthly' && <Monthly key={key} today={today} cats={cats} initialMonth={intent.month} onBack={home} go={go} />}
       {view === 'txns' && <Txns key={key} today={today} accounts={accounts} cats={cats} initial={intent.filter} onBack={home} onCapture={onCapture} />}
       {view === 'expenses' &&
-        (typeof expenses === 'function' ? h(expenses, { key, today, cats, initialWaiting: intent.receipt === 'waiting', onBack: home, go }) : <Pending failed={expenses === 'error'} />)}
-      {view === 'mail' && (typeof mail === 'function' ? h(mail, { key, today, onBack: home }) : <Pending failed={mail === 'error'} />)}
+        (typeof expenses === 'function' ? h(expenses, { key, today, cats, initialWaiting: intent.receipt === 'waiting', onBack: home, go }) : <Pending label="経費" failed={expenses === 'error'} />)}
+      {view === 'mail' && (typeof mail === 'function' ? h(mail, { key, today, onBack: home }) : <Pending label="メール" failed={mail === 'error'} />)}
       {view === 'forecast' && <Cashflow key={key} accounts={accounts} focus={intent.month} onBack={home} go={go} />}
       {view === 'schedule' && <Schedule key={key} today={today} accounts={accounts} addDirection={intent.add} locked={locked} onLock={setLocked} onBack={home} onTax={() => go('tax')} onTaxSim={() => go('tax_sim', { back: 'schedule' })} />}
       {view === 'accounts' && <Accounts key={key} today={today} accounts={accounts} focus={intent.account} locked={locked} onChanged={loadAccounts} onLock={setLocked} onBack={home} />}
@@ -140,7 +143,7 @@ export function Money({ today, onCapture }: { today: string; onCapture?: () => v
         typeof taxSim === 'function' ? (
           h(taxSim, { key, today, backLabel: intent.back === 'tax' ? '見積もりに戻る' : '予定に戻る', onBack: () => go(intent.back ?? 'schedule') })
         ) : (
-          <Pending failed={taxSim === 'error'} />
+          <Pending label="試算" failed={taxSim === 'error'} />
         )
       )}
     </section>

@@ -1078,9 +1078,9 @@ describe('SSR スナップショット', () => {
 
   test('別チャンクの画面を読んでいる間・読めなかったとき', async (t) => {
     const m = await load('/src/money/Money.tsx');
-    const out = [html(m.Pending!, { failed: false }), html(m.Pending!, { failed: true })].join('\n');
+    const out = [html(m.Pending!, { label: '経費', failed: false }), html(m.Pending!, { label: '経費', failed: true })].join('\n');
     assert.match(out, /読み込み中…/);
-    assert.match(out, /読めませんでした/);
+    assert.match(out, /経費の画面を読めませんでした/);
     t.assert.snapshot(lines(out));
   });
 
