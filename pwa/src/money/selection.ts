@@ -1,5 +1,5 @@
 // 明細の選択モードと一括の操作の純関数（docs/cashflow.md §5 の一括の上書き・取り消し、#74 PR4）。描画（Txns.tsx・BulkBar.tsx）から使い、
-// テスト（test/unit/money-pwa.test.ts）からも直接読む。
+// テスト（test/unit/money-select.test.ts）からも直接読む。
 // 選択は Set<string>（明細 id）と anchor（最後に単独で選んだ行。範囲選択の起点）。範囲・全選択は「今見えている行の順」（order）で決める。
 import { applyTag, type Tag, type Txn, type TxnPage } from './model.ts';
 
@@ -36,6 +36,26 @@ export function selectAll(s: Selection, order: readonly string[]): Selection {
 export const allSelected = (s: Selection, order: readonly string[]) => order.length > 0 && order.every((id) => s.ids.has(id));
 
 export const clearSel = emptySelection;
+
+// 一覧を読み直した後、見えている行だけに絞る（anchor も見えていなければ外す）。何も落ちなければ同じものを返す。
+export function keepVisible(s: Selection, visible: readonly string[]): Selection {
+  const v = new Set(visible);
+  const ids = [...s.ids].filter((id) => v.has(id));
+  const anchor = s.anchor !== null && v.has(s.anchor) ? s.anchor : null;
+  return ids.length === s.ids.size && anchor === s.anchor ? s : { ids: new Set(ids), anchor };
+}
+
+// 長押しを計測するのは主のポインタの主ボタン（左クリック・指 1 本目）だけ。
+export const pressStarts = (e: { isPrimary: boolean; button: number }) => e.isPrimary && e.button === 0;
+
+// Esc を拾わない場面: IME の変換中、入力欄（input・textarea・select）にいるとき。行と上の帯のチェック（checkbox）は入力欄に数えない
+// （PC でチェックを入れた直後はそこにフォーカスがあり、Esc で外せないと困るため）。
+export const ignoreKey = (e: { isComposing: boolean; target: unknown }) => {
+  const el = typeof e.target === 'object' && e.target !== null ? (e.target as { tagName?: unknown; type?: unknown }) : null;
+  if (e.isComposing) return true;
+  if (el?.tagName === 'INPUT') return el.type !== 'checkbox';
+  return el?.tagName === 'TEXTAREA' || el?.tagName === 'SELECT';
+};
 
 // ---- 行の操作の決め方 ----
 
@@ -107,19 +127,26 @@ export const FILTERED_PAGE = 100;
 export type Collected = { kind: 'ok'; ids: string[] } | { kind: 'too_many' } | { kind: 'error'; status: number; body: unknown };
 
 // 今の絞り込みで next_cursor をたどって id を集める。BULK_MAX を超えたら選ばない（too_many）。page は 1 ページ（limit=FILTERED_PAGE）を読む。
+// 読むのは FILTERED_MAX_PAGES ページまで（読み切れなければ 500 件以内と言えないので too_many）。同じ cursor が返ってきたら止める（invalid_cursor）。
+export const FILTERED_MAX_PAGES = Math.ceil(BULK_MAX / FILTERED_PAGE) + 1;
 export async function collectFiltered(
   page: (cursor: string | null) => Promise<{ ok: true; data: TxnPage } | { ok: false; status: number; body: unknown }>,
 ): Promise<Collected> {
   const ids = new Set<string>();
+  const seen = new Set<string>();
   let cursor: string | null = null;
-  for (;;) {
+  for (let n = 0; n < FILTERED_MAX_PAGES; n++) {
     const r = await page(cursor);
     if (!r.ok) return { kind: 'error', status: r.status, body: r.body };
     for (const t of r.data.items) ids.add(t.id);
     if (ids.size > BULK_MAX) return { kind: 'too_many' };
-    if (!r.data.next_cursor) return { kind: 'ok', ids: [...ids] };
-    cursor = r.data.next_cursor;
+    const next = r.data.next_cursor;
+    if (!next) return { kind: 'ok', ids: [...ids] };
+    if (seen.has(next) || next === cursor) return { kind: 'error', status: 400, body: { error: 'invalid_cursor' } };
+    seen.add(next);
+    cursor = next;
   }
+  return { kind: 'too_many' };
 }
 
 export const TOO_MANY_TEXT = `${BULK_MAX} 件までです。絞り込んでください。`;

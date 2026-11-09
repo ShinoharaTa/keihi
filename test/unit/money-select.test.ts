@@ -16,8 +16,12 @@ import {
   collectFiltered,
   emptySelection,
   escAction,
+  FILTERED_MAX_PAGES,
+  ignoreKey,
+  keepVisible,
   LONG_PRESS_MS,
   longPress,
+  pressStarts,
   rangeSel,
   revertFailText,
   revertNotice,
@@ -120,6 +124,29 @@ describe('選択の純関数（selection.ts）', () => {
     assert.equal(rowAction({ wide: true, selecting: true, via: 'long' }), null, 'PC は長押しを使わない');
   });
 
+  test('読み直した後は見えている行だけに絞る（anchor も）。落ちなければ同じもの', () => {
+    const s = sel(['A', 'B', 'Q'], 'Q');
+    const k = keepVisible(s, ORDER);
+    assert.deepEqual(ids(k), ['A', 'B']);
+    assert.equal(k.anchor, null);
+    assert.equal(keepVisible(sel(['A'], 'A'), ORDER).anchor, 'A');
+    const same = sel(['A', 'C'], 'C');
+    assert.equal(keepVisible(same, ORDER), same);
+  });
+
+  test('長押しは主のポインタの主ボタンだけ。Esc は IME の変換中・入力欄では拾わない（チェックは拾う）', () => {
+    assert.equal(pressStarts({ isPrimary: true, button: 0 }), true);
+    assert.equal(pressStarts({ isPrimary: false, button: 0 }), false, '2 本目の指');
+    assert.equal(pressStarts({ isPrimary: true, button: 2 }), false, '右クリック');
+    assert.equal(ignoreKey({ isComposing: true, target: null }), true);
+    assert.equal(ignoreKey({ isComposing: false, target: { tagName: 'INPUT', type: 'search' } }), true);
+    assert.equal(ignoreKey({ isComposing: false, target: { tagName: 'TEXTAREA' } }), true);
+    assert.equal(ignoreKey({ isComposing: false, target: { tagName: 'SELECT' } }), true);
+    assert.equal(ignoreKey({ isComposing: false, target: { tagName: 'INPUT', type: 'checkbox' } }), false);
+    assert.equal(ignoreKey({ isComposing: false, target: { tagName: 'BUTTON' } }), false);
+    assert.equal(ignoreKey({ isComposing: false, target: null }), false);
+  });
+
   test('Esc: カテゴリの一覧 → 選択の解除。シートを開いている間はシートに任せる', () => {
     assert.equal(escAction({ key: 'Escape', sheetOpen: false, pickerOpen: true, selecting: true }), 'picker');
     assert.equal(escAction({ key: 'Escape', sheetOpen: false, pickerOpen: false, selecting: true }), 'clear');
@@ -175,6 +202,26 @@ describe('選択の純関数（selection.ts）', () => {
     assert.equal(TOO_MANY_TEXT, '500 件までです。絞り込んでください。');
     const fail = await collectFiltered(async () => ({ ok: false as const, status: 0, body: null }));
     assert.deepEqual(fail, { kind: 'error', status: 0, body: null });
+  });
+
+  test('絞り込み結果をすべて選択: 読むページ数に上限、同じ cursor が返ってきたら止める', async () => {
+    assert.equal(FILTERED_MAX_PAGES, 6);
+    let calls = 0;
+    // 1 ページ 10 件で続きが終わらない（上限で止め、500 件以内と言えないので選ばない）
+    const endless = await collectFiltered(async (c) => {
+      calls++;
+      const i = c === null ? 0 : Number(c);
+      return { ok: true as const, data: { items: Array.from({ length: 10 }, (_, k) => txn({ id: `E${i * 10 + k}` })), next_cursor: String(i + 1) } };
+    });
+    assert.deepEqual(endless, { kind: 'too_many' });
+    assert.equal(calls, FILTERED_MAX_PAGES);
+    calls = 0;
+    const stuck = await collectFiltered(async () => {
+      calls++;
+      return { ok: true as const, data: { items: [txn({ id: `S${calls}` })], next_cursor: 'C1' } };
+    });
+    assert.deepEqual(stuck, { kind: 'error', status: 400, body: { error: 'invalid_cursor' } });
+    assert.equal(calls, 2, '同じ cursor が 2 回目に返った所で止める');
   });
 
   test('一括の本文・結果の文（作ったルールだけ「消す」）・取り消しの結果と 409 の文', () => {

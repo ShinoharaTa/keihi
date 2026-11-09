@@ -69,9 +69,12 @@ import {
   emptySelection,
   escAction,
   FILTERED_PAGE,
+  ignoreKey,
+  keepVisible,
   longPress,
   NOTICE_MS,
   plainNotice,
+  pressStarts,
   rangeSel,
   revertFailText,
   revertNotice,
@@ -236,7 +239,7 @@ function TxnRow({
         type="button"
         class="m-txn-main"
         onClick={() => onOpen(t)}
-        onPointerDown={press ? (e) => press.down(t.id, e.clientX, e.clientY) : undefined}
+        onPointerDown={press ? (e) => pressStarts(e) && press.down(t.id, e.clientX, e.clientY) : undefined}
         onPointerMove={press ? (e) => press.move(e.clientX, e.clientY) : undefined}
         onPointerUp={press?.up}
         onPointerCancel={press?.up}
@@ -587,6 +590,7 @@ export function Txns({
       setMsg('');
       setItems((cur) => (after && cur ? [...cur, ...r.data.items] : r.data.items));
       setCursor(r.data.next_cursor);
+      return r.data.items;
     },
     [today],
   );
@@ -728,6 +732,12 @@ export function Txns({
   };
   const pressRef = useRef<ReturnType<typeof longPress> | null>(null);
   const press = (pressRef.current ??= longPress((id) => onLong.current(id)));
+  useEffect(() => () => press.up(), []); // 離れたら長押しのタイマーを止める
+  // 一括の後に 1 ページ目から読み直し、選択を見えている行だけに絞る（絞り込みを変えたら選択を捨てるのと揃える）。
+  const reload = async () => {
+    const xs = await load(filter, null);
+    if (xs) setSel((s) => keepVisible(s, xs.map((t) => t.id)));
+  };
   const onRow = (t: Txn) => {
     if (!wide && press.consumeClick()) return; // 長押しの後に来る click
     act(t, rowAction({ wide, selecting, via: 'tap' }));
@@ -736,6 +746,7 @@ export function Txns({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (ignoreKey(e)) return;
       const a = escAction({ key: e.key, sheetOpen: open !== null, pickerOpen: picker, selecting });
       if (a === 'picker') setPicker(false);
       else if (a === 'clear') endSelect();
@@ -766,7 +777,7 @@ export function Txns({
 
   // 一括（tag だけか category だけ）。確定前の確認は出さない。選択はそのまま残す（続けてカテゴリも変えられる）。
   const runBulk = async (change: BulkChange) => {
-    if (bulkBusy || sel.ids.size === 0) return;
+    if (bulkBusy || collecting || sel.ids.size === 0) return;
     setPicker(false);
     if (sel.ids.size > BULK_MAX) return setNotice(plainNotice(TOO_MANY_TEXT));
     setBulkBusy(true);
@@ -779,7 +790,7 @@ export function Txns({
     setNotice(n);
     if (n.undo) setLastBatch(n.undo);
     // ルールを学んだら同じ摘要の他の行も変わりうるので読み直す。それ以外は応答の effective で行だけ差し替える。
-    if (res.learned_rules.length > 0) void load(filter, null);
+    if (res.learned_rules.length > 0) void reload();
     else setItems((cur) => (cur ? applyEffective(cur, res.effective) : cur));
   };
 
@@ -792,11 +803,12 @@ export function Txns({
     if (r.status === 200) {
       setLastBatch((b) => (b === batchId ? null : b));
       setNotice(revertNotice(r.body as RevertResult));
-      void load(filter, null);
+      void reload();
       return;
     }
     const known = revertFailText(r.status, r.body);
-    if (known) setLastBatch((b) => (b === batchId ? null : b));
+    // 409（戻せない・戻してある）と 404（無い一括）はもう戻せないので「直前の一括を元に戻す」を消す。
+    if (known || r.status === 404) setLastBatch((b) => (b === batchId ? null : b));
     setNotice(plainNotice(known ?? failText(r.status, r.body)));
   };
 
@@ -812,7 +824,7 @@ export function Txns({
     }
     setBulkBusy(false);
     setNotice(plainNotice(fail ? `ルールを消せませんでした。${fail}` : `ルールを ${done} 件消しました`));
-    void load(filter, null);
+    void reload();
   };
 
   const dock = sel.ids.size > 0 || notice !== null;
@@ -880,7 +892,7 @@ export function Txns({
         <div class="m-dock">
           {notice && <BulkNoticeBand wide={wide} notice={notice} busy={bulkBusy} onUndo={(id) => void revert(id)} onDeleteRules={(ids) => void deleteRules(ids)} />}
           {sel.ids.size > 0 && (
-            <BulkBar wide={wide} count={sel.ids.size} busy={bulkBusy} picker={picker} onTag={(tag) => void runBulk({ tag })} onPicker={setPicker} onClear={endSelect}>
+            <BulkBar wide={wide} count={sel.ids.size} busy={bulkBusy || collecting} picker={picker} onTag={(tag) => void runBulk({ tag })} onPicker={setPicker} onClear={endSelect}>
               {picker && wide && <CategoryPicker wide count={sel.ids.size} cats={cats} onPick={(category) => void runBulk({ category })} onClose={() => setPicker(false)} />}
             </BulkBar>
           )}
