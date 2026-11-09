@@ -2,7 +2,7 @@
 // 期間（月 / 四半期 1〜3・4〜6・7〜9・10〜12 月 / 暦年）に束ね、合計・推移の棒・クロス表・ドリルダウンの URL を作る。
 // 期間は最初の月（YYYY-MM）で表す。読んだ範囲に無い月がある期間（範囲の端・今日より先）はラベルに「（一部）」。
 // タグの絞り込みは by_tag_category から（月次集計にタグの引数は無い）。口座は月次集計に口座の引数が無く by_account からは作れないので出さない。
-// クロス表はタグで列を分けるので、タグの絞り込みは合計と推移にだけ効く。
+// クロス表はタグで列を分けるので、タグの絞り込みは合計と推移にだけ効く。件数は向き（side）に合ったほう（income_count / expense_count）を使う。
 import { addMonth, periodRange, TAG_ORDER, TXN_PAGE, UNCATEGORIZED_QUERY, type MonthlySummary, type Tag, type TxnFilter } from '../model.ts';
 import { categoryRank } from './colors.ts';
 
@@ -63,14 +63,16 @@ export const summaryUrl = (r: { from: string; to: string }) => `/api/summary/mon
 
 // ---- 期間に束ねる ----
 
-export type Cell = { income: number; expense: number; count: number };
+export type Cell = { income: number; expense: number; income_count: number; expense_count: number };
+const countKey = (side: Side) => (side === 'income' ? 'income_count' : 'expense_count');
 export type Row = { tag: Tag; category: string | null } & Cell;
 export type Slice = { start: string; label: string; partial: boolean; rows: Row[] };
-const zero = (): Cell => ({ income: 0, expense: 0, count: 0 });
+const zero = (): Cell => ({ income: 0, expense: 0, income_count: 0, expense_count: 0 });
 const addTo = (a: Cell, b: Cell) => {
   a.income += b.income;
   a.expense += b.expense;
-  a.count += b.count;
+  a.income_count += b.income_count;
+  a.expense_count += b.expense_count;
 };
 const rowOrder = (a: Row, b: Row) => TAG_ORDER.indexOf(a.tag) - TAG_ORDER.indexOf(b.tag) || categoryRank(a.category) - categoryRank(b.category);
 
@@ -100,7 +102,7 @@ export function slice(ms: readonly MonthlySummary[], span: Span, start: string):
 const byTag = (rows: readonly Row[], tag: '' | Tag) => (tag === '' ? rows : rows.filter((r) => r.tag === tag));
 
 export type Totals = Cell & { net: number };
-// 合計（収入・支出・差額・件数）。tag は絞り込み（'' は全部）。
+// 合計（収入・支出・差額・入金と出金の件数）。tag は絞り込み（'' は全部）。
 export function totals(rows: readonly Row[], tag: '' | Tag = ''): Totals {
   const t = zero();
   for (const r of byTag(rows, tag)) addTo(t, r);
@@ -109,16 +111,20 @@ export function totals(rows: readonly Row[], tag: '' | Tag = ''): Totals {
 
 // ---- 推移 ----
 
-export type TrendBar = { start: string; label: string; short: string; yearMark: string | null; partial: boolean; amount: number; segs: { category: string | null; amount: number }[] };
+export type TrendBar = { start: string; label: string; short: string; yearMark: string | null; partial: boolean; amount: number; count: number; segs: { category: string | null; amount: number }[] };
 // 期間ごとのカテゴリの積み上げ（side の金額。下から固定順、未分類が上）。
 export function trend(ms: readonly MonthlySummary[], span: Span, base: string, side: Side, tag: '' | Tag = ''): TrendBar[] {
   return trendStarts(span, base).map((start, i) => {
     const s = slice(ms, span, start);
     const cats = new Map<string | null, number>();
-    for (const r of byTag(s.rows, tag)) if (r[side] > 0) cats.set(r.category, (cats.get(r.category) ?? 0) + r[side]);
+    let count = 0;
+    for (const r of byTag(s.rows, tag)) {
+      count += r[countKey(side)];
+      if (r[side] > 0) cats.set(r.category, (cats.get(r.category) ?? 0) + r[side]);
+    }
     const segs = [...cats].sort(([a], [b]) => categoryRank(a) - categoryRank(b)).map(([category, amount]) => ({ category, amount }));
     const yearMark = span !== 'year' && (i === 0 || monOf(start) === 1) ? String(yearOf(start)) : null;
-    return { start, label: s.label, short: periodShort(span, start), yearMark, partial: s.partial, amount: segs.reduce((a, x) => a + x.amount, 0), segs };
+    return { start, label: s.label, short: periodShort(span, start), yearMark, partial: s.partial, amount: segs.reduce((a, x) => a + x.amount, 0), count, segs };
   });
 }
 
@@ -133,7 +139,7 @@ export type CrossRow = { category: string | null; cells: CrossCells };
 export type Cross = { rows: CrossRow[]; total: CrossCells };
 const emptyCells = (): CrossCells => ({ all: { amount: 0, count: 0 }, business: { amount: 0, count: 0 }, private: { amount: 0, count: 0 }, unset: { amount: 0, count: 0 } });
 
-// 行 = カテゴリ（固定順 + 未分類最後。side の金額がある行だけ）、列 = 事業 / 私用 / 未設定 / 計。セルは side の金額と件数（件数は入金 + 出金）。
+// 行 = カテゴリ（固定順 + 未分類最後。side の金額がある行だけ）、列 = 事業 / 私用 / 未設定 / 計。セルは side の金額と件数。
 export function crossTable(rows: readonly Row[], side: Side): Cross {
   const m = new Map<string | null, CrossCells>();
   const total = emptyCells();
@@ -143,9 +149,9 @@ export function crossTable(rows: readonly Row[], side: Side): Cross {
     if (!c) m.set(r.category, (c = emptyCells()));
     for (const col of ['all', r.tag] as const) {
       c[col].amount += r[side];
-      c[col].count += r.count;
+      c[col].count += r[countKey(side)];
       total[col].amount += r[side];
-      total[col].count += r.count;
+      total[col].count += r[countKey(side)];
     }
   }
   return { rows: [...m].sort(([a], [b]) => categoryRank(a) - categoryRank(b)).map(([category, cells]) => ({ category, cells })), total };
@@ -184,7 +190,7 @@ export function pickCell(rows: readonly Row[], p: Pick, side: Side): CrossCell {
     if (p.tag && r.tag !== p.tag) continue;
     if (p.category !== undefined && r.category !== p.category) continue;
     amount += r[side];
-    count += r.count;
+    count += r[countKey(side)];
   }
   return { amount, count };
 }

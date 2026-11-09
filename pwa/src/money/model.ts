@@ -3,6 +3,8 @@
 export type Tag = 'business' | 'private' | 'unset';
 export type TransferKind = 'transfer' | 'card_settlement' | 'charge';
 export type Amounts = { income: number; expense: number };
+// 入金・出金それぞれの件数（月次集計）。
+export type Counts = { income_count: number; expense_count: number };
 export type CategoryItem = { id: string; label: string };
 export type Categories = { items: CategoryItem[]; uncategorized_label: string };
 
@@ -32,11 +34,11 @@ export type TxnPage = { items: Txn[]; next_cursor: string | null };
 export type MonthlySummary = {
   month: string;
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
-  // count（入金 + 出金の件数）と by_tag_category は分析の画面のため（#74。古いサーバーには無い）。
-  by_category: ({ category: string | null; count?: number } & Amounts)[];
-  by_tag: ({ tag: Tag; count?: number } & Amounts)[];
-  by_tag_category?: ({ tag: Tag; category: string | null; count: number } & Amounts)[];
-  total: Amounts & { net: number; count?: number };
+  // 件数（income_count・expense_count）と by_tag_category は分析の画面のため（#74。古いサーバーには無い）。
+  by_category: ({ category: string | null } & Amounts & Partial<Counts>)[];
+  by_tag: ({ tag: Tag } & Amounts & Partial<Counts>)[];
+  by_tag_category?: ({ tag: Tag; category: string | null } & Amounts & Counts)[];
+  total: Amounts & { net: number } & Partial<Counts>;
   excluded: ({ kind: TransferKind; count: number } & Amounts)[];
 };
 

@@ -44,11 +44,12 @@ const cats: Categories = {
   uncategorized_label: '未分類',
 };
 
-type R = [Tag, string | null, number, number, number]; // tag, category, income, expense, count
+type R = [Tag, string | null, number, number, number, number]; // tag, category, income, expense, income_count, expense_count
 // by_tag_category から by_category・by_tag・total も作る（サーバーと同じ等式が成り立つ形）。
 function summary(month: string, rs: R[]): MonthlySummary {
-  const rows = rs.map(([tag, category, income, expense, count]) => ({ tag, category, income, expense, count }));
-  const sum = (xs: typeof rows) => xs.reduce((a, x) => ({ income: a.income + x.income, expense: a.expense + x.expense, count: a.count + x.count }), { income: 0, expense: 0, count: 0 });
+  const rows = rs.map(([tag, category, income, expense, income_count, expense_count]) => ({ tag, category, income, expense, income_count, expense_count }));
+  const sum = (xs: typeof rows) =>
+    xs.reduce((a, x) => ({ income: a.income + x.income, expense: a.expense + x.expense, income_count: a.income_count + x.income_count, expense_count: a.expense_count + x.expense_count }), { income: 0, expense: 0, income_count: 0, expense_count: 0 });
   const catsIn = [...new Set(rows.map((r) => r.category))].sort((a, b) => categoryRank(a) - categoryRank(b));
   const t = sum(rows);
   return {
@@ -64,15 +65,15 @@ function summary(month: string, rs: R[]): MonthlySummary {
 
 // 2025-12〜2026-11 の 12 か月。毎月同じ形で、11 月だけ多い。
 const base: R[] = [
-  ['business', 'telecom', 0, 2000, 1],
-  ['business', null, 300000, 10000, 2],
-  ['private', 'food', 0, 40000, 12],
-  ['private', 'daily', 0, 8000, 3],
-  ['private', null, 0, 5000, 2],
-  ['unset', 'food', 0, 3000, 1],
-  ['unset', null, 0, 1000, 1],
+  ['business', 'telecom', 0, 2000, 0, 1],
+  ['business', null, 300000, 10000, 1, 1],
+  ['private', 'food', 0, 40000, 0, 12],
+  ['private', 'daily', 0, 8000, 0, 3],
+  ['private', null, 0, 5000, 0, 2],
+  ['unset', 'food', 0, 3000, 0, 1],
+  ['unset', null, 0, 1000, 0, 1],
 ];
-const nov: R[] = [...base, ['private', 'tax', 0, 98000, 1], ['private', 'food', 1000, 2000, 2]];
+const nov: R[] = [...base, ['private', 'tax', 0, 98000, 0, 1], ['private', 'food', 1000, 2000, 1, 1]];
 const months12 = Array.from({ length: 12 }, (_, i) => addMonth('2025-12', i));
 const ms: MonthlySummary[] = months12.map((m) => summary(m, m === '2026-11' ? nov : base));
 
@@ -120,7 +121,7 @@ describe('分析の純関数（aggregate.ts）', () => {
     ]);
     const q = slice(ms, 'quarter', '2026-07');
     assert.equal(q.partial, false);
-    assert.deepEqual(q.rows.find((r) => r.tag === 'private' && r.category === 'food'), { tag: 'private', category: 'food', income: 0, expense: 120000, count: 36 });
+    assert.deepEqual(q.rows.find((r) => r.tag === 'private' && r.category === 'food'), { tag: 'private', category: 'food', income: 0, expense: 120000, income_count: 0, expense_count: 36 });
     // 10〜12 月は 12 月が無い。2025 年は 12 月だけ。
     assert.equal(slice(ms, 'quarter', '2026-10').label, '2026 年 10〜12 月（一部）');
     assert.equal(slice(ms, 'year', '2025-01').label, '2025 年（一部）');
@@ -133,11 +134,11 @@ describe('分析の純関数（aggregate.ts）', () => {
 
   test('合計（収入・支出・差額・件数）とタグの絞り込み', () => {
     const s = slice(ms, 'month', '2026-11');
-    assert.deepEqual(totals(s.rows), { income: 301000, expense: 169000, count: 25, net: 132000 });
-    assert.deepEqual(totals(s.rows, 'business'), { income: 300000, expense: 12000, count: 3, net: 288000 });
+    assert.deepEqual(totals(s.rows), { income: 301000, expense: 169000, income_count: 2, expense_count: 23, net: 132000 });
+    assert.deepEqual(totals(s.rows, 'business'), { income: 300000, expense: 12000, income_count: 1, expense_count: 2, net: 288000 });
     // 月次集計の total と一致
     const t = ms.at(-1)!.total;
-    assert.deepEqual(totals(s.rows), { income: t.income, expense: t.expense, count: t.count, net: t.net });
+    assert.deepEqual(totals(s.rows), { income: t.income, expense: t.expense, income_count: t.income_count, expense_count: t.expense_count, net: t.net });
   });
 
   test('推移の棒: 期間ごとのカテゴリの積み上げ（向き・タグに従う）', () => {
@@ -147,6 +148,8 @@ describe('分析の純関数（aggregate.ts）', () => {
     const last = bars.at(-1)!;
     assert.deepEqual(last.segs.map((s) => s.category), ['food', 'daily', 'telecom', 'tax', null]);
     assert.equal(last.amount, 169000);
+    assert.equal(last.count, 23, '件数は向きに合ったほう（出金の件数）');
+    assert.equal(trend(ms, 'month', '2026-11', 'income').at(-1)!.count, 2);
     assert.equal(last.segs.find((s) => s.category === 'food')!.amount, 45000);
     assert.deepEqual([bars[0]!.yearMark, bars[1]!.yearMark, bars[2]!.yearMark], ['2025', '2026', null]);
     assert.deepEqual(trend(ms, 'month', '2026-11', 'income').at(-1)!.segs, [{ category: 'food', amount: 1000 }, { category: null, amount: 300000 }]);
@@ -172,9 +175,11 @@ describe('分析の純関数（aggregate.ts）', () => {
       assert.equal(c.total[k].count, c.rows.reduce((a, r) => a + r.cells[k].count, 0), k);
     }
     assert.equal(c.total.all.amount, totals(s.rows).expense);
-    assert.deepEqual(c.rows[0]!.cells, { all: { amount: 45000, count: 15 }, business: { amount: 0, count: 0 }, private: { amount: 42000, count: 14 }, unset: { amount: 3000, count: 1 } });
+    assert.deepEqual(c.rows[0]!.cells, { all: { amount: 45000, count: 14 }, business: { amount: 0, count: 0 }, private: { amount: 42000, count: 13 }, unset: { amount: 3000, count: 1 } });
     // 収入の向き: 収入のある行だけ
-    assert.deepEqual(crossTable(s.rows, 'income').rows.map((r) => r.category), ['food', null]);
+    const inc = crossTable(s.rows, 'income');
+    assert.deepEqual(inc.rows.map((r) => r.category), ['food', null]);
+    assert.deepEqual(inc.total.all, { amount: 301000, count: 2 }, '収入の向きは入金の件数');
   });
 
   test('ドリルダウン: 一覧の URL（excluded=0・未分類は none）、セルの値、明細で開くときの絞り込み', () => {
@@ -182,7 +187,7 @@ describe('分析の純関数（aggregate.ts）', () => {
     assert.equal(drillUrl('quarter', { start: '2026-01', category: null }, 'income', 'CUR'), '/api/bank_txns?from=2026-01-01&to=2026-03-31&side=income&excluded=0&limit=50&category=none&cursor=CUR');
     assert.equal(drillUrl('year', { start: '2024-01' }, 'expense', null), '/api/bank_txns?from=2024-01-01&to=2024-12-31&side=expense&excluded=0&limit=50');
     const s = slice(ms, 'month', '2026-11');
-    assert.deepEqual(pickCell(s.rows, { start: '2026-11', category: 'food' }, 'expense'), { amount: 45000, count: 15 });
+    assert.deepEqual(pickCell(s.rows, { start: '2026-11', category: 'food' }, 'expense'), { amount: 45000, count: 14 });
     assert.deepEqual(pickCell(s.rows, { start: '2026-11', tag: 'unset' }, 'expense'), { amount: 4000, count: 2 });
     const m = txnsFilter('month', { start: '2026-11', category: null, tag: 'business' }, 'expense');
     assert.deepEqual(m, { period: 'month', month: '2026-11', tag: 'business', category: 'none', side: 'expense', excluded: '0', pillLabel: '分析 · 支出' });
@@ -251,7 +256,7 @@ describe('SSR スナップショット（分析）', () => {
       assert.deepEqual(cellsOf(phone), want, `${COL_LABELS[col]}の列`);
       assert.ok(want.length > 0);
     }
-    assert.ok(pc.includes('>45,000<') && pc.includes('>15 件<'));
+    assert.ok(pc.includes('>45,000<') && pc.includes('>14 件<'));
     t.assert.snapshot(lines([pc, ...phones].join('\n')));
   });
 
@@ -295,7 +300,7 @@ describe('SSR スナップショット（分析）', () => {
     const phone = html(m.AnalysisView!, { ...props, wide: false });
     const pc = html(m.AnalysisView!, { ...props, wide: true });
     for (const out of [phone, pc]) {
-      for (const v of ['>301,000<', '>169,000<', '>132,000<', '>25 件<', '>−1,200<', '>−800<', '>42,000<', '集計 14 件', '明細で開く', 'もっと見る', '2026 年 11 月 · 食費 · 私用 · 支出']) assert.ok(out.includes(v), v);
+      for (const v of ['>301,000<', '>169,000<', '>132,000<', '支出 23 件', '>−1,200<', '>−800<', '>42,000<', '集計 13 件', '明細で開く', 'もっと見る', '2026 年 11 月 · 食費 · 私用 · 支出']) assert.ok(out.includes(v), v);
       assert.equal((out.match(/role="button"/g) ?? []).length, 12, '推移の棒 12 本が押せる');
     }
     assert.match(pc, /class="m-an-cols"/);

@@ -78,13 +78,15 @@ export function FilterControls({ side, tag, onSide, onTag }: { side: Side; tag: 
 // 絞り込みのボタンの文言（スマホの帯）。
 export const filterText = (side: Side, tag: '' | Tag) => `${SIDE_LABELS[side]}${tag ? ` · ${TAG_LABELS[tag]}` : ''}`;
 
-// 合計（収入・支出・差額・件数）。
-export function TotalsCard({ t, label }: { t: Totals; label: string }) {
+// 合計（収入・支出・差額と、向きに合ったほうの件数）。
+export function TotalsCard({ t, side, label }: { t: Totals; side: Side; label: string }) {
   return (
     <section class="m-col" aria-label={`${label}の合計`}>
       <div class="m-row">
         <h2 class="m-h2">合計</h2>
-        <span class="m-sub">{count(t.count)}</span>
+        <span class="m-sub">
+          {SIDE_LABELS[side]} {count(side === 'income' ? t.income_count : t.expense_count)}
+        </span>
       </div>
       <div class="m-tiles3">
         <div class="m-tile3">
@@ -167,7 +169,7 @@ export function TrendChart({
           fill="transparent"
           tabindex={0}
           role="button"
-          aria-label={`${b.label} ${SIDE_LABELS[side]} ${yen(b.amount)} 円。明細を見る`}
+          aria-label={`${b.label} ${SIDE_LABELS[side]} ${yen(b.amount)} 円 ${count(b.count)}。明細を見る`}
           aria-pressed={b.start === selected}
           onClick={() => onPick(b.start)}
           onKeyDown={(e) => {
@@ -488,7 +490,7 @@ export function AnalysisView(p: AnalysisProps) {
   const barSel = p.pick && p.pick.category === undefined && p.pick.tag === (p.tag || undefined) ? p.pick.start : null;
   const center = p.view ? (
     <>
-      <TotalsCard t={p.view.totals} label={p.label} />
+      <TotalsCard t={p.view.totals} side={p.side} label={p.label} />
       <TrendChart bars={p.view.bars} side={p.side} cats={p.cats} selected={barSel} wide={p.wide} onPick={p.onBar} />
       <CrossTable cross={p.view.cross} start={p.start} side={p.side} cats={p.cats} col={p.col} selected={p.pick} wide={p.wide} onCol={p.onCol} onPick={p.onPick} />
     </>

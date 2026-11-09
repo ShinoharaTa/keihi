@@ -6,7 +6,7 @@
 //   excluded（0 = 振替の除外を外す / 1 = 除外だけ）と receipt（match.ts の receipt）も同じく JS 側で絞る。vendor_key は
 //   description_norm の完全一致（SQL）。各行に receipt・receipt_hint・mail_hint（match.ts の createReceiptResolver）を付ける。
 // - 月次: その月の active = 1 の口座の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
-//   by_category・by_tag・total に件数（count）、by_tag_category にタグ × カテゴリの組（分析の画面。#74）。どれも同じ 1 回のループで数える。
+//   by_category・by_tag・total に入金・出金ごとの件数（income_count・expense_count）、by_tag_category にタグ × カテゴリの組（分析の画面。#74）。どれも同じ 1 回のループで数える。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
 // - 除く明細は有効な組（listActiveTransfers）の両側。transfers.ts の excludedFromCashflow と同じ集合を、kind 付きで 1 回で読む。
@@ -236,8 +236,8 @@ export function listTxns(db: Db, q: TxnQuery, opts: { matchWindows?: MatchWindow
 // ---- 月次の集計 ----
 
 export type Amounts = { income: number; expense: number };
-// count は入金 + 出金の件数。
-type Counted = Amounts & { count: number };
+// 入金・出金それぞれの件数。
+type Counted = Amounts & { income_count: number; expense_count: number };
 export type MonthlySummary = {
   month: string;
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
@@ -284,9 +284,10 @@ const add = (a: Amounts, side: TxnSide, amount: number) => {
 };
 const addCounted = (a: Counted, side: TxnSide, amount: number) => {
   add(a, side, amount);
-  a.count++;
+  if (side === 'income') a.income_count++;
+  else a.expense_count++;
 };
-const zero = (): Counted => ({ income: 0, expense: 0, count: 0 });
+const zero = (): Counted => ({ income: 0, expense: 0, income_count: 0, expense_count: 0 });
 
 type AccountInfo = { order: number; includeInCashflow: boolean; active: boolean };
 
