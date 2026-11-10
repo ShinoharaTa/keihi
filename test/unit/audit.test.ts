@@ -107,11 +107,17 @@ describe('verify', () => {
 test('並行 append（2 プロセス）で seq が欠番・重複しない', async () => {
   const { db, file } = fresh();
   db.close();
+  // append の後に 20ms 譲る（#77）。続けざまに BEGIN IMMEDIATE すると、相手は busy_timeout の間
+  // ロックを見に来る隙が無く、負荷が高いと 5 秒待って database is locked になる（交互に書かせたいので間を空ける）。
   const script = `
     import { openDb } from ${JSON.stringify(DB_TS)};
     import { appendAudit } from ${JSON.stringify(AUDIT_TS)};
     const db = openDb(process.argv[1]);
-    for (let i = 0; i < 200; i++) appendAudit(db, { actor: process.argv[2], action: 'x', entity: 'e', payload: { i } });
+    const gap = new Int32Array(new SharedArrayBuffer(4));
+    for (let i = 0; i < 200; i++) {
+      appendAudit(db, { actor: process.argv[2], action: 'x', entity: 'e', payload: { i } });
+      Atomics.wait(gap, 0, 0, 20);
+    }
     db.close();`;
   const rs = await Promise.all(['web', 'worker'].map((who) => run(process.execPath, ['--input-type=module', '-e', script, file, who])));
   for (const r of rs) assert.equal(r.code, 0, r.out);
