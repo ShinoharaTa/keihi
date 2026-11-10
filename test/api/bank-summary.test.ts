@@ -108,6 +108,7 @@ type Summary = {
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
   by_category: ({ category: string | null } & Amounts)[];
   by_tag: ({ tag: string } & Amounts)[];
+  by_tag_category: ({ tag: string; category: string | null; income_count: number; expense_count: number } & Amounts)[];
   total: Amounts & { net: number };
   excluded: ({ kind: string; count: number } & Amounts)[];
 };
@@ -132,7 +133,7 @@ describe('GET /api/summary/monthly', () => {
     const exp = (ts: BankTxnRow[], side: string) => ts.filter((t) => t.side === side).reduce((n, t) => n + t.amount, 0);
     const want = { income: exp(counted, 'income'), expense: exp(counted, 'expense') };
     assert.equal(s.month, '2026-10');
-    assert.deepEqual(s.total, { ...want, net: want.income - want.expense });
+    assert.deepEqual(s.total, { ...want, income_count: counted.filter((t) => t.side === 'income').length, expense_count: counted.filter((t) => t.side === 'expense').length, net: want.income - want.expense });
     assert.ok(want.expense > 0 && want.income > 0);
     // 口座別・カテゴリ別・タグ別の合計 = total。
     assert.deepEqual(sum(s.by_account), want);
@@ -153,7 +154,7 @@ describe('GET /api/summary/monthly', () => {
     assertBalanced(s, fx.txns);
     // カテゴリ: 人が付けた food / transport が出て、未分類（null）は最後。
     const cat = new Map(s.by_category.map((c) => [c.category, c]));
-    assert.deepEqual(cat.get('food'), { category: 'food', ...sum(fx.food.map((id) => { const t = fx.txns.find((x) => x.id === id)!; return { income: t.side === 'income' ? t.amount : 0, expense: t.side === 'expense' ? t.amount : 0 }; })) });
+    assert.deepEqual(cat.get('food'), { category: 'food', ...sum(fx.food.map((id) => { const t = fx.txns.find((x) => x.id === id)!; return { income: t.side === 'income' ? t.amount : 0, expense: t.side === 'expense' ? t.amount : 0 }; })), income_count: fx.food.filter((id) => fx.txns.find((x) => x.id === id)!.side === 'income').length, expense_count: fx.food.filter((id) => fx.txns.find((x) => x.id === id)!.side === 'expense').length });
     assert.ok(cat.has('transport'));
     assert.equal(s.by_category.at(-1)!.category, null);
     assert.deepEqual(s.by_category.map((c) => c.category), ['food', 'transport', null]);
@@ -168,7 +169,7 @@ describe('GET /api/summary/monthly', () => {
     for (const m of months) assertBalanced(m, ts);
     assert.deepEqual(months[1]!.excluded[0], { kind: 'transfer', count: 3, income: 50000, expense: 50000 + 77777 });
     assert.deepEqual(months[2]!.excluded[0], { kind: 'transfer', count: 1, income: 77777, expense: 0 });
-    assert.deepEqual(months[2]!.total, { income: 0, expense: 0, net: 0 });
+    assert.deepEqual(months[2]!.total, { income: 0, expense: 0, income_count: 0, expense_count: 0, net: 0 });
   });
 
   test('by_account に include_in_cashflow と active が出る', async () => {
@@ -193,10 +194,50 @@ describe('GET /api/summary/monthly', () => {
     const r = await getJson<{ months: Summary[] }>('/api/summary/monthly?from=2026-09&to=2026-11');
     assert.deepEqual(r.months.map((m) => m.month), ['2026-09', '2026-10', '2026-11']);
     assert.deepEqual(r.months[1], await getJson<Summary>('/api/summary/monthly?month=2026-10'));
-    assert.deepEqual(r.months[2]!.total, { income: 0, expense: 0, net: 0 });
+    assert.deepEqual(r.months[2]!.total, { income: 0, expense: 0, income_count: 0, expense_count: 0, net: 0 });
     assert.deepEqual(r.months[2]!.by_account, []);
     const all = await getJson<{ months: Summary[] }>('/api/summary/monthly?from=2024-01&to=2026-12');
     assert.equal(all.months.length, 36);
+  });
+
+  test('by_tag_category: 各月で合計 = total、tag ごと = by_tag、category ごと = by_category（金額と入金・出金の件数）。並びは tag → カテゴリの固定順 → 未分類', async () => {
+    type C = Amounts & { income_count: number; expense_count: number };
+    const sumC = (xs: C[]) =>
+      xs.reduce((s, x) => ({ income: s.income + x.income, expense: s.expense + x.expense, income_count: s.income_count + x.income_count, expense_count: s.expense_count + x.expense_count }), { income: 0, expense: 0, income_count: 0, expense_count: 0 });
+    const pick = (x: C) => ({ income: x.income, expense: x.expense, income_count: x.income_count, expense_count: x.expense_count });
+    const { months } = await getJson<{ months: (Summary & { by_category: C[]; by_tag: C[]; total: C })[] }>('/api/summary/monthly?from=2026-09&to=2026-11');
+    for (const m of months) {
+      assert.deepEqual(sumC(m.by_tag_category), pick(m.total), m.month);
+      for (const t of m.by_tag) assert.deepEqual(sumC(m.by_tag_category.filter((x) => x.tag === t.tag)), pick(t), `${m.month} ${t.tag}`);
+      for (const c of m.by_category) assert.deepEqual(sumC(m.by_tag_category.filter((x) => x.category === c.category)), pick(c), `${m.month} ${c.category}`);
+      for (const x of m.by_tag_category) assert.ok(x.income_count + x.expense_count > 0);
+    }
+    // total の件数 = 除外を除いた明細の入金・出金の件数
+    const ex = new Set([fx.transferOut, fx.transferIn, fx.settlement]);
+    const counted = fx.txns.filter((t) => t.txn_date.startsWith('2026-10') && !ex.has(t.id));
+    const oct = months[1]!;
+    assert.equal(oct.total.income_count, counted.filter((t) => t.side === 'income').length);
+    assert.equal(oct.total.expense_count, counted.filter((t) => t.side === 'expense').length);
+    assert.ok(oct.total.income_count > 0 && oct.total.expense_count > 0);
+    assert.deepEqual(
+      oct.by_tag_category.map((x) => [x.tag, x.category]),
+      [['business', 'transport'], ['business', null], ['private', 'food'], ['private', null]],
+    );
+    assert.deepEqual(months[2]!.by_tag_category, []);
+  });
+
+  test('一覧（from・to・tag・category・side・excluded=0）の合計と件数 = by_tag_category のセルの金額と件数（向きごと）', async () => {
+    const s = await getJson<Summary>('/api/summary/monthly?month=2026-10');
+    for (const cell of s.by_tag_category) {
+      for (const side of ['income', 'expense'] as const) {
+        const q = new URLSearchParams({ from: '2026-10-01', to: '2026-10-31', tag: cell.tag, category: cell.category ?? 'none', side, excluded: '0', limit: '100' });
+        const { items, next_cursor } = await getJson<Page>(`/api/bank_txns?${q.toString()}`);
+        assert.equal(next_cursor, null);
+        const at = `${cell.tag} ${cell.category} ${side}`;
+        assert.equal(items.reduce((a, t) => a + t.amount, 0), cell[side], at);
+        assert.equal(items.length, side === 'income' ? cell.income_count : cell.expense_count, at);
+      }
+    }
   });
 
   test('不正な月・範囲は 400', async () => {

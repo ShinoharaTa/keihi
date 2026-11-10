@@ -3,8 +3,23 @@
 export type Tag = 'business' | 'private' | 'unset';
 export type TransferKind = 'transfer' | 'card_settlement' | 'charge';
 export type Amounts = { income: number; expense: number };
-export type CategoryItem = { id: string; label: string };
+// 入金・出金それぞれの件数（月次集計）。
+export type Counts = { income_count: number; expense_count: number };
+// カテゴリの台帳（GET /api/categories?all=1。src/bank/categories.ts）。並びは sort_order → id（サーバーの順のまま）。
+// color（0〜11 → style.css の k-*）・sort_order・builtin・archived は台帳（0014）から。古いサーバーには無い。
+export type CategoryItem = { id: string; label: string; color?: number; sort_order?: number; builtin?: boolean; archived?: boolean };
 export type Categories = { items: CategoryItem[]; uncategorized_label: string };
+// 新しく付けられる（選択肢に出す）カテゴリ。アーカイブ済みを除く。ラベルの表示（categoryLabel）はアーカイブ済みも引く。
+export const assignable = (cats: Categories | null): CategoryItem[] => (cats?.items ?? []).filter((c) => !c.archived);
+// カテゴリの名前（POST・PATCH /api/categories の label）の上限と色の数。
+export const CATEGORY_LABEL_MAX = 20;
+export const CATEGORY_COLORS = 12;
+// 名前の検査（前後の空白を落として 1〜20 字）。正しければ ''、だめなら文言。
+export function categoryLabelError(label: string): string {
+  const n = [...label.trim()].length;
+  if (n === 0) return '名前を入れてください。';
+  return n > CATEGORY_LABEL_MAX ? `名前は ${CATEGORY_LABEL_MAX} 字までです。` : '';
+}
 
 export type Txn = {
   id: string;
@@ -32,9 +47,11 @@ export type TxnPage = { items: Txn[]; next_cursor: string | null };
 export type MonthlySummary = {
   month: string;
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
-  by_category: ({ category: string | null } & Amounts)[];
-  by_tag: ({ tag: Tag } & Amounts)[];
-  total: Amounts & { net: number };
+  // 件数（income_count・expense_count）と by_tag_category は分析の画面のため（#74。古いサーバーには無い）。
+  by_category: ({ category: string | null } & Amounts & Partial<Counts>)[];
+  by_tag: ({ tag: Tag } & Amounts & Partial<Counts>)[];
+  by_tag_category?: ({ tag: Tag; category: string | null } & Amounts & Counts)[];
+  total: Amounts & { net: number } & Partial<Counts>;
   excluded: ({ kind: TransferKind; count: number } & Amounts)[];
 };
 
@@ -236,6 +253,12 @@ export const ERROR_TEXT: Record<string, string> = {
   invalid_from: '期間の始まりが正しくありません。',
   invalid_to: '期間の終わりが正しくありません。',
   invalid_category: 'カテゴリが正しくありません。',
+  category_archived: 'このカテゴリはアーカイブしてあります。戻してから使ってください。',
+  duplicate_label: '同じ名前のカテゴリがあります。',
+  invalid_label: `名前は 1〜${CATEGORY_LABEL_MAX} 字にしてください。`,
+  invalid_color: '色が正しくありません。',
+  too_many_categories: 'カテゴリが多すぎます（使っているものは 40 件まで）。使わないものをアーカイブしてください。',
+  cannot_archive: '「その他」はアーカイブできません。',
   invalid_tag: 'タグが正しくありません。',
   invalid_name: '名称を入れてください（200 文字まで）。',
   invalid_amount: '金額は 1 円以上の整数で入れてください。',
@@ -327,9 +350,10 @@ export const CSV_ACCOUNT_KINDS: readonly { kind: AccountKind; label: string }[] 
 // ---- 明細の絞り込み ----
 
 // month は月次から来たときの「その月」（TxnFilter.month）。year は経費の「直近 12 か月」から来たとき（今月を含む 12 か月）。
-export type Period = 'this' | 'last' | 'three' | 'all' | 'month' | 'year';
-export const PERIOD_LABELS: Record<Exclude<Period, 'month' | 'year'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
-export const PERIODS: readonly Exclude<Period, 'month' | 'year'>[] = ['this', 'last', 'three', 'all'];
+// range は分析の画面（四半期・年）から来たときだけ（TxnFilter.range の from〜to）。
+export type Period = 'this' | 'last' | 'three' | 'all' | 'month' | 'year' | 'range';
+export const PERIOD_LABELS: Record<Exclude<Period, 'month' | 'year' | 'range'>, string> = { this: '今月', last: '先月', three: '3 か月', all: '全部' };
+export const PERIODS: readonly Exclude<Period, 'month' | 'year' | 'range'>[] = ['this', 'last', 'three', 'all'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
 // YYYY-MM に n か月足す（負も可）。
@@ -344,10 +368,11 @@ function lastDay(month: string): string {
   return `${month}-${pad(d.getUTCDate())}`;
 }
 
-// 期間 → {from, to}（YYYY-MM-DD）。3 か月は今月を含む直近 3 か月。全部は絞らない。month は指定の月。
-export function periodRange(p: Period, today: string, month?: string): { from?: string; to?: string } {
+// 期間 → {from, to}（YYYY-MM-DD）。3 か月は今月を含む直近 3 か月。全部は絞らない。month は指定の月。range は指定の from〜to。
+export function periodRange(p: Period, today: string, month?: string, range?: { from: string; to: string }): { from?: string; to?: string } {
   const m = today.slice(0, 7);
   if (p === 'month' && month) return { from: `${month}-01`, to: lastDay(month) };
+  if (p === 'range' && range) return { from: range.from, to: range.to };
   if (p === 'this') return { from: `${m}-01`, to: today };
   if (p === 'last') {
     const l = addMonth(m, -1);
@@ -359,9 +384,13 @@ export function periodRange(p: Period, today: string, month?: string): { from?: 
 }
 
 // side・excluded・vendorKey・receipt は経費の一覧から来たときだけ（vendorLabel は表示だけで送らない）。
+// range・rangeLabel・pillLabel は分析の画面から来たときだけ（rangeLabel は期間の表示、pillLabel は上のピルの文言。どちらも送らない）。
 export type TxnFilter = {
   period: Period;
   month?: string;
+  range?: { from: string; to: string };
+  rangeLabel?: string;
+  pillLabel?: string;
   accountId: string;
   tag: '' | Tag;
   category: string;
@@ -381,7 +410,7 @@ export const TXN_PAGE = 50;
 // GET /api/bank_txns の URL。category は '' = 全部、'none' = 未分類。q は前後の空白を落とし、空なら送らない。
 export function txnsUrl(f: TxnFilter, today: string, cursor: string | null, limit = TXN_PAGE): string {
   const p = new URLSearchParams({ limit: String(limit) });
-  const r = periodRange(f.period, today, f.month);
+  const r = periodRange(f.period, today, f.month, f.range);
   if (r.from) p.set('from', r.from);
   if (r.to) p.set('to', r.to);
   if (f.accountId) p.set('account_id', f.accountId);
@@ -937,7 +966,7 @@ export const nextTag = (t: Tag): Tag => (t === 'business' ? 'private' : 'busines
 export const txnIncome = (items: Txn[]) => items.reduce((a, t) => (t.side === 'income' && !t.excluded ? a + t.amount : a), 0);
 // 期間の表示「11/1〜11/6」。全部は「全期間」。
 export function periodText(f: TxnFilter, today: string): string {
-  const r = periodRange(f.period, today, f.month);
+  const r = periodRange(f.period, today, f.month, f.range);
   return r.from && r.to ? `${md(r.from)}〜${md(r.to)}` : '全期間';
 }
 // ルール化したとき、同じ口座・同じ摘要の未設定の行にも同じタグを付けて見せる（サーバーのルールは次の読み込みから効く）。
@@ -1532,6 +1561,7 @@ export const toggleUnset = (f: TxnFilter): TxnFilter =>
 // 経費の一覧から来た絞り込みの見出し「経費 · 相手 · 待ちだけ」。経費の絞り込みでなければ null。
 export function expenseFilterText(f: TxnFilter): string | null {
   if (!f.vendorKey && !f.receipt && !f.side && !f.excluded) return null;
+  if (f.pillLabel) return f.pillLabel;
   return ['経費', f.vendorLabel || f.vendorKey || null, f.receipt ? `${f.receipt === 'waiting' ? '領収書待ち' : RECEIPT_LABELS[f.receipt]}だけ` : null].filter(Boolean).join(' · ');
 }
 // 紐付け・解除の後に読み直した照合（GET /api/bank_txns/:id/matches）で行の receipt・receipt_hint を差し替える（match.ts と同じ決め方）。

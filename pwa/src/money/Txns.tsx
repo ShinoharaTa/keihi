@@ -1,17 +1,25 @@
 // 明細（モック Txns・TagSheet。GET /api/bank_txns）。日付の新しい順に 50 件ずつ、日付ごとにまとめ、「続きを読み込む」で続き（keyset cursor）。
 // 上に 期間 と「未設定だけ（n）」の 1 タップ絞り込み、口座・タグ・カテゴリ・検索は折りたたむ。絞り込みを変えたら cursor を捨てて読み直す。応答は連番で古いものを捨てる。
 // 行の右端のタグを押すと 事業 ⇄ 私用（未設定は事業）をその場で保存（POST /api/bank_txns/:id/tag。押した行だけ busy）。行を押すとタグ付けシート（暗幕つき）。
-// シート: 事業/私用/未設定・カテゴリ 12 種・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
+// シート: 事業/私用/未設定・カテゴリ（台帳のうちアーカイブしていないもの。色の点つき）・「同じ摘要にも適用（ルール化）」（POST /api/tag_rules、exact。同じ口座・同じ摘要の未設定の行にも映す）・
 // 「保存して閉じる」「保存して次の未設定へ」。
 // 照合（docs/cashflow.md §16）: 行の右に証憑の印（receiptMark）。シートを開いたら GET /api/bank_txns/:id/matches を読み、支出なら「証憑」の段
 // （紐付いた証憑と「外す」・候補（押すと紐付け）・撮影タブへ）。紐付け/解除の後は読み直して行の印も差し替える（applyMatches）。
 // 経費の一覧から来た絞り込み（side・excluded・vendor_key・receipt）は上に 1 つのピルで出し、押すと外す。描画だけの部品（TxnFilters・TxnList・TagSheet）は SSR のスナップショットで試す。
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { getJson, postJson } from '../api.ts';
+// 選択モードと一括（#74 PR4。BulkBar.tsx・selection.ts）: スマホは上の「選択」か行の長押しで入り、行を押すと切り替え、長押しで anchor からその行まで。
+// PC（useWide）は行頭に常にチェック（Shift で範囲、上のチェックで見えている行をすべて、Esc で解除）。選択中は下に操作の帯、一括は
+// POST /api/bank_txns/bulk_tag を 1 回。結果の帯（元に戻す・学んだルールを消す）は 10 秒で消え、その後も上の「直前の一括を元に戻す」から戻せる。
+// 絞り込みを変えたら選択を捨てる。
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { deleteJson, getJson, postJson } from '../api.ts';
+import { categoryColor } from './analysis/colors.ts';
+import { BulkBar, BulkNoticeBand, CategoryPicker, SelectBand, SelectTools } from './BulkBar.tsx';
+import { Dot, type CategoryDraft } from './CategoryForm.tsx';
 import { Icon } from './Icons.tsx';
 import {
   applyMatches,
   applyRuleLocally,
+  categoryLabelError,
   docLine,
   expenseFilterText,
   linkedText,
@@ -54,6 +62,37 @@ import {
   type TxnPage,
 } from './model.ts';
 import { ScreenHead } from './Money.tsx';
+import {
+  allSelected,
+  applyEffective,
+  BULK_MAX,
+  bulkBody,
+  bulkNotice,
+  collectFiltered,
+  emptySelection,
+  escAction,
+  FILTERED_PAGE,
+  ignoreKey,
+  keepVisible,
+  longPress,
+  NOTICE_MS,
+  plainNotice,
+  pressStarts,
+  rangeSel,
+  revertFailText,
+  revertNotice,
+  rowAction,
+  selectAll,
+  toggleSel,
+  TOO_MANY_TEXT,
+  type BulkChange,
+  type BulkNotice,
+  type BulkTagResult,
+  type RevertResult,
+  type RowAction,
+  type Selection,
+} from './selection.ts';
+import { useWide } from './useWide.ts';
 
 const HINT_KEY = 'keihi.money.tagHint';
 const seenHint = () => {
@@ -86,7 +125,7 @@ export function TxnFilters({
   onExpand: (v: boolean) => void;
 }) {
   const more = [f.accountId, f.tag && f.tag !== 'unset' ? f.tag : '', f.category, f.q.trim()].filter((x) => x !== '').length;
-  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : undefined;
+  const month = f.period === 'month' ? f.month : f.period === 'year' ? '直近 12 か月' : f.period === 'range' ? f.rangeLabel : undefined;
   const exp = expenseFilterText(f);
   return (
     <div class="m-filters">
@@ -104,7 +143,7 @@ export function TxnFilters({
       </div>
       <div class="m-pills">
         {exp && (
-          <button type="button" class="m-pill" aria-pressed="true" aria-label={`${exp}。押すと外す`} onClick={() => onChange({ ...f, side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined })}>
+          <button type="button" class="m-pill" aria-pressed="true" aria-label={`${exp}。押すと外す`} onClick={() => onChange({ ...f, side: undefined, excluded: undefined, vendorKey: undefined, vendorLabel: undefined, receipt: undefined, pillLabel: undefined })}>
             {exp}
             <Icon name="close" size={16} />
           </button>
@@ -130,7 +169,7 @@ export function TxnFilters({
           <select class="m-field" aria-label="カテゴリ" value={f.category} onChange={(e) => onChange({ ...f, category: e.currentTarget.value })}>
             <option value="">カテゴリ: 全部</option>
             <option value={UNCATEGORIZED_QUERY}>{categoryLabel(cats, null)}</option>
-            {(cats?.items ?? []).map((c) => (
+            {(cats?.items ?? []).filter((c) => !c.archived || c.id === f.category).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
               </option>
@@ -164,11 +203,52 @@ export function TxnFilters({
 
 const TAG_NEXT_LABEL = (t: Tag) => `タグ: ${TAG_LABELS[t]}。押すと${TAG_LABELS[nextTag(t)]}に切り替え`;
 
-function TxnRow({ t, cats, busy, onOpen, onToggle }: { t: Txn; cats: Categories | null; busy: boolean; onOpen: (t: Txn) => void; onToggle: (t: Txn) => void }) {
+// 選択モード（#74 PR4）。wide は PC 幅（行頭に常にチェック）、selecting は選択中（スマホは行頭にチェックを出し、右端のタグを隠す）。
+export type ListSelect = { wide: boolean; selecting: boolean; ids: ReadonlySet<string> };
+// 長押しの配線（スマホだけ。selection.ts の longPress）。
+export type RowPress = { down: (id: string, x: number, y: number) => void; move: (x: number, y: number) => void; up: () => void };
+
+function TxnRow({
+  t,
+  cats,
+  busy,
+  sel,
+  press,
+  onOpen,
+  onToggle,
+  onCheck,
+}: {
+  t: Txn;
+  cats: Categories | null;
+  busy: boolean;
+  sel?: ListSelect;
+  press?: RowPress;
+  onOpen: (t: Txn) => void;
+  onToggle: (t: Txn) => void;
+  onCheck?: (t: Txn, shift: boolean) => void;
+}) {
   const mark = receiptMark(t);
+  const check = sel !== undefined && (sel.wide || sel.selecting);
+  const on = sel?.ids.has(t.id) === true;
+  const cls = `${t.excluded ? 'm-txn m-txn-ex' : 'm-txn'}${check ? ' m-txn-sel' : ''}${on ? ' m-txn-on' : ''}`;
   return (
-    <li class={t.excluded ? 'm-txn m-txn-ex' : 'm-txn'}>
-      <button type="button" class="m-txn-main" onClick={() => onOpen(t)}>
+    <li class={cls}>
+      {check && (
+        <span class="m-checkwrap" onClick={(e) => onCheck?.(t, e.shiftKey)}>
+          <input type="checkbox" class="m-check" checked={on} aria-label={`選ぶ: ${t.description}`} />
+        </span>
+      )}
+      <button
+        type="button"
+        class="m-txn-main"
+        onClick={() => onOpen(t)}
+        onPointerDown={press ? (e) => pressStarts(e) && press.down(t.id, e.clientX, e.clientY) : undefined}
+        onPointerMove={press ? (e) => press.move(e.clientX, e.clientY) : undefined}
+        onPointerUp={press?.up}
+        onPointerCancel={press?.up}
+        onPointerLeave={press?.up}
+        onContextMenu={press ? (e) => e.preventDefault() : undefined}
+      >
         <span class="m-txn-top">
           <span class="m-txn-name">{t.description}</span>
           {t.excluded ? (
@@ -188,7 +268,7 @@ function TxnRow({ t, cats, busy, onOpen, onToggle }: { t: Txn; cats: Categories 
           {mark && <span class={`m-rc m-rc-${mark.kind}`}>{mark.label}</span>}
         </span>
       </button>
-      {t.excluded ? (
+      {sel && !sel.wide && sel.selecting ? null : t.excluded ? (
         <span class="m-tagspace" />
       ) : (
         <button type="button" class="m-tagbtn" aria-label={TAG_NEXT_LABEL(t.tag)} disabled={busy} onClick={() => onToggle(t)}>
@@ -208,8 +288,11 @@ export function TxnList({
   busyIds,
   hint,
   onHint,
+  sel,
+  press,
   onOpen,
   onToggle,
+  onCheck,
 }: {
   items: Txn[];
   f: TxnFilter;
@@ -218,9 +301,13 @@ export function TxnList({
   cats: Categories | null;
   busyIds: string[];
   hint: boolean;
+  // 選択モード（無ければ今までどおりの一覧）
+  sel?: ListSelect;
+  press?: RowPress;
   onHint: () => void;
   onOpen: (t: Txn) => void;
   onToggle: (t: Txn) => void;
+  onCheck?: (t: Txn, shift: boolean) => void;
 }) {
   const sum = txnSummary(items);
   return (
@@ -252,7 +339,7 @@ export function TxnList({
           </div>
           <ul class="m-txns">
             {g.items.map((t) => (
-              <TxnRow key={t.id} t={t} cats={cats} busy={busyIds.includes(t.id)} onOpen={onOpen} onToggle={onToggle} />
+              <TxnRow key={t.id} t={t} cats={cats} busy={busyIds.includes(t.id)} sel={sel} press={press} onOpen={onOpen} onToggle={onToggle} onCheck={onCheck} />
             ))}
           </ul>
         </section>
@@ -405,8 +492,10 @@ export function TagSheet({
           <fieldset class="m-fs">
             <legend>カテゴリ</legend>
             <div class="m-catgrid">
-              {(cats?.items ?? []).map((c) => (
+              {/* アーカイブ済みは出さない。ただし明細の今のカテゴリなら、その 1 件だけ出す（今の値のままタグだけ変えられる） */}
+              {(cats?.items ?? []).filter((c) => !c.archived || c.id === txn.category).map((c) => (
                 <button type="button" key={c.id} aria-pressed={draft.category === c.id} onClick={() => onDraft({ ...draft, category: draft.category === c.id ? null : c.id })}>
+                  <Dot cls={categoryColor(cats, c.id)} />
                   {c.label}
                 </button>
               ))}
@@ -450,6 +539,7 @@ export function Txns({
   initial,
   onBack,
   onCapture,
+  onCatsChanged,
 }: {
   today: string;
   accounts: Account[];
@@ -457,6 +547,8 @@ export function Txns({
   initial?: Partial<TxnFilter>;
   onBack: () => void;
   onCapture?: () => void;
+  // カテゴリを作った後に台帳を読み直す（Money の loadCats）
+  onCatsChanged?: () => Promise<void>;
 }) {
   const [filter, setFilter] = useState<TxnFilter>(() => ({ ...emptyFilter(), ...initial }));
   const [q, setQ] = useState(filter.q);
@@ -476,6 +568,18 @@ export function Txns({
   const seq = useRef(0);
   const countSeq = useRef(0);
   const matchSeq = useRef(0);
+  const wide = useWide();
+  const [sel, setSel] = useState<Selection>(emptySelection);
+  const [mode, setMode] = useState(false);
+  const [picker, setPicker] = useState(false);
+  // 一括の「新しく作る…」の入力（CategoryPicker の中。閉じたら捨てる）
+  const [creating, setCreating] = useState<CategoryDraft | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [notice, setNotice] = useState<BulkNotice | null>(null);
+  const [lastBatch, setLastBatch] = useState<string | null>(null);
+  const [selMsg, setSelMsg] = useState('');
+  const [collecting, setCollecting] = useState(false);
+  const collectSeq = useRef(0);
 
   const load = useCallback(
     async (f: TxnFilter, after: string | null) => {
@@ -496,6 +600,7 @@ export function Txns({
       setMsg('');
       setItems((cur) => (after && cur ? [...cur, ...r.data.items] : r.data.items));
       setCursor(r.data.next_cursor);
+      return r.data.items;
     },
     [today],
   );
@@ -513,7 +618,7 @@ export function Txns({
       if (n !== countSeq.current) return;
       setUnsetCount(r.ok ? countLabel(pageCount(r.data, 100)) : '');
     })();
-  }, [filter.period, filter.month, filter.accountId, filter.category, filter.q, filter.side, filter.excluded, filter.vendorKey, today]);
+  }, [filter.period, filter.month, filter.range, filter.accountId, filter.category, filter.q, filter.side, filter.excluded, filter.vendorKey, today]);
 
   // 開いた明細の照合を読む（支出だけ）。読み終える前に別の明細を開いたら古い応答を捨てる。
   const loadMatches = async (t: Txn): Promise<Matches | null> => {
@@ -601,9 +706,199 @@ export function Txns({
     }
   };
 
+  // ---- 選択モードと一括の操作（#74 PR4）。スマホは「選択」か長押しで入り、PC は行頭のチェックを 1 つ入れると入る。 ----
+  const selecting = wide ? sel.ids.size > 0 : mode || sel.ids.size > 0;
+  const order = useMemo(() => (items ? groupByDate(items).flatMap((g) => g.items.map((t) => t.id)) : []), [items]);
+  // 選択を変えたら結果の帯は消す（「次の操作」）。
+  const changeSel = (s: Selection) => {
+    setSel(s);
+    setNotice(null);
+    setSelMsg('');
+  };
+  const endSelect = () => {
+    collectSeq.current++;
+    setCollecting(false);
+    setSel(emptySelection());
+    setMode(false);
+    setPicker(false);
+    setSelMsg('');
+  };
+  // 絞り込みを変えたら選択を捨てる（見えない行を選んだまま一括にしない）。
+  const changeFilter = (f: TxnFilter) => {
+    endSelect();
+    setFilter(f);
+  };
+  const act = (t: Txn, a: RowAction | null) => {
+    if (a === 'open') openTxn(t);
+    else if (a === 'toggle') changeSel(toggleSel(sel, t.id));
+    else if (a === 'range') changeSel(rangeSel(sel, t.id, order));
+  };
+  const onLong = useRef<(id: string) => void>(() => {});
+  onLong.current = (id) => {
+    const t = items?.find((x) => x.id === id);
+    if (!t) return;
+    if (!selecting) setMode(true);
+    act(t, rowAction({ wide, selecting, via: 'long' }));
+  };
+  const pressRef = useRef<ReturnType<typeof longPress> | null>(null);
+  const press = (pressRef.current ??= longPress((id) => onLong.current(id)));
+  useEffect(() => () => press.up(), []); // 離れたら長押しのタイマーを止める
+  // 一括の後に 1 ページ目から読み直し、選択を見えている行だけに絞る（絞り込みを変えたら選択を捨てるのと揃える）。
+  const reload = async () => {
+    const xs = await load(filter, null);
+    if (xs) setSel((s) => keepVisible(s, xs.map((t) => t.id)));
+  };
+  const onRow = (t: Txn) => {
+    if (!wide && press.consumeClick()) return; // 長押しの後に来る click
+    act(t, rowAction({ wide, selecting, via: 'tap' }));
+  };
+  const onAll = () => changeSel(wide && allSelected(sel, order) ? emptySelection() : selectAll(sel, order));
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (ignoreKey(e)) return;
+      const a = escAction({ key: e.key, sheetOpen: open !== null, pickerOpen: picker, selecting });
+      if (a === 'picker') setPicker(false);
+      else if (a === 'clear') endSelect();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, picker, selecting]);
+
+  // カテゴリの一覧を閉じたら「新しく作る…」の入力を捨てる。
+  useEffect(() => {
+    if (!picker) setCreating(null);
+  }, [picker]);
+
+  // 結果の帯は 10 秒で消す（消えた後も「直前の一括を元に戻す」から戻せる）。
+  useEffect(() => {
+    if (!notice) return;
+    const h = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(h);
+  }, [notice]);
+
+  const selectFiltered = async () => {
+    const n = ++collectSeq.current;
+    setCollecting(true);
+    setSelMsg('');
+    const r = await collectFiltered((c) => getJson<TxnPage>(txnsUrl(filter, today, c, FILTERED_PAGE)));
+    if (n !== collectSeq.current) return; // 途中で絞り込みを変えた・選択をやめた
+    setCollecting(false);
+    if (r.kind === 'too_many') return setSelMsg(TOO_MANY_TEXT);
+    if (r.kind === 'error') return setSelMsg(failText(r.status, r.body));
+    setNotice(null);
+    setSel((s) => ({ ids: new Set(r.ids), anchor: s.anchor }));
+  };
+
+  // 一括（tag だけか category だけ）。確定前の確認は出さない。選択はそのまま残す（続けてカテゴリも変えられる）。
+  // 一括が書けたら true（結果の帯を出す）。
+  const runBulk = async (change: BulkChange, force = false): Promise<boolean> => {
+    if ((bulkBusy && !force) || collecting || sel.ids.size === 0) return false;
+    setPicker(false);
+    if (sel.ids.size > BULK_MAX) {
+      setNotice(plainNotice(TOO_MANY_TEXT));
+      return false;
+    }
+    setBulkBusy(true);
+    setNotice(null);
+    const r = await postJson('/api/bank_txns/bulk_tag', bulkBody(sel.ids, change));
+    setBulkBusy(false);
+    if (r.status !== 200) {
+      setNotice(plainNotice(failText(r.status, r.body)));
+      return false;
+    }
+    const res = r.body as BulkTagResult;
+    const n = bulkNotice(res);
+    setNotice(n);
+    if (n.undo) setLastBatch(n.undo);
+    // ルールを学んだら同じ摘要の他の行も変わりうるので読み直す。それ以外は応答の effective で行だけ差し替える。
+    if (res.learned_rules.length > 0) void reload();
+    else setItems((cur) => (cur ? applyEffective(cur, res.effective) : cur));
+    return true;
+  };
+
+  // 「新しく作る…」: POST /api/categories → 台帳を読み直す → そのまま選択中の明細に一括（category = 新しい id）。
+  // 作るのに失敗したら入力に理由を出す（何も書かない）。作れて一括が失敗したらカテゴリは残し、入れ直しを頼む。
+  const createAndApply = async () => {
+    if (!creating || bulkBusy || collecting || sel.ids.size === 0) return;
+    // 一括で付けられない件数なら作りもしない（runBulk と同じ案内）
+    if (sel.ids.size > BULK_MAX) {
+      setPicker(false);
+      return setNotice(plainNotice(TOO_MANY_TEXT));
+    }
+    const bad = categoryLabelError(creating.label);
+    if (bad) return setCreating({ ...creating, error: bad });
+    setBulkBusy(true);
+    try {
+      const r = await postJson('/api/categories', { label: creating.label.trim(), color: creating.color });
+      if (r.status !== 201) return setCreating({ ...creating, error: failText(r.status, r.body) });
+      const item = (r.body as { item: { id: string; label: string } }).item;
+      await onCatsChanged?.();
+      const ok = await runBulk({ category: item.id }, true);
+      if (!ok) setNotice(plainNotice(`カテゴリ『${item.label}』は作りました。入れ直してください`));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const revert = async (batchId: string) => {
+    if (bulkBusy) return;
+    setBulkBusy(true);
+    setNotice(null);
+    const r = await postJson(`/api/bank_txns/bulk_tag/${encodeURIComponent(batchId)}/revert`, {});
+    setBulkBusy(false);
+    if (r.status === 200) {
+      setLastBatch((b) => (b === batchId ? null : b));
+      setNotice(revertNotice(r.body as RevertResult));
+      void reload();
+      return;
+    }
+    const known = revertFailText(r.status, r.body);
+    // 409（戻せない・戻してある）と 404（無い一括）はもう戻せないので「直前の一括を元に戻す」を消す。
+    if (known || r.status === 404) setLastBatch((b) => (b === batchId ? null : b));
+    setNotice(plainNotice(known ?? failText(r.status, r.body)));
+  };
+
+  const deleteRules = async (ids: string[]) => {
+    if (bulkBusy) return;
+    setBulkBusy(true);
+    let done = 0;
+    let fail = '';
+    for (const id of ids) {
+      const r = await deleteJson(`/api/tag_rules/${encodeURIComponent(id)}`);
+      if (r.status === 200 || r.status === 404) done++; // 404 はもう無い
+      else fail = failText(r.status, r.body);
+    }
+    setBulkBusy(false);
+    setNotice(plainNotice(fail ? `ルールを消せませんでした。${fail}` : `ルールを ${done} 件消しました`));
+    void reload();
+  };
+
+  const pickerCreate = {
+    create: creating,
+    busy: bulkBusy,
+    onPick: (category: string | null) => void runBulk({ category }),
+    onCreate: setCreating,
+    onCreateSubmit: () => void createAndApply(),
+    onClose: () => setPicker(false),
+  };
+  const dock = sel.ids.size > 0 || notice !== null;
+  const undoLast = lastBatch !== null && notice?.undo !== lastBatch;
+  const filtered = (wide || selecting) && cursor !== null && items ? countLabel({ n: items.length, more: true }) : null;
+
   return (
     <>
-      <ScreenHead title="明細" flat onBack={onBack} />
+      {!wide && selecting ? (
+        <SelectBand wide={false} count={sel.ids.size} allChecked={allSelected(sel, order)} onAll={onAll} onDone={endSelect} />
+      ) : (
+        <ScreenHead title="明細" flat onBack={onBack}>
+          {!wide && items && items.length > 0 && (
+            <button type="button" class="m-btn m-head-act" onClick={() => setMode(true)}>
+              選択
+            </button>
+          )}
+        </ScreenHead>
+      )}
       <TxnFilters
         f={filter}
         q={q}
@@ -611,15 +906,33 @@ export function Txns({
         unsetCount={unsetCount}
         accounts={accounts}
         cats={cats}
-        onChange={setFilter}
+        onChange={changeFilter}
         onQ={setQ}
         onExpand={setExpanded}
       />
-      <div class="m-main m-main-flush">
+      <div class={dock ? 'm-main m-main-flush m-main-dock' : 'm-main m-main-flush'}>
+        {(filtered !== null || undoLast || selMsg) && (
+          <SelectTools filtered={filtered} busy={collecting || bulkBusy} notice={selMsg} undoLast={undoLast} onFiltered={() => void selectFiltered()} onUndoLast={() => lastBatch && void revert(lastBatch)} />
+        )}
+        {wide && items && items.length > 0 && <SelectBand wide count={sel.ids.size} allChecked={allSelected(sel, order)} onAll={onAll} onDone={endSelect} />}
         {msg && <p class="m-msg m-inline-msg">{msg}</p>}
         {items && items.length === 0 && <p class="m-empty">明細はありません。</p>}
         {items && items.length > 0 && (
-          <TxnList items={items} f={filter} today={today} more={cursor !== null} cats={cats} busyIds={busyIds} hint={hint} onHint={closeHint} onOpen={openTxn} onToggle={(t) => void toggle(t)} />
+          <TxnList
+            items={items}
+            f={filter}
+            today={today}
+            more={cursor !== null}
+            cats={cats}
+            busyIds={busyIds}
+            hint={hint}
+            sel={{ wide, selecting, ids: sel.ids }}
+            press={wide ? undefined : press}
+            onHint={closeHint}
+            onOpen={onRow}
+            onToggle={(t) => void toggle(t)}
+            onCheck={(t, shift) => act(t, rowAction({ wide, selecting, via: 'check', shift }))}
+          />
         )}
         {!items && <p class="m-empty">読み込み中…</p>}
         {cursor && (
@@ -630,6 +943,17 @@ export function Txns({
           </div>
         )}
       </div>
+      {dock && (
+        <div class="m-dock">
+          {notice && <BulkNoticeBand wide={wide} notice={notice} busy={bulkBusy} onUndo={(id) => void revert(id)} onDeleteRules={(ids) => void deleteRules(ids)} />}
+          {sel.ids.size > 0 && (
+            <BulkBar wide={wide} count={sel.ids.size} busy={bulkBusy || collecting} picker={picker} onTag={(tag) => void runBulk({ tag })} onPicker={setPicker} onClear={endSelect}>
+              {picker && wide && <CategoryPicker wide count={sel.ids.size} cats={cats} {...pickerCreate} />}
+            </BulkBar>
+          )}
+        </div>
+      )}
+      {picker && !wide && sel.ids.size > 0 && <CategoryPicker wide={false} count={sel.ids.size} cats={cats} {...pickerCreate} />}
       {open && (
         <TagSheet
           txn={open.txn}

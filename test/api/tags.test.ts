@@ -151,13 +151,13 @@ describe('/api/tag_rules', () => {
   });
 });
 
-test('GET /api/categories は 13 種と日本語のラベル', async () => {
+test('GET /api/categories は 13 種と日本語のラベル（台帳の列は test/api/categories.test.ts）', async () => {
   const res = await send('GET', '/api/categories');
   assert.equal(res.status, 200);
   const j = (await res.json()) as { items: { id: string; label: string }[]; uncategorized_label: string };
   assert.equal(j.items.length, 13);
-  assert.deepEqual(j.items[0], { id: 'food', label: '食費' });
-  assert.deepEqual(j.items.at(-2), { id: 'savings', label: '積立' });
+  assert.deepEqual([j.items[0]!.id, j.items[0]!.label], ['food', '食費']);
+  assert.deepEqual([j.items.at(-2)!.id, j.items.at(-2)!.label], ['savings', '積立']);
   assert.equal(j.uncategorized_label, '未分類');
 });
 

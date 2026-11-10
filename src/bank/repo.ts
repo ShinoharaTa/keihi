@@ -69,6 +69,8 @@ export type TxnTagRow = {
   source: TagSource;
   actor: string;
   decided_at: string;
+  batch_id: string | null; // 一括の上書き・その取り消しで書いた版（0013）
+  cleared: 0 | 1; // 1 は「上書きを外す」版（0013）
 };
 
 export type SyncStatusRow = {
@@ -380,16 +382,16 @@ export function latestTxnTag(db: Db, bankTxnId: string): TxnTagRow | null {
   );
 }
 
-// 次の版を追記して返す（version = 今の最大 + 1）。
+// 次の版を追記して返す（version = 今の最大 + 1）。batchId は一括の上書き・取り消しの ID、cleared は「上書きを外す」版。
 export function appendTxnTag(
   db: Db,
-  t: { bankTxnId: string; tag: Tag; category?: string | null; source: TagSource; actor: string; decidedAt: string },
+  t: { bankTxnId: string; tag: Tag; category?: string | null; source: TagSource; actor: string; decidedAt: string; batchId?: string | null; cleared?: boolean },
 ): TxnTagRow {
   return tx(db, () => {
     const { v } = db.prepare('SELECT coalesce(max(version), 0) + 1 AS v FROM txn_tags WHERE bank_txn_id = ?').get(t.bankTxnId) as { v: number };
-    db.prepare('INSERT INTO txn_tags (bank_txn_id, version, tag, category, source, actor, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      t.bankTxnId, v, t.tag, t.category ?? null, t.source, t.actor, t.decidedAt,
-    );
+    db.prepare(
+      'INSERT INTO txn_tags (bank_txn_id, version, tag, category, source, actor, decided_at, batch_id, cleared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(t.bankTxnId, v, t.tag, t.category ?? null, t.source, t.actor, t.decidedAt, t.batchId ?? null, t.cleared ? 1 : 0);
     return latestTxnTag(db, t.bankTxnId)!;
   });
 }

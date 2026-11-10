@@ -6,6 +6,7 @@
 //   excluded（0 = 振替の除外を外す / 1 = 除外だけ）と receipt（match.ts の receipt）も同じく JS 側で絞る。vendor_key は
 //   description_norm の完全一致（SQL）。各行に receipt・receipt_hint・mail_hint（match.ts の createReceiptResolver）を付ける。
 // - 月次: その月の active = 1 の口座の明細から、振替・カードの引き落とし・チャージ（transfers.ts の excludedFromCashflow）を除いて集計する。
+//   by_category・by_tag・total に入金・出金ごとの件数（income_count・expense_count）、by_tag_category にタグ × カテゴリの組（分析の画面。#74）。どれも同じ 1 回のループで数える。
 //   除いた分は excluded に kind ごとの「その月に除いた明細」の行数と入金・出金で出す。月をまたぐ組でも、各月で
 //   「除く前の合計 = total + excluded」が成り立つ。
 // - 除く明細は有効な組（listActiveTransfers）の両側。transfers.ts の excludedFromCashflow と同じ集合を、kind 付きで 1 回で読む。
@@ -22,7 +23,8 @@ import {
   type TxnSide,
 } from './repo.ts';
 import { createReceiptResolver, DEFAULT_MATCH_WINDOWS, isReceiptStatus, type MailHintView, type MatchWindows, type ReceiptInfo, type ReceiptStatus } from './match.ts';
-import { CATEGORIES, isCategory, isTag, resolveTagsBulk, type ResolvedTag, type TagDecisionSource } from './tags.ts';
+import { categoryOrder } from './categories.ts';
+import { isCategory, isTag, resolveTagsBulk, type ResolvedTag, type TagDecisionSource } from './tags.ts';
 import { listActiveTransfers } from './transfers.ts';
 import type { TransferKind } from './transferRepo.ts';
 
@@ -32,7 +34,6 @@ export const VENDOR_KEY_MAX = 200;
 // タグ・カテゴリで絞るときに 1 回で読む行数。
 const CHUNK = 500;
 const TRANSFER_KINDS: readonly TransferKind[] = ['transfer', 'card_settlement', 'charge'];
-const CATEGORY_ORDER = new Map<string, number>(CATEGORIES.map((c, i) => [c, i]));
 
 export class SummaryError extends Error {
   readonly status = 400 as const;
@@ -113,7 +114,8 @@ function nonNegInt(s: string, reason: string): number {
 }
 
 // クエリ文字列を TxnQuery にする。不正なら SummaryError（400）。
-export function parseTxnQuery(q: Record<string, string | undefined>): TxnQuery {
+// category は台帳（bank_categories）にある id（アーカイブ済みも含む）か none。
+export function parseTxnQuery(db: Db, q: Record<string, string | undefined>): TxnQuery {
   const out: TxnQuery = { limit: MAX_LIMIT };
   if (q.from !== undefined) {
     if (!isDate(q.from)) throw new SummaryError('invalid_from');
@@ -134,7 +136,7 @@ export function parseTxnQuery(q: Record<string, string | undefined>): TxnQuery {
   }
   if (q.category !== undefined) {
     if (q.category === UNCATEGORIZED_QUERY) out.category = null;
-    else if (isCategory(q.category)) out.category = q.category;
+    else if (isCategory(db, q.category)) out.category = q.category;
     else throw new SummaryError('invalid_category');
   }
   if (q.side !== undefined) {
@@ -235,12 +237,16 @@ export function listTxns(db: Db, q: TxnQuery, opts: { matchWindows?: MatchWindow
 // ---- 月次の集計 ----
 
 export type Amounts = { income: number; expense: number };
+// 入金・出金それぞれの件数。
+type Counted = Amounts & { income_count: number; expense_count: number };
 export type MonthlySummary = {
   month: string;
   by_account: ({ account_id: string; name: string; include_in_cashflow: boolean; active: boolean; net: number } & Amounts)[];
-  by_category: ({ category: string | null } & Amounts)[];
-  by_tag: ({ tag: Tag } & Amounts)[];
-  total: Amounts & { net: number };
+  by_category: ({ category: string | null } & Counted)[];
+  by_tag: ({ tag: Tag } & Counted)[];
+  // タグ × カテゴリ（分析の画面のクロス表。#74）。件数のある組だけ。tag 順 → カテゴリの台帳の順 → 未分類（null）最後。
+  by_tag_category: ({ tag: Tag; category: string | null } & Counted)[];
+  total: Counted & { net: number };
   // その月に除いた明細の行数と入金・出金。
   excluded: ({ kind: TransferKind; count: number } & Amounts)[];
 };
@@ -277,28 +283,39 @@ const add = (a: Amounts, side: TxnSide, amount: number) => {
   if (side === 'income') a.income += amount;
   else a.expense += amount;
 };
+const addCounted = (a: Counted, side: TxnSide, amount: number) => {
+  add(a, side, amount);
+  if (side === 'income') a.income_count++;
+  else a.expense_count++;
+};
+const zero = (): Counted => ({ income: 0, expense: 0, income_count: 0, expense_count: 0 });
 
 type AccountInfo = { order: number; includeInCashflow: boolean; active: boolean };
 
-function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, accountInfo: Map<string, AccountInfo>): MonthlySummary {
+function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, accountInfo: Map<string, AccountInfo>, catOrder: Map<string, number>): MonthlySummary {
   const { from, to } = monthRange(month);
   const all = listBankTxnsBetween(db, from, to);
   const rows = all.filter((r) => !kinds.has(r.id));
   const tags = resolveTagsBulk(db, rows.map((r) => r.id));
-  const total: Amounts = { income: 0, expense: 0 };
+  const total = zero();
   const accounts = new Map<string, { name: string } & Amounts>();
-  const categories = new Map<string | null, Amounts>();
-  const byTag = new Map<Tag, Amounts>(TAGS.map((t) => [t, { income: 0, expense: 0 }]));
+  const categories = new Map<string | null, Counted>();
+  const byTag = new Map<Tag, Counted>(TAGS.map((t) => [t, zero()]));
+  const byTagCat = new Map<Tag, Map<string | null, Counted>>(TAGS.map((t) => [t, new Map()]));
   for (const r of rows) {
     const t = tags.get(r.id)!;
-    add(total, r.side, r.amount);
+    addCounted(total, r.side, r.amount);
     let a = accounts.get(r.account_id);
     if (!a) accounts.set(r.account_id, (a = { name: r.account_name, income: 0, expense: 0 }));
     add(a, r.side, r.amount);
     let c = categories.get(t.category);
-    if (!c) categories.set(t.category, (c = { income: 0, expense: 0 }));
-    add(c, r.side, r.amount);
-    add(byTag.get(t.tag)!, r.side, r.amount);
+    if (!c) categories.set(t.category, (c = zero()));
+    addCounted(c, r.side, r.amount);
+    addCounted(byTag.get(t.tag)!, r.side, r.amount);
+    const tc = byTagCat.get(t.tag)!;
+    let x = tc.get(t.category);
+    if (!x) tc.set(t.category, (x = zero()));
+    addCounted(x, r.side, r.amount);
   }
   const excluded = new Map<TransferKind, { count: number } & Amounts>(TRANSFER_KINDS.map((k) => [k, { count: 0, income: 0, expense: 0 }]));
   for (const r of all) {
@@ -308,8 +325,8 @@ function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, acco
     e.count++;
     add(e, r.side, r.amount);
   }
-  // カテゴリは固定の順（tags.ts の CATEGORIES）、未分類（null）は最後。
-  const catRank = (c: string | null) => (c === null ? CATEGORIES.length + 1 : (CATEGORY_ORDER.get(c) ?? CATEGORIES.length));
+  // カテゴリは台帳の順（sort_order → id。移行直後は固定 13 種の順）、台帳に無い値はその後、未分類（null）は最後。
+  const catRank = (c: string | null) => (c === null ? catOrder.size + 1 : (catOrder.get(c) ?? catOrder.size));
   return {
     month,
     by_account: [...accounts]
@@ -325,6 +342,7 @@ function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, acco
       })),
     by_category: [...categories].sort(([a], [b]) => catRank(a) - catRank(b)).map(([category, a]) => ({ category, ...a })),
     by_tag: [...byTag].map(([tag, a]) => ({ tag, ...a })),
+    by_tag_category: [...byTagCat].flatMap(([tag, m]) => [...m].sort(([a], [b]) => catRank(a) - catRank(b)).map(([category, a]) => ({ tag, category, ...a }))),
     total: { ...total, net: total.income - total.expense },
     excluded: [...excluded].map(([kind, e]) => ({ kind, ...e })),
   };
@@ -334,7 +352,8 @@ function summarize(db: Db, month: string, kinds: Map<string, TransferKind>, acco
 export function monthlySummaries(db: Db, months: readonly string[]): MonthlySummary[] {
   const kinds = transferKinds(db);
   const accountInfo = new Map(listAccounts(db).map((a, i) => [a.id, { order: i, includeInCashflow: a.include_in_cashflow === 1, active: a.active === 1 }]));
-  return months.map((m) => summarize(db, m, kinds, accountInfo));
+  const catOrder = categoryOrder(db);
+  return months.map((m) => summarize(db, m, kinds, accountInfo, catOrder));
 }
 
 export function monthlySummary(db: Db, month: string): MonthlySummary {

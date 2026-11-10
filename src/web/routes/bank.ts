@@ -19,6 +19,7 @@
 //   GET   /api/documents/:id/matches → 200 {links: [Link]} / 404 {error: not_found}
 //   GET   /api/summary/monthly ?month=YYYY-MM → 200 MonthlySummary
 //                              ?from=YYYY-MM&to=YYYY-MM（最大 36 か月）→ 200 {months: [MonthlySummary]} / 400
+//         MonthlySummary の by_category・by_tag・total に income_count・expense_count、by_tag_category（[{tag, category, income, expense, income_count, expense_count}]。分析の画面のクロス表）。
 //   GET   /api/bank/overview  → 200 Overview（お金タブのホーム。src/bank/overview.ts。[cashflow] の設定は deps.config.cashflow）
 //   GET   /api/balance_history ?months=12（1〜BALANCE_HISTORY_MAX_MONTHS の整数）→ 200 {months: [{month, total, by_account}]}
 //         / 400 {error: invalid_months}（src/bank/balanceHistory.ts。古い順、最後は今月 = 今日時点）
@@ -166,7 +167,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
 
   r.get('/bank_txns', (c) => {
     try {
-      return c.json(listTxns(deps.db, parseTxnQuery(c.req.query()), { matchWindows: matchWindows() }));
+      return c.json(listTxns(deps.db, parseTxnQuery(deps.db, c.req.query()), { matchWindows: matchWindows() }));
     } catch (e) {
       if (e instanceof SummaryError) return c.json({ error: e.reason }, e.status);
       throw e;

@@ -150,11 +150,11 @@ const noop = () => {};
 
 const cats: Categories = {
   items: [
-    { id: 'food', label: '食費' },
-    { id: 'daily', label: '日用品' },
-    { id: 'telecom', label: '通信' },
-    { id: 'tax', label: '税金' },
-    { id: 'car', label: '車' },
+    { id: 'food', label: '食費', color: 0 },
+    { id: 'daily', label: '日用品', color: 1 },
+    { id: 'telecom', label: '通信', color: 3 },
+    { id: 'tax', label: '税金', color: 7 },
+    { id: 'car', label: '車', color: 8 },
   ],
   uncategorized_label: '未分類',
 };
@@ -1076,13 +1076,21 @@ describe('SSR スナップショット', () => {
     t.assert.snapshot(lines(out));
   });
 
+  test('別チャンクの画面を読んでいる間・読めなかったとき', async (t) => {
+    const m = await load('/src/money/Money.tsx');
+    const out = [html(m.Pending!, { label: '経費', failed: false }), html(m.Pending!, { label: '経費', failed: true })].join('\n');
+    assert.match(out, /読み込み中…/);
+    assert.match(out, /経費の画面を読めませんでした/);
+    t.assert.snapshot(lines(out));
+  });
+
   test('月次: 月の切り替え・合計・カテゴリ別の横棒・事業/私用・集計外・6 か月の棒', async (t) => {
     const m = await load('/src/money/Monthly.tsx');
     const ms = ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].map((x, i) => monthly(x, 680000, [612000, 745000, 650000, 735000, 648000, 700000][i]!, x === '2026-10' ? 98000 : 46000));
     const out = [
       html(m.MonthBar!, { month: '2026-10', today: TODAY, onSelect: noop }),
       html(m.MonthBar!, { month: '2026-11', today: TODAY, onSelect: noop }),
-      html(m.MonthlyView!, { months: ms, selected: '2026-10', cats, uncat: { n: 100, more: true }, unset: { n: 23, more: false }, onSelect: noop, onTxns: noop }),
+      html(m.MonthlyView!, { months: ms, selected: '2026-10', cats, uncat: { n: 100, more: true }, unset: { n: 23, more: false }, onSelect: noop, onTxns: noop, onAnalysis: noop }),
     ].join('\n');
     assert.match(out, /締まった月/);
     assert.match(out, /aria-label="次の月（12 月）" disabled/);
@@ -1098,6 +1106,28 @@ describe('SSR スナップショット', () => {
     assert.match(html(ch.CatBar!, { value: 100, avg: 50, max: 100 }), /class="f-avg" x1="50"/);
     assert.match(html(m.MonthlyView!, { months: [], selected: '2026-10', cats, uncat: null, unset: null, onSelect: noop, onTxns: noop }), /この月の集計はありません/);
     t.assert.snapshot(lines(out));
+  });
+
+  test('タグ付けシートのカテゴリの段: 台帳の色の点。アーカイブ済みは出さず、明細の今のカテゴリならその 1 件だけ押された状態で出す。絞り込みも同じ形', async (t) => {
+    const m = await load('/src/money/Txns.tsx');
+    const ledger: Categories = { ...cats, items: [...cats.items, { id: 'c_OLD', label: '昔の', color: 4, archived: true }] };
+    // TagSheet は幅で変わらない（wide を受けない。スマホも PC も同じボトムシート）
+    const sheet = (category: string | null) =>
+      html(m.TagSheet!, { txn: txn({ id: 'T9', category }), draft: { tag: 'business', category, rule: true }, pos: { index: 0, total: 0 }, cats: ledger, saving: false, error: '', onDraft: noop, onSave: noop, onClose: noop });
+    const gridOf = (out: string) => out.slice(out.indexOf('<legend>カテゴリ</legend>'), out.indexOf('同じ摘要にも適用'));
+    const dots = (out: string) => [...gridOf(out).matchAll(/aria-pressed="(true|false)"><span class="m-dot (k-\d+)" aria-hidden="true"><\/span>([^<]+)<\/button>/g)].map((x) => `${x[2]} ${x[3]}${x[1] === 'true' ? ' *' : ''}`);
+    const BASE = ['k-0 食費', 'k-1 日用品', 'k-3 通信', 'k-7 税金', 'k-8 車'];
+    const archived = sheet('c_OLD');
+    assert.deepEqual(dots(archived), [...BASE, 'k-4 昔の *']);
+    assert.match(archived, /事業 · 昔の にします/, '今の値のラベルはアーカイブ済みでも引ける');
+    const other = sheet('food');
+    assert.deepEqual(dots(other), ['k-0 食費 *', ...BASE.slice(1)]);
+    assert.doesNotMatch(gridOf(other), /昔の/);
+    const f = { period: 'this', accountId: '', tag: '', category: '', q: '' };
+    const opts = (category: string) => html(m.TxnFilters!, { f: { ...f, category }, q: '', expanded: true, unsetCount: '', accounts: [], cats: ledger, onChange: noop, onQ: noop, onExpand: noop });
+    assert.doesNotMatch(opts(''), /昔の/);
+    assert.match(opts('c_OLD'), /<option value="c_OLD">昔の<\/option>/);
+    t.assert.snapshot(lines(gridOf(archived)));
   });
 
   test('明細: 期間・未設定だけ・折りたたみ、日付ごとの行（タグ・集計外）、タグ付けシート', async (t) => {
