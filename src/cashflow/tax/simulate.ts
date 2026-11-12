@@ -3,6 +3,8 @@
 // 住民税・国保・事業税は Y+1 年度、国民年金は Y 年度）。engine.ts は変えず、台帳の見積もりと同じ計算で数字を揃える。
 // 1 回の試算で estimate() を本体 1・限界 1・掛金なし 1（掛金があるときだけ）・方式の比較 9 回呼ぶ。
 // parseSimBody は POST /api/tax/simulate の body の検査と既定（profile は DB の値か DEFAULT_PROFILE、売上・経費は tax_years）。
+// 消費税の方式は body.profile.consumption_mode → year の行の上書き（tax_years.consumption_mode）→ profile の順。
+// 定常状態の行は consumption_mode = null のまま、決めた方式を試算用の profile に入れる。
 import type { Db } from '../../db/index.ts';
 import { estimate, type BreakdownLine, type EstimateKind, type EstimateWarning, type EstimateYear } from './engine.ts';
 import {
@@ -18,8 +20,8 @@ import { DEFAULT_PROFILE, TaxError, YEAR_MAX, YEAR_MIN, parseProfileBody } from 
 export const SIM_MARGINAL_DELTA = 1_000_000;
 
 export type SimSource = 'body' | 'default' | `tax_years:${number}`;
-// 消費税の方式の出どころ。defaulted は profile の方式が Y 年に使えないので既定の方式に代えたもの。
-export type SimModeSource = 'profile' | 'body' | 'defaulted';
+// 消費税の方式の出どころ。tax_years:<Y> は year の行の上書き。defaulted は profile（か year の行）の方式が Y 年に使えないので既定の方式に代えたもの。
+export type SimModeSource = 'profile' | 'body' | 'defaulted' | `tax_years:${number}`;
 
 // 円・整数。revenue と business_income の少なくとも一方が要る。
 export type SimInput = {
@@ -31,7 +33,7 @@ export type SimInput = {
   ideco: number; // 年額。profile.other_deductions に足す
   kyosai: number;
   marginal_delta: number;
-  source?: { revenue: SimSource; expenses: SimSource; consumption_mode?: 'profile' | 'body' }; // 無ければ body（consumption_mode は profile）
+  source?: { revenue: SimSource; expenses: SimSource; consumption_mode?: 'profile' | 'body' | `tax_years:${number}` }; // 無ければ body（consumption_mode は profile）
 };
 
 export type SimAmount = { kind: EstimateKind; year: number; basis: 'year' | 'fiscal_year'; amount: number; lines: BreakdownLine[] };
@@ -118,7 +120,8 @@ function annual(profile: TaxProfileValues, input: SimInput): { amounts: SimAmoun
     years.push({
       year: y, kind: 'estimate', revenue: input.revenue, expenses: input.taxable_purchases, business_income: businessIncome, social_insurance_paid: null,
       income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null,
-      salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null, source: 'manual',
+      salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null,
+      consumption_mode: null, simplified_class: null, source: 'manual',
     });
   }
   const res = estimate(p, years, { from: `${Y - 1}-01-01`, to: `${Y + 2}-12-31` });
@@ -152,12 +155,12 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   // 2 年前納は年額と社会保険料控除が年ごとに振れるので、試算では 1 年前納で代える。
   let prof: TaxProfileValues = profile.pension_mode === 'prepay24' ? { ...profile, pension_mode: 'prepay12' } : profile;
   if (profile.pension_mode === 'prepay24') assumptions.push('pension_prepay24_as_prepay12');
-  // body で方式を指定せず、profile の方式が Y 年に使えない（2 割特例の期限切れ・売上 1,000 万超）なら、
+  // body で方式を指定せず、profile（か year の行の上書き）の方式が Y 年に使えない（2 割特例の期限切れ・売上 1,000 万超）なら、
   // 区分があれば簡易課税（その区分）、無ければ本則で計算する。簡易も使えない（5,000 万超）なら本則。
   let modeSource: SimModeSource = input.source?.consumption_mode ?? 'profile';
   let defaulted: SimWarning | null = null;
   const from = profile.consumption_mode;
-  if (modeSource === 'profile' && from !== 'unset' && from !== 'simplified' && from !== 'standard') {
+  if (modeSource !== 'body' && from !== 'unset' && from !== 'simplified' && from !== 'standard') {
     const reason = unavailable(profile, input, from);
     if (reason === 'special20_expired' || reason === 'over_10m') {
       const cls = profile.simplified_class;
@@ -280,18 +283,26 @@ export function parseSimBody(db: Db, body: unknown, today: string): { profile: T
   if (year > YEAR_MAX) throw bad('year');
   if (body.profile !== undefined && !isObject(body.profile)) throw bad('profile');
   const cur = getTaxProfile(db);
-  const profile = parseProfileBody((body.profile ?? {}) as Record<string, unknown>, cur ? valuesOf(cur) : DEFAULT_PROFILE);
+  let profile = parseProfileBody((body.profile ?? {}) as Record<string, unknown>, cur ? valuesOf(cur) : DEFAULT_PROFILE);
+  const years = listTaxYears(db);
 
   // 売上の既定: year の行 → 無ければ year 以前で最も新しい revenue の行。経費はその行のもの（無ければ 0）。
   let revenue = intOrNull('revenue');
-  const source: { revenue: SimSource; expenses: SimSource; consumption_mode: 'profile' | 'body' } = {
+  const source: { revenue: SimSource; expenses: SimSource; consumption_mode: 'profile' | 'body' | `tax_years:${number}` } = {
     revenue: 'body',
     expenses: 'body',
     consumption_mode: isObject(body.profile) && body.profile.consumption_mode !== undefined ? 'body' : 'profile',
   };
   let row: { year: number; expenses: number | null } | null = null;
+  // body で方式を指定していなければ、year の行の上書きを使う。2 割特例などの区分は profile のまま残す（既定の方式の補正で使う）。
+  const own = years.find((y) => y.year === year);
+  if (source.consumption_mode === 'profile' && own && own.consumption_mode !== null) {
+    const cls = own.consumption_mode === 'simplified' ? own.simplified_class : profile.simplified_class;
+    profile = { ...profile, consumption_mode: own.consumption_mode, simplified_class: cls };
+    source.consumption_mode = `tax_years:${year}`;
+  }
   if (revenue === undefined) {
-    const r = listTaxYears(db).filter((y) => y.year <= year && y.revenue !== null).at(-1) ?? null;
+    const r = years.filter((y) => y.year <= year && y.revenue !== null).at(-1) ?? null;
     revenue = r ? r.revenue : null;
     source.revenue = r ? `tax_years:${r.year}` : 'default';
     row = r;
