@@ -117,7 +117,8 @@ function annual(profile: TaxProfileValues, input: SimInput): { amounts: SimAmoun
   for (let y = Y - 3; y <= Y + 1; y++) {
     years.push({
       year: y, kind: 'estimate', revenue: input.revenue, expenses: input.taxable_purchases, business_income: businessIncome, social_insurance_paid: null,
-      income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null, source: 'manual',
+      income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null,
+      salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null, source: 'manual',
     });
   }
   const res = estimate(p, years, { from: `${Y - 1}-01-01`, to: `${Y + 2}-12-31` });

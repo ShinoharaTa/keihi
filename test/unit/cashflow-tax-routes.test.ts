@@ -138,6 +138,39 @@ describe('税の見積もりの API', () => {
     assert.deepEqual((await get('/api/tax/estimates')).body.run_id, null);
   });
 
+  test('給与の 4 欄: 保存・GET で返る・監査の changes に出る。控除後 > 支払金額・源泉だけ・負の値は 400', async () => {
+    const salary = { salary_income: 5_000_000, salary_after_deduction: 3_560_000, salary_withheld_tax: 123_030, salary_social_insurance: 700_000 };
+    const put = await send('PUT', '/api/tax/years/2025', { kind: 'actual', social_insurance_paid: 0, ...salary });
+    assert.equal(put.status, 200);
+    assert.deepEqual(
+      [put.body.year.salary_income, put.body.year.salary_after_deduction, put.body.year.salary_withheld_tax, put.body.year.salary_social_insurance],
+      [5_000_000, 3_560_000, 123_030, 700_000],
+    );
+    const y = (await get('/api/tax/profile')).body.years.find((x: { year: number }) => x.year === 2025);
+    assert.deepEqual({ ...salary, ...y }, y);
+    const a = db.prepare(`SELECT payload_json FROM audit_log WHERE action = 'tax_year.updated' ORDER BY seq DESC LIMIT 1`).get() as { payload_json: string };
+    const changes = JSON.parse(a.payload_json).changes;
+    for (const [k, v] of Object.entries(salary)) assert.deepEqual(changes[k], { from: null, to: v }, k);
+
+    // 部分更新: 重ねた後の値で確かめる（支払金額だけ下げて控除後を超える）。
+    for (const [body, code] of [
+      [{ salary_income: 3_000_000 }, 'invalid_salary_after_deduction'],
+      [{ salary_income: -1 }, 'invalid_salary_income'],
+      [{ salary_after_deduction: -1 }, 'invalid_salary_after_deduction'],
+      [{ salary_withheld_tax: -1 }, 'invalid_salary_withheld_tax'],
+      [{ salary_social_insurance: 1.5 }, 'invalid_salary_social_insurance'],
+      [{ salary_income: null, salary_after_deduction: null }, 'salary_income_required'],
+    ] as [Record<string, unknown>, string][]) {
+      assert.deepEqual(await send('PUT', '/api/tax/years/2025', body), { status: 400, body: { error: code } }, JSON.stringify(body));
+    }
+    assert.deepEqual(await send('PUT', '/api/tax/years/2026', { kind: 'estimate', salary_withheld_tax: 10_000 }), { status: 400, body: { error: 'salary_income_required' } });
+    assert.deepEqual(await send('PUT', '/api/tax/years/2026', { kind: 'estimate', salary_social_insurance: 10_000 }), { status: 400, body: { error: 'salary_income_required' } });
+    // 控除後の金額だけでも給与所得は出せる。支払金額 = 控除後 は通る。
+    assert.equal((await send('PUT', '/api/tax/years/2026', { kind: 'estimate', salary_after_deduction: 1_000_000, salary_withheld_tax: 10_000 })).status, 200);
+    assert.equal((await send('PUT', '/api/tax/years/2026', { salary_income: 1_000_000 })).status, 200);
+    assert.ok(verifyAudit(db).ok);
+  });
+
   test('PUT /api/tax: profile と years を一括で保存し、再計算は 1 回', async () => {
     const r = await send('PUT', '/api/tax', {
       profile: { consumption_mode: 'standard', revenue_includes_tax: false, nhi_members_40_64: 1 },

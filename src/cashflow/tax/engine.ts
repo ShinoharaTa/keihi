@@ -4,8 +4,11 @@
 // どの年の所得で決まるか: 所得税は Y、予定納税は Y−1 の申告納税額、住民税・国保・事業税（Y 年度）は Y−1。
 // 消費税は Y の売上・経費（無ければ前の年で最も新しい売上を繰り越す）、中間申告は Y−1 年分の国税分。
 // 国民年金の月払いは年度ごとに 1 項目（recurrence = monthly、5 月末〜翌 4 月末に 12 回）。社会保険料控除は月ごとの内訳で数える。
-// 所得 = 事業所得（青色申告特別控除の後）。business_income があればそれ、無ければ revenue − expenses − 青色控除（負なら 0）。
-// 入力が無い年: 直近の前の年の所得を繰り越す（carried_from）。Y−1 がどこにも無ければ Y の所得で代える（assumed_prev_year。住民税・国保・事業税だけ）。
+// 所得 = 合計所得 = 事業所得（青色申告特別控除の後）+ 給与所得（負なら 0）。事業所得は business_income があればそれ、無ければ
+// revenue − expenses − 青色控除（負なら 0）。給与所得は salary_after_deduction があればそれ、無ければ salary_income から給与所得控除の表で。
+// 入力が無い年: 事業所得は直近の前の年から繰り越す（carried_from）。給与は繰り越さない（その年の行に給与があれば事業は 0 で繰り越さない）。
+// Y−1 がどこにも無ければ Y の所得で代える（assumed_prev_year。住民税・国保・事業税だけ）。事業税は事業所得だけ（給与は入れない）。
+// 所得税の申告納税額は 年税額 − 給与の源泉徴収税額（負なら還付。項目は作らず警告 income_tax_refund）。
 // 丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨てにし、端数は 1 期目。
 // 期日: 名目の日（月末・3/15 など）が休日なら翌営業日（祝日データの無い年は土日だけ。src/calendar/businessDays.ts）。
 import { addDays, addMonths, isBusinessDay } from '../../calendar/businessDays.ts';
@@ -29,6 +32,7 @@ import {
   RESIDENT_DUE_MONTHS,
   RESIDENT_PERSONAL_DEDUCTION,
   RESIDENT_RATES,
+  SALARY_DEDUCTION,
   ratesFor,
   type NhiRates,
   type NhiSegment,
@@ -70,6 +74,7 @@ export type EstimateWarning =
   | { kind: 'simplified_class_missing' } // 簡易課税なのに事業区分が無い（消費税を作らない）
   | { kind: 'special20_expired'; year: number } // 2 割特例は 2026 年分まで（その年分の消費税を作らない）
   | { kind: 'revenue_missing'; year: number } // 消費税を作る方式なのに、その年分の売上がどの年にも無い（消費税を作らない）
+  | { kind: 'income_tax_refund'; year: number; amount: number } // 所得税の還付の見込み（予定には入れない）
   | { kind: 'income_missing'; year: number };
 
 export type EstimateWindow = { from: string; to: string }; // 両端を含む
@@ -109,6 +114,18 @@ export function baseIncomeTax(taxable: number): number {
   return Math.max(0, mulFloor(taxable, b.rate) - b.minus);
 }
 
+// 給与所得（給与所得控除の後）。660 万未満は別表第五を A = 収入 ÷ 4 の千円未満切り捨て の式で概算する（rates.ts の SALARY_DEDUCTION）。
+export function salaryIncomeOf(income: number, year: number): number {
+  const d = ratesFor(SALARY_DEDUCTION, year);
+  if (income <= d.flatUpTo) return Math.max(0, income - d.min);
+  if (income < 6_600_000) {
+    const a = floorTo(income / 4, 1000);
+    return income < 3_600_000 ? Math.round(a * 2.8) - 80_000 : Math.round(a * 3.2) - 440_000;
+  }
+  if (income <= 8_500_000) return Math.floor(income * 0.9) - 1_100_000;
+  return income - 1_950_000;
+}
+
 const isNonNegInt = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
 
 // 国保の区分の料率（プリセットに nhi_rates_json を区分ごとに重ねる）。どちらも無いか、重ねた結果で 4 区分の
@@ -130,7 +147,8 @@ export function nhiRatesOf(p: Pick<TaxProfileValues, 'nhi_preset' | 'nhi_rates_j
   return out as NhiRates;
 }
 
-type Resolved = { income: number; preBlue: number; carriedFrom?: number; incomeYear: number; assumed?: true };
+// business = 事業所得（青色控除後）、preBlue = 事業の青色控除前、salary = 給与所得（無ければ null）、total = 合計所得。
+type Resolved = { business: number; preBlue: number; salary: number | null; total: number; carriedFrom?: number; incomeYear: number; assumed?: true };
 
 type Due = { key: string; name: string; amount: number; nominal: string; due: string; recurrence?: 'monthly'; end?: string };
 
@@ -151,7 +169,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     if (year >= y0) missing.add(year);
   };
 
-  // その年の行から所得（青色控除後）と控除前の所得。出せなければ null。
+  // その年の行から事業所得（青色控除後）と控除前の所得。出せなければ null。
   const incomeOfRow = (y: EstimateYear): { income: number; preBlue: number } | null => {
     if (y.business_income !== null) return { income: y.business_income, preBlue: y.business_income + blue };
     if (y.revenue !== null && y.expenses !== null) {
@@ -161,13 +179,28 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     return null;
   };
 
-  // Y の所得。Y に無ければ前の年で最も新しいものを繰り越す。
+  // その年の行の給与所得。無ければ null。
+  const salaryOfRow = (y: EstimateYear | undefined): number | null => {
+    if (!y) return null;
+    if (y.salary_after_deduction !== null) return y.salary_after_deduction;
+    return y.salary_income !== null ? salaryIncomeOf(y.salary_income, y.year) : null;
+  };
+  const totalOf = (business: number, salary: number | null) => Math.max(0, business + (salary ?? 0));
+  // Y の所得。事業は Y に無ければ前の年で最も新しいものを繰り越す（Y に給与があれば事業 0 で繰り越さない）。給与は繰り越さない。
+  // さかのぼって最初に当たった行が給与だけ（事業の値なし）なら、そこで止めて事業 0 を繰り越す（それより古い事業の行まで飛ばさない）。
   const resolve = (year: number): Resolved | null => {
+    const row = rows.get(year);
+    const salary = salaryOfRow(row);
+    const own = row ? incomeOfRow(row) : null;
+    if (own) return { business: own.income, preBlue: own.preBlue, salary, total: totalOf(own.income, salary), incomeYear: year };
+    if (salary !== null) return { business: 0, preBlue: 0, salary, total: totalOf(0, salary), incomeYear: year };
     for (let i = sortedYears.length - 1; i >= 0; i--) {
       const y = sortedYears[i];
-      if (y > year) continue;
-      const r = incomeOfRow(rows.get(y)!);
-      if (r) return { ...r, incomeYear: y, ...(y !== year ? { carriedFrom: y } : {}) };
+      if (y >= year) continue;
+      const prev = rows.get(y)!;
+      const r = incomeOfRow(prev);
+      if (r) return { business: r.income, preBlue: r.preBlue, salary: null, total: totalOf(r.income, null), incomeYear: y, carriedFrom: y };
+      if (salaryOfRow(prev) !== null) return { business: 0, preBlue: 0, salary: null, total: 0, incomeYear: y, carriedFrom: y };
     }
     return null;
   };
@@ -189,6 +222,13 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     ...(r.assumed ? { assumed_prev_year: true as const } : {}),
     ...(r.carriedFrom !== undefined ? { carried_from: r.carriedFrom } : {}),
   });
+
+  // 内訳の所得の行（事業所得・給与所得（あれば）・合計所得）。給与は繰り越さないので incomeYear の行のもの。
+  const incomeLines = (r: Resolved): BreakdownLine[] => [
+    { label: `${r.incomeYear} 年の事業所得`, amount: r.business },
+    ...(r.salary !== null ? [{ label: `${r.incomeYear} 年の給与所得`, amount: r.salary }] : []),
+    { label: '合計所得', amount: r.total },
+  ];
 
   const memo = new Map<string, unknown>();
   const cached = <T>(k: string, f: () => T): T => {
@@ -242,8 +282,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       if (!rates || profile.nhi_members < 1) return { dues: [], b: null };
       const r = resolvePrev(f);
       if (!r) return { dues: [], b: null };
-      const base = Math.max(0, r.income - rates.basic_deduction);
-      const lines: BreakdownLine[] = [{ label: `${r.incomeYear} 年の所得`, amount: r.income }, { label: '課税標準（所得 − 基礎控除）', amount: base }];
+      const base = Math.max(0, r.total - rates.basic_deduction);
+      const lines: BreakdownLine[] = [...incomeLines(r), { label: '課税標準（所得 − 基礎控除）', amount: base }];
       const labels = { medical: '医療分', support: '後期高齢者支援金分', care: '介護分', children: '子ども・子育て支援金分' } as const;
       let total = 0;
       for (const s of NHI_SEGMENTS) {
@@ -264,21 +304,28 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       return { dues, b: { group: `nhi:${f}`, kind: 'nhi', year: f, total, lines, ...meta(r) } };
     });
 
-  // Y 年に払った社会保険料（確定値があればそれ。無ければ年金 + 国保の見積もりで、名目の期日が Y 年のもの）。
-  const social = (year: number): number =>
+  // Y 年に払った社会保険料 = 給与天引き分 + 自分で払った分。
+  // 給与天引き分は Y の行の salary_social_insurance（r が Y の給与所得を足したときだけ。繰り越した年には足さない）。
+  // 自分で払った分は Y の行の social_insurance_paid（actual・estimate を問わない）。無ければ年金 + 国保の見積もりで、名目の期日が Y 年のもの。
+  const selfPaidSocial = (year: number): number =>
     cached(`social:${year}`, () => {
-      const a = actual(year);
-      if (a && a.social_insurance_paid !== null) return a.social_insurance_paid;
+      const row = rows.get(year);
+      if (row && row.social_insurance_paid !== null) return row.social_insurance_paid;
       let s = 0;
       for (const f of [year - 1, year]) {
         for (const d of [...pension(f).dues, ...nhi(f).dues]) if (d.nominal.startsWith(`${year}-`)) s += d.amount;
       }
       return s;
     });
+  const social = (year: number, r: Resolved): number => {
+    const withheld = r.carriedFrom === undefined && r.salary !== null && r.incomeYear === year ? rows.get(year)?.salary_social_insurance ?? 0 : 0;
+    return withheld + selfPaidSocial(year);
+  };
 
-  // ---- 所得税（Y 年分の申告納税額。予定納税を引く前） ----
+  // ---- 所得税（Y 年分の申告納税額。予定納税を引く前。負なら還付） ----
   const incomeTax = (year: number): { tax: number; lines: BreakdownLine[]; r: Resolved | null } | null =>
     cached(`it:${year}`, () => {
+      // 確定値（申告書の申告納税額）は源泉徴収を引いた後なので、ここからは引かない。
       const a = actual(year);
       if (a && a.income_tax_final !== null) return { tax: a.income_tax_final, lines: [{ label: '申告納税額（確定値）', amount: a.income_tax_final }], r: null };
       const r = resolve(year);
@@ -286,21 +333,27 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
         noteMissing(year);
         return null;
       }
-      const soc = social(year);
-      const basic = step(ratesFor(INCOME_TAX_BASIC_DEDUCTION, year), r.income);
+      const soc = social(year, r);
+      const basic = step(ratesFor(INCOME_TAX_BASIC_DEDUCTION, year), r.total);
       const pers = INCOME_TAX_PERSONAL_DEDUCTION * personal;
-      const taxable = floorTo(Math.max(0, r.income - soc - profile.other_deductions - basic - pers), 1000);
+      const taxable = floorTo(Math.max(0, r.total - soc - profile.other_deductions - basic - pers), 1000);
       const base = baseIncomeTax(taxable);
-      const tax = floorTo(base + mulFloor(base, RECONSTRUCTION_RATE), 100);
+      // 年税額は円未満切り捨て（100 円では丸めない）。源泉徴収を引いた後が 0 以上なら 100 円未満切り捨て、負なら還付（円単位）。
+      const annual = base + mulFloor(base, RECONSTRUCTION_RATE);
+      const withheld = rows.get(year)?.salary_withheld_tax ?? 0;
+      const net = annual - withheld;
+      const tax = net >= 0 ? floorTo(net, 100) : net;
       const lines: BreakdownLine[] = [
-        { label: `${r.incomeYear} 年の所得`, amount: r.income },
+        ...incomeLines(r),
         { label: '社会保険料控除', amount: soc },
         ...(profile.other_deductions ? [{ label: 'その他の控除（iDeCo 等）', amount: profile.other_deductions }] : []),
         { label: '基礎控除', amount: basic },
         ...(pers ? [{ label: '配偶者・扶養控除', amount: pers }] : []),
         { label: '課税所得', amount: taxable },
         { label: '所得税（速算表）', amount: base },
-        { label: '申告納税額（復興特別所得税を含む）', amount: tax },
+        { label: '年税額（復興特別所得税を含む）', amount: annual },
+        ...(withheld ? [{ label: '給与の源泉徴収税額', amount: withheld }] : []),
+        { label: '申告納税額', amount: tax },
       ];
       return { tax, lines, r };
     });
@@ -309,35 +362,45 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   const prepay = (year: number): { dues: Due[]; basis: number | null } =>
     cached(`prepay:${year}`, () => {
       const prev = incomeTax(year - 1);
-      if (!prev || prev.tax < PREPAY_THRESHOLD) return { dues: [], basis: prev?.tax ?? null };
-      const each = floorTo(prev.tax / PREPAY_FRACTION, 100);
+      // 基準額は申告納税額（還付なら 0）。
+      const basis = prev ? Math.max(0, prev.tax) : null;
+      if (basis === null || basis < PREPAY_THRESHOLD) return { dues: [], basis };
+      const each = floorTo(basis / PREPAY_FRACTION, 100);
       const dues = ([[1, 7], [2, 11]] as const).map(([i, m]) => {
         const nominal = monthEnd(year, m);
         return { key: `income_tax:${year}:prepay${i}`, name: `所得税 ${year} 年分 予定納税 第 ${i} 期（見積）`, amount: each, nominal, due: nextBusinessDay(nominal) };
       });
-      return { dues, basis: prev.tax };
+      return { dues, basis };
     });
 
-  const incomeTaxGroup = (year: number): { dues: Due[]; b: Breakdown | null } => {
+  const incomeTaxGroup = (year: number): { dues: Due[]; b: Breakdown | null; refund?: number } => {
     const it = incomeTax(year);
     const pre = prepay(year);
     const dues: Due[] = [...pre.dues];
     const lines: BreakdownLine[] = [];
     if (pre.basis !== null) lines.push({ label: `予定納税の基準額（${year - 1} 年分）`, amount: pre.basis });
     if (pre.dues.length) lines.push({ label: '予定納税（各期）', amount: pre.dues[0].amount });
-    const total = it ? it.tax : pre.dues.reduce((s, d) => s + d.amount, 0);
+    const total = it ? Math.max(0, it.tax) : pre.dues.reduce((s, d) => s + d.amount, 0);
+    let refund: number | undefined;
     if (it) {
       const a = actual(year);
       const prepaid = a && a.prepaid_income_tax !== null ? a.prepaid_income_tax : pre.dues.reduce((s, d) => s + d.amount, 0);
       const final = it.tax - prepaid;
       lines.push(...it.lines, { label: '納めた予定納税', amount: prepaid }, { label: '確定申告で納める額', amount: Math.max(0, final) });
+      if (final < 0) {
+        // 還付は入金日が読めないので予定に入れない（警告と内訳の行だけ）。
+        refund = -final;
+        lines.push({ label: '還付見込み', amount: refund });
+      }
       if (final > 0) {
         const nominal = `${year + 1}-03-15`;
         dues.push({ key: `income_tax:${year}:final`, name: `所得税 ${year} 年分 確定申告（見積）`, amount: final, nominal, due: nextBusinessDay(nominal) });
       }
     }
-    if (dues.length === 0) return { dues, b: null };
-    return { dues, b: { group: `income_tax:${year}`, kind: 'income_tax', year, total, lines, ...(it?.r ? meta(it.r) : {}) } };
+    const r = refund !== undefined ? { refund } : {};
+    // 還付だけの年（項目が無い）も内訳は返す（期間に入るかは呼ぶ側が確定申告の期日で決める）。
+    if (dues.length === 0 && refund === undefined) return { dues, b: null };
+    return { dues, b: { group: `income_tax:${year}`, kind: 'income_tax', year, total, lines, ...(it?.r ? meta(it.r) : {}) }, ...r };
   };
 
   // ---- 住民税（F 年度。F−1 年の所得） ----
@@ -345,13 +408,13 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     const r = resolvePrev(f);
     if (!r) return { dues: [], b: null };
     const rates = ratesFor(RESIDENT_RATES, f);
-    const soc = social(r.incomeYear);
+    const soc = social(r.incomeYear, r);
     const pers = RESIDENT_PERSONAL_DEDUCTION * personal;
-    const taxable = floorTo(Math.max(0, r.income - soc - profile.other_deductions - rates.basicDeduction - pers), 1000);
+    const taxable = floorTo(Math.max(0, r.total - soc - profile.other_deductions - rates.basicDeduction - pers), 1000);
     const incomeLevy = floorTo(Math.max(0, mulFloor(taxable, rates.rate) - rates.adjustmentCredit), 100);
     const total = incomeLevy + rates.perCapita;
     const lines: BreakdownLine[] = [
-      { label: `${r.incomeYear} 年の所得`, amount: r.income },
+      ...incomeLines(r),
       { label: '社会保険料控除', amount: soc },
       ...(profile.other_deductions ? [{ label: 'その他の控除（iDeCo 等）', amount: profile.other_deductions }] : []),
       { label: '基礎控除', amount: rates.basicDeduction },
@@ -368,14 +431,14 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     return { dues, b: { group: `resident:${f}`, kind: 'resident', year: f, total, lines, ...meta(r) } };
   };
 
-  // ---- 個人事業税（F 年度。F−1 年の所得 + 青色控除 − 事業主控除） ----
+  // ---- 個人事業税（F 年度。F−1 年の事業所得 + 青色控除 − 事業主控除。給与は入れない） ----
   const bizTax = (f: number): { dues: Due[]; b: Breakdown | null } => {
     if (profile.biz_tax_rate === null) return { dues: [], b: null };
     const r = resolvePrev(f);
     if (!r) return { dues: [], b: null };
     const base = r.preBlue - BIZ_TAX_DEDUCTION;
     const lines: BreakdownLine[] = [
-      { label: `${r.incomeYear} 年の所得（青色控除の前）`, amount: r.preBlue },
+      { label: `${r.incomeYear} 年の事業所得（青色控除の前）`, amount: r.preBlue },
       { label: '事業主控除', amount: BIZ_TAX_DEDUCTION },
     ];
     if (base <= 0) return { dues: [], b: null };
@@ -506,8 +569,17 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   };
   const special20Expired: number[] = [];
   const revenueMissing: number[] = [];
+  const refunds: { year: number; amount: number }[] = [];
   for (let y = y0; y <= y1; y++) {
-    add('income_tax', y, incomeTaxGroup(y));
+    const itg = incomeTaxGroup(y);
+    const shown = breakdown.length;
+    add('income_tax', y, itg);
+    // 還付は、その年分の確定申告の期日が期間に入る年だけ数える。項目が無くても（還付だけの年）内訳は出す。
+    const itDue = nextBusinessDay(`${y + 1}-03-15`);
+    if (itg.refund !== undefined && itDue >= window.from && itDue <= window.to) {
+      refunds.push({ year: y, amount: itg.refund });
+      if (breakdown.length === shown && itg.b) breakdown.push(itg.b);
+    }
     add('resident', y, resident(y));
     add('nhi', y, nhi(y));
     add('biz_tax', y, bizTax(y));
@@ -526,6 +598,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   if (mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
   for (const year of special20Expired) warnings.push({ kind: 'special20_expired', year });
   for (const year of revenueMissing) warnings.push({ kind: 'revenue_missing', year });
+  for (const x of refunds) warnings.push({ kind: 'income_tax_refund', ...x });
   for (const year of [...missing].sort((a, b) => a - b)) warnings.push({ kind: 'income_missing', year });
   return { items, warnings, breakdown };
 }

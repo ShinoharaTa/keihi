@@ -56,6 +56,16 @@ export const INCOME_TAX_BASIC_DEDUCTION: Readonly<Record<number, readonly Step[]
   ],
 };
 
+// 給与所得控除。収入 ≤ flatUpTo なら min、それより上の段（30% + 8 万 / 20% + 44 万 / 10% + 110 万 / 上限 195 万）は年分で共通。
+// 660 万未満は所得税法別表第五で、engine.ts の salaryIncomeOf が A = 収入 ÷ 4 の千円未満切り捨て の式で概算する（別表との差は数千円以内）。
+// 令和 7 年分 190 万以下 65 万、令和 8・9 年分 220 万以下 74 万。令和 10 年分以後は未確認（2026 の値を繰り越す）。2024 年以前も 2025 の値で代える（対象外）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1410.htm
+export type SalaryDeduction = { min: number; flatUpTo: number };
+export const SALARY_DEDUCTION: Readonly<Record<number, SalaryDeduction>> = {
+  2025: { min: 650_000, flatUpTo: 1_900_000 },
+  2026: { min: 740_000, flatUpTo: 2_200_000 },
+};
+
 // 配偶者控除・扶養控除（一般）。所得税 38 万、住民税 33 万。所得制限・特定扶養などの細部は見ない（概算）。
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1180.htm
 export const INCOME_TAX_PERSONAL_DEDUCTION = 380_000;

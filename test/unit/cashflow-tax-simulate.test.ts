@@ -25,7 +25,8 @@ describe('定常状態の 1 年分', () => {
     const income = 8_000_000 - 1_000_000 - 650_000;
     const years: EstimateYear[] = [2024, 2025, 2026, 2027, 2028].map((year) => ({
       year, kind: 'estimate', revenue: 8_000_000, expenses: 1_000_000, business_income: income, social_insurance_paid: null,
-      income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null, source: 'manual',
+      income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null,
+      salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null, source: 'manual',
     }));
     const e = estimate(p, years, { from: '2026-01-01', to: '2029-12-31' });
     const b = (kind: string, year: number) => e.breakdown.find((x) => x.kind === kind && x.year === year)!.total;
