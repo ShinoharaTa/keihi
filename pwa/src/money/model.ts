@@ -1,5 +1,7 @@
 // 「お金」タブの型と純関数（docs/mvp-plan-v3.md T111・T304）。API の形は src/web/routes/{bank,tags,cashflow}.ts・src/bank/summary.ts・
 // src/cashflow/forecast.ts に合わせる。描画（*.tsx）から使い、テスト（test/unit/money-pwa.test.ts）からも直接読む。
+// 給与所得の計算はサーバーと同じ関数（rates.ts は import の無い定数と純関数だけ。money のチャンクに入る）。
+import { salaryIncomeOf } from '../../../src/cashflow/tax/rates.ts';
 export type Tag = 'business' | 'private' | 'unset';
 export type TransferKind = 'transfer' | 'card_settlement' | 'charge';
 export type Amounts = { income: number; expense: number };
@@ -294,6 +296,8 @@ export const ERROR_TEXT: Record<string, string> = {
   not_linked: 'この証憑は紐付いていません。読み直してください。',
   document_not_found: '証憑が見つかりませんでした。',
   document_not_matchable: 'この証憑は却下・重複・私用のため紐付けられません。',
+  invalid_salary_after_deduction: '給与所得控除後の金額は支払金額以下で入れてください。',
+  salary_income_required: '源泉徴収税額・社会保険料等の金額を入れるときは、支払金額か給与所得控除後の金額も入れてください。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -1030,6 +1034,11 @@ export type TaxYear = {
   income_tax_final: number | null;
   consumption_tax_final: number | null;
   prepaid_income_tax: number | null;
+  // 源泉徴収票の 4 欄（給与の無い年は null）。
+  salary_income: number | null; // 支払金額
+  salary_after_deduction: number | null; // 給与所得控除後の金額（無ければ支払金額から計算）
+  salary_withheld_tax: number | null; // 源泉徴収税額
+  salary_social_insurance: number | null; // 社会保険料等の金額
 };
 export type TaxProfileResponse = { profile: TaxProfile | null; years: TaxYear[]; presets: { id: string; label: string }[]; missing: string[] };
 export type TaxWarning =
@@ -1039,6 +1048,7 @@ export type TaxWarning =
   | { kind: 'simplified_class_missing' }
   | { kind: 'revenue_missing'; year: number }
   | { kind: 'income_missing'; year: number }
+  | { kind: 'income_tax_refund'; year: number; amount: number }
   | { kind: 'pinned_withdrawn'; key: string; item_id: string }
   | { kind: 'possible_duplicate'; key: string; item_ids: [string, string] };
 export type RunSummary = { run_id: string; created: number; updated: number; deactivated: number; skipped_pinned: unknown[]; warnings: TaxWarning[] };
@@ -1086,12 +1096,28 @@ export const DEFAULT_TAX_PROFILE: TaxProfile = {
   payment_account_id: null,
 };
 
-// その年の所得（青色控除後）。その年に無ければ前の年で最も新しいものを繰り越す（サーバーの engine.ts と同じ）。出せなければ null。
+// その年の合計所得 = 事業所得（青色控除後）+ 給与所得（負なら 0。サーバーの engine.ts の resolve と同じ）。出せなければ null。
+// 事業はその年に無ければ前の年で最も新しいものを繰り越す（その年に給与があれば事業 0 で繰り越さない）。給与は繰り越さない。
+// さかのぼって最初に当たった行が給与だけなら、そこで止めて事業 0（それより古い事業の行まで飛ばさない）。
 export function taxIncome(years: TaxYear[], year: number, blue: BlueReturn): number | null {
-  const rows = years.filter((y) => y.year <= year).sort((a, b) => b.year - a.year);
-  for (const y of rows) {
+  const business = (y: TaxYear): number | null => {
     if (y.business_income !== null) return y.business_income;
     if (y.revenue !== null && y.expenses !== null) return Math.max(0, y.revenue - y.expenses - BLUE_DEDUCTION[blue]);
+    return null;
+  };
+  // 給与所得: 控除後の金額があればそれ、無ければ支払金額から給与所得控除の表で（engine と同じ関数）。
+  const salary = (y: TaxYear): number | null =>
+    y.salary_after_deduction != null ? y.salary_after_deduction : y.salary_income != null ? salaryIncomeOf(y.salary_income, y.year) : null;
+  const row = years.find((y) => y.year === year);
+  if (row) {
+    const b = business(row);
+    const s = salary(row);
+    if (b !== null || s !== null) return Math.max(0, (b ?? 0) + (s ?? 0));
+  }
+  for (const y of years.filter((y) => y.year < year).sort((a, b) => b.year - a.year)) {
+    const b = business(y);
+    if (b !== null) return Math.max(0, b);
+    if (salary(y) !== null) return 0;
   }
   return null;
 }
@@ -1189,22 +1215,35 @@ export function taxProfileBody(d: TaxProfileDraft): Record<string, unknown> | st
 
 // 年ごとの入力の列。確定の年と見込みの年で項目が違う。
 export type TaxYearField = Exclude<keyof TaxYear, 'year' | 'kind'>;
-export const ACTUAL_FIELDS: readonly { k: TaxYearField; label: string }[] = [
-  { k: 'business_income', label: '所得（青色控除後）' },
+// social_insurance_paid は給与天引き以外で払った社会保険料（国保・国民年金など。空なら年金・国保の見積もり。docs/cashflow.md §14）。
+export type TaxYearFieldDef = { k: TaxYearField; label: string; placeholder?: string; note?: string };
+const SOCIAL_SELF: TaxYearFieldDef = { k: 'social_insurance_paid', label: '社会保険料（給与天引き以外）', placeholder: '空なら見積もり' };
+export const ACTUAL_FIELDS: readonly TaxYearFieldDef[] = [
+  { k: 'business_income', label: '事業所得（青色控除後）' },
   { k: 'income_tax_final', label: '所得税の申告納税額' },
   { k: 'prepaid_income_tax', label: '納めた予定納税' },
   { k: 'consumption_tax_final', label: '消費税額（国税分）' },
-  { k: 'social_insurance_paid', label: '社会保険料' },
+  SOCIAL_SELF,
 ];
-export const ESTIMATE_FIELDS: readonly { k: TaxYearField; label: string }[] = [
+export const ESTIMATE_FIELDS: readonly TaxYearFieldDef[] = [
   { k: 'revenue', label: '売上' },
   { k: 'expenses', label: '経費' },
   { k: 'business_income', label: '所得を直接（入れたら優先）' },
+  SOCIAL_SELF,
 ];
+// 給与（源泉徴収票）。確定・見込みの両方の年に出す。ラベルは票の欄名どおり。空欄は null。
+export const SALARY_FIELDS: readonly TaxYearFieldDef[] = [
+  { k: 'salary_income', label: '支払金額' },
+  { k: 'salary_after_deduction', label: '給与所得控除後の金額', note: '退職した年の票は空欄のことがあります。空なら支払金額から計算します' },
+  { k: 'salary_withheld_tax', label: '源泉徴収税額' },
+  { k: 'salary_social_insurance', label: '社会保険料等の金額' },
+];
+// 給与の欄を開いておくか（保存した行に給与の値がどれかあれば開く）。
+export const taxSalaryOpen = (row: TaxYear | undefined): boolean => !!row && SALARY_FIELDS.some((f) => row[f.k] != null);
 // placeholders: 確定の年に見込みの行（売上・経費だけ）が残っているときの所得欄の注記。
 export type TaxYearDraft = { year: number; kind: TaxYearKind; values: Partial<Record<TaxYearField, string>>; placeholders?: Partial<Record<TaxYearField, string>> };
 export const ESTIMATE_KEPT = '見込みの値（売上 − 経費）のまま';
-const fieldsOf = (kind: TaxYearKind) => (kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS);
+const fieldsOf = (kind: TaxYearKind) => [...(kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS), ...SALARY_FIELDS];
 
 // 今年の前年は確定、今年から 3 年は見込み。
 export function taxYearDrafts(years: TaxYear[], today: string): TaxYearDraft[] {
@@ -1254,6 +1293,8 @@ export function taxWarningText(w: TaxWarning): string {
       return revenueMissing(w.year);
     case 'income_missing':
       return `${w.year} 年の所得が無い分は作っていません。`;
+    case 'income_tax_refund':
+      return `${w.year} 年分は約 ${yen(w.amount)} 円の還付見込み（入金予定には入れていません）。`;
     case 'pinned_withdrawn':
       return '計算から外れた手直しの項目を残しています。';
     case 'possible_duplicate':

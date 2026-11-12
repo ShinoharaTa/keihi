@@ -101,6 +101,7 @@ import {
   tagShares,
   taxCardLine,
   taxIncome,
+  taxSalaryOpen,
   taxProfileBody,
   taxProfileDraft,
   taxSaveBody,
@@ -661,8 +662,14 @@ const taxYear = (year: number, over: Partial<TaxYear> = {}): TaxYear => ({
   income_tax_final: null,
   consumption_tax_final: null,
   prepaid_income_tax: null,
+  salary_income: null,
+  salary_after_deduction: null,
+  salary_withheld_tax: null,
+  salary_social_insurance: null,
   ...over,
 });
+// 給与の 4 欄が空の本文（年の本文は常に送る）。
+const noSalary = { salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null };
 const taxYears = [
   taxYear(2025, { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }),
   taxYear(2026, { revenue: 5000000, expenses: 350000 }),
@@ -685,11 +692,62 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(taxIncome(taxYears, 2025, '65'), 3200000);
     assert.equal(taxIncome([taxYear(2026, { revenue: 100000, expenses: 0 })], 2026, '65'), 0, '負にしない');
     assert.equal(taxIncome([], 2026, '65'), null);
+    assert.equal(taxIncome([taxYear(2026, { business_income: -300000 })], 2026, '65'), 0, '合計所得は負にしない（engine と同じ）');
     assert.equal(tokyoDate('2026-11-06T15:30:00.000Z'), '2026-11-07');
     assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 · 消費税 未設定 / 最終計算 11/7');
     const s20 = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' as const }, last_run_at: '2026-11-06T15:30:00.000Z' };
     assert.equal(taxCardLine(s20, TODAY), '2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7');
     assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 · 消費税 未設定 / 最終計算 —');
+  });
+  test('合計所得 = 事業所得 + 給与所得（engine の resolve と同じ。給与は繰り越さない）', () => {
+    // 給与だけの年: 控除後の金額があればそれ、無ければ支払金額から給与所得控除の表で（2025 年 2,000,000 → 1,320,000）。
+    assert.equal(taxIncome([taxYear(2025, { kind: 'actual', salary_income: 5000000, salary_after_deduction: 3560000 })], 2025, '65'), 3560000);
+    assert.equal(taxIncome([taxYear(2025, { salary_income: 2000000 })], 2025, '65'), 1320000);
+    assert.equal(taxIncome([taxYear(2026, { salary_income: 2000000 })], 2026, '65'), 1260000, '2026 年分の給与所得控除');
+    // 混在年: 事業 + 給与。
+    assert.equal(taxIncome([taxYear(2025, { business_income: 2000000, salary_income: 2000000 })], 2025, '65'), 3320000);
+    assert.equal(taxIncome([taxYear(2026, { revenue: 5000000, expenses: 350000, salary_after_deduction: 1000000 })], 2026, '65'), 5000000);
+    // 繰り越し: 事業だけ繰り越し、給与は繰り越さない。
+    assert.equal(taxIncome([taxYear(2025, { business_income: 2000000, salary_income: 2000000 })], 2026, '65'), 2000000);
+    // 直近の前の行が給与だけなら事業 0 で止まる（それより古い事業の行まで飛ばさない）。
+    const ys = [taxYear(2024, { kind: 'actual', business_income: 3000000 }), taxYear(2025, { kind: 'actual', salary_income: 5000000 })];
+    assert.equal(taxIncome(ys, 2026, '65'), 0);
+    assert.equal(taxIncome(ys, 2025, '65'), 3560000, '給与だけの年は「未入力」にならない');
+    // その年に給与があれば前の年の事業を繰り越さない。
+    assert.equal(taxIncome([taxYear(2025, { business_income: 2000000 }), taxYear(2026, { salary_income: 2000000 })], 2026, '65'), 1260000);
+    const salaryOnly = { ...taxData, years: [taxYear(2026, { salary_income: 3000000 })], last_run_at: null };
+    assert.equal(taxCardLine(salaryOnly, TODAY), '2026 年分 所得 202万円 · 消費税 未設定 / 最終計算 —');
+  });
+  test('給与（源泉徴収票）の 4 欄: 下書きに戻る・数値で送る・空欄は null・値があれば開く', () => {
+    const ys = [...taxYears.slice(0, 1).map((y) => ({ ...y, salary_income: 5000000, salary_after_deduction: null, salary_withheld_tax: 123030, salary_social_insurance: 700000 })), taxYears[1]!];
+    const drafts = taxYearDrafts(ys, TODAY);
+    assert.deepEqual(
+      [drafts[0]!.values.salary_income, drafts[0]!.values.salary_after_deduction, drafts[0]!.values.salary_withheld_tax, drafts[0]!.values.salary_social_insurance],
+      ['5000000', '', '123030', '700000'],
+      '既存の値が下書きに戻る（空は空欄）',
+    );
+    assert.equal(drafts[1]!.values.salary_income, '', '見込みの年にも欄がある');
+    assert.deepEqual(taxYearBodies(drafts, ys), [], '何も変えなければ送らない');
+    const edited = drafts.map((d) =>
+      d.year === 2026 ? { ...d, values: { ...d.values, salary_income: '２,０００,０００', salary_withheld_tax: '60000', social_insurance_paid: '200000' } } : d.year === 2025 ? { ...d, values: { ...d.values, salary_social_insurance: '' } } : d,
+    );
+    assert.deepEqual(taxYearBodies(edited, ys), [
+      {
+        year: 2025,
+        body: { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000, salary_income: 5000000, salary_after_deduction: null, salary_withheld_tax: 123030, salary_social_insurance: null },
+      },
+      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: 350000, business_income: null, social_insurance_paid: 200000, salary_income: 2000000, salary_after_deduction: null, salary_withheld_tax: 60000, salary_social_insurance: null } },
+    ]);
+    const saved = taxSaveBody(taxProfileDraft(taxData.profile), edited, { ...taxData, years: ys }) as { years: Record<string, unknown>[] };
+    assert.equal(saved.years[1]!.salary_income, 2000000, 'PUT /api/tax の years に数値で入る');
+    assert.match(taxYearBodies([{ ...drafts[1]!, values: { salary_income: '-1' } }], ys) as string, /2026 年の「支払金額」は整数/, '給与は負を許さない');
+    // 給与だけを入れた新しい年も送る。
+    const only = taxYearDrafts(taxYears, TODAY).map((d) => (d.year === 2027 ? { ...d, values: { ...d.values, salary_after_deduction: '1000000' } } : d));
+    assert.deepEqual(taxYearBodies(only, taxYears), [{ year: 2027, body: { kind: 'estimate', revenue: null, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary, salary_after_deduction: 1000000 } }]);
+    assert.equal(taxSalaryOpen(ys[0]), true);
+    assert.equal(taxSalaryOpen(ys[1]), false);
+    assert.equal(taxSalaryOpen(undefined), false);
+    assert.equal(taxSalaryOpen(taxYear(2026, { salary_withheld_tax: 0 })), true, '0 も値');
   });
   test('プロファイルの本文: 人数の検査、空の口座は null、無ければ既定値', () => {
     const d = taxProfileDraft(null);
@@ -711,8 +769,8 @@ describe('税・保険の見積もりの純関数', () => {
     assert.deepEqual(taxYearBodies(drafts, taxYears), [], '何も変えなければ送らない');
     const edited = drafts.map((d) => (d.year === 2026 ? { ...d, values: { ...d.values, expenses: '' } } : d.year === 2027 ? { ...d, values: { ...d.values, business_income: '−100000' } } : d));
     assert.deepEqual(taxYearBodies(edited, taxYears), [
-      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: null, business_income: null } },
-      { year: 2027, body: { kind: 'estimate', revenue: null, expenses: null, business_income: -100000 } },
+      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary } },
+      { year: 2027, body: { kind: 'estimate', revenue: null, expenses: null, business_income: -100000, social_insurance_paid: null, ...noSalary } },
     ]);
     assert.match(taxYearBodies([{ ...drafts[1]!, values: { revenue: '-5' } }], taxYears) as string, /2026 年の「売上」/);
   });
@@ -724,7 +782,7 @@ describe('税・保険の見積もりの純関数', () => {
     assert.deepEqual(taxYearBodies(next, taxYears), [], '何も編集していなければ空');
     const filled = next.map((d) => (d.year === 2026 ? { ...d, values: { ...d.values, income_tax_final: '150000' } } : d));
     assert.deepEqual(taxYearBodies(filled, taxYears), [
-      { year: 2026, body: { kind: 'actual', business_income: null, income_tax_final: 150000, prepaid_income_tax: null, consumption_tax_final: null, social_insurance_paid: null } },
+      { year: 2026, body: { kind: 'actual', business_income: null, income_tax_final: 150000, prepaid_income_tax: null, consumption_tax_final: null, social_insurance_paid: null, ...noSalary } },
     ]);
     assert.equal(taxYearDrafts(taxYears, TODAY)[0]!.placeholders, undefined, '確定の行には出さない');
   });
@@ -744,10 +802,10 @@ describe('税・保険の見積もりの純関数', () => {
       profile: { consumption_mode: 'simplified', simplified_class: 5 },
     });
     const edited = drafts.map((d) => (d.year === 2027 ? { ...d, values: { ...d.values, revenue: '6000000' } } : d));
-    assert.deepEqual(taxSaveBody(draft, edited, taxData), { years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null }] });
+    assert.deepEqual(taxSaveBody(draft, edited, taxData), { years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary }] });
     assert.deepEqual(taxSaveBody({ ...draft, revenue_includes_tax: false }, edited, taxData), {
       profile: { revenue_includes_tax: false },
-      years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null }],
+      years: [{ year: 2027, kind: 'estimate', revenue: 6000000, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary }],
     });
     const full = taxSaveBody(taxProfileDraft(null), drafts, { profile: null, years: taxYears });
     assert.deepEqual(Object.keys((full as { profile: object }).profile).length, 14, 'プロファイルが無ければ全部の列を送る（作る）');
@@ -761,7 +819,7 @@ describe('税・保険の見積もりの純関数', () => {
     assert.deepEqual(taxSaveBody({ ...taxProfileDraft(noClass.profile), consumption_mode: 'exempt' }, drafts, noClass), { profile: { consumption_mode: 'exempt', simplified_class: null } }, '差が無くても null を含める');
     const actual = drafts.map((d) => (d.year === 2025 ? { ...d, values: { ...d.values, income_tax_final: '190000' } } : d));
     assert.deepEqual(taxSaveBody(draft, actual, taxData), {
-      years: [{ year: 2025, kind: 'actual', business_income: 3200000, income_tax_final: 190000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }],
+      years: [{ year: 2025, kind: 'actual', business_income: 3200000, income_tax_final: 190000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000, ...noSalary }],
     }, '確定の年は kind: actual と確定の欄だけ');
     assert.equal(taxSaveBody({ ...draft, nhi_members: ' 1 ' }, drafts, taxData), null, '空白を足しただけなら変えていない');
     assert.match(taxSaveBody(draft, [{ ...drafts[1]!, values: { revenue: '-5' } }], taxData) as string, /2026 年の「売上」/);
@@ -783,6 +841,8 @@ describe('税・保険の見積もりの純関数', () => {
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
     assert.equal(warningText({ kind: 'revenue_missing', year: 2026 }, (x) => x), '2026 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
     assert.equal(taxWarningText({ kind: 'revenue_missing', year: 2025 }), '2025 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
+    assert.equal(taxWarningText({ kind: 'income_tax_refund', year: 2025, amount: 146427 }), '2025 年分は約 146,427 円の還付見込み（入金予定には入れていません）。');
+    assert.match(runText(r({ warnings: [{ kind: 'income_tax_refund', year: 2025, amount: 146427 }] }), '保存しました。'), /。2025 年分は約 146,427 円の還付見込み/);
   });
 });
 
@@ -1313,7 +1373,17 @@ describe('SSR スナップショット', () => {
     assert.doesNotMatch(form, /独自の料率/);
     assert.match(own, /<option value="W1">PayPay<\/option>/, '今の納税口座は無効でも選択肢に残す');
     assert.match(own, /id="m-tax-2026-business_income" class="m-field" inputMode="numeric" placeholder="見込みの値（売上 − 経費）のまま"/);
-    t.assert.snapshot(lines([unset, set, set20, form, simp].join('\n')));
+    // ラベル: 事業所得と、給与天引き以外の社会保険料（確定・見込みの両方。空なら見積もり）。
+    assert.match(form, /2025 年（確定）[\s\S]*事業所得（青色控除後）[\s\S]*社会保険料（給与天引き以外）[\s\S]*2026 年（見込み）[\s\S]*所得を直接（入れたら優先）[\s\S]*社会保険料（給与天引き以外）/);
+    assert.match(form, /id="m-tax-2026-social_insurance_paid" class="m-field" inputMode="numeric" placeholder="空なら見積もり"/);
+    // 給与（源泉徴収票）: 4 年とも折りたたみ。票の欄名どおり。保存した値が無ければ閉じている。
+    assert.equal(form.match(/<details class="m-details">/g)?.length, 4);
+    assert.match(form, /<summary>[\s\S]*?給与（源泉徴収票）<\/summary>[\s\S]*?支払金額[\s\S]*?給与所得控除後の金額[\s\S]*?退職した年の票は空欄のことがあります。空なら支払金額から計算します[\s\S]*?源泉徴収税額[\s\S]*?社会保険料等の金額/);
+    const salYears = [{ ...taxYears[0]!, salary_income: 5000000, salary_withheld_tax: 123030 }, taxYears[1]!];
+    const sal = html(m.TaxForm!, { data: { ...taxData, years: salYears }, draft, years: taxYearDrafts(salYears, TODAY), accounts: [], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.equal(sal.match(/<details class="m-details" open>/g)?.length, 1, '値のある年だけ開く');
+    assert.match(sal, /<details class="m-details" open>[\s\S]*?id="m-tax-2025-salary_income" class="m-field" inputMode="numeric" value="5000000"/);
+    t.assert.snapshot(lines([unset, set, set20, form, simp, sal].join('\n')));
   });
 
   test('税・保険の見積もり: 台帳の「 · 見積」「 · 手直し」、編集の注記と「自動計算に戻す」、見通しの月の「 · 見積」', async (t) => {

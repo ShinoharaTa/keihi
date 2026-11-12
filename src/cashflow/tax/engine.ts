@@ -32,13 +32,16 @@ import {
   RESIDENT_DUE_MONTHS,
   RESIDENT_PERSONAL_DEDUCTION,
   RESIDENT_RATES,
-  SALARY_DEDUCTION,
   ratesFor,
+  salaryIncomeOf,
   type NhiRates,
   type NhiSegment,
   type Step,
 } from './rates.ts';
 import type { ConsumptionMode, TaxProfileValues, TaxYearValues } from './repo.ts';
+
+// 給与所得の計算は PWA（pwa/src/money/model.ts）と共有するので rates.ts に置く。
+export { salaryIncomeOf };
 
 export type EstimateKind = 'income_tax' | 'resident' | 'nhi' | 'biz_tax' | 'pension' | 'ctax';
 
@@ -112,18 +115,6 @@ export function splitInstallments(total: number, n: number): number[] {
 export function baseIncomeTax(taxable: number): number {
   const b = INCOME_TAX_BRACKETS.find((x) => taxable <= x.upTo)!;
   return Math.max(0, mulFloor(taxable, b.rate) - b.minus);
-}
-
-// 給与所得（給与所得控除の後）。660 万未満は別表第五を A = 収入 ÷ 4 の千円未満切り捨て の式で概算する（rates.ts の SALARY_DEDUCTION）。
-export function salaryIncomeOf(income: number, year: number): number {
-  const d = ratesFor(SALARY_DEDUCTION, year);
-  if (income <= d.flatUpTo) return Math.max(0, income - d.min);
-  if (income < 6_600_000) {
-    const a = floorTo(income / 4, 1000);
-    return income < 3_600_000 ? Math.round(a * 2.8) - 80_000 : Math.round(a * 3.2) - 440_000;
-  }
-  if (income <= 8_500_000) return Math.floor(income * 0.9) - 1_100_000;
-  return income - 1_950_000;
 }
 
 const isNonNegInt = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
