@@ -4,7 +4,7 @@
 //        → 200 {profile, run: RunSummary}（同じトランザクションで再計算する）/ 400 {error}
 //   PUT  /api/tax/years/:year      body {kind（新しい年は必須）, revenue?, expenses?, business_income?, social_insurance_paid?,
 //        income_tax_final?, consumption_tax_final?, prepaid_income_tax?, salary_income?, salary_after_deduction?, salary_withheld_tax?,
-//        salary_social_insurance?} → 200 {year, run: RunSummary} / 400 {error}
+//        salary_social_insurance?, consumption_mode?, simplified_class?（その年分の消費税の方式。両方 null で profile）} → 200 {year, run: RunSummary} / 400 {error}
 //   PUT  /api/tax                  body {profile?: プロファイルの部分更新, years?: [{year, ...年の部分更新}]}（どちらも無ければ 400 empty_body）
 //        → 200 {profile, years: [TaxYear]（全年）, run: RunSummary}。1 トランザクションで profile → years を保存し、再計算は最後に 1 回
 //   POST /api/tax/recalculate      → 200 RunSummary {run_id, created, updated, deactivated, skipped_pinned[], warnings[]}

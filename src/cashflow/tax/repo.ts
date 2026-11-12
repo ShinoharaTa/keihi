@@ -8,6 +8,9 @@ export const BLUE_RETURNS = ['65', '55', '10', 'white'] as const;
 export type BlueReturn = (typeof BLUE_RETURNS)[number];
 export const CONSUMPTION_MODES = ['unset', 'exempt', 'special20', 'simplified', 'standard'] as const;
 export type ConsumptionMode = (typeof CONSUMPTION_MODES)[number];
+// tax_years で上書きできる方式（'unset' は持たない。0016_tax_year_ctax.sql）。
+export const YEAR_CONSUMPTION_MODES = ['exempt', 'special20', 'simplified', 'standard'] as const;
+export type YearConsumptionMode = (typeof YEAR_CONSUMPTION_MODES)[number];
 export const RESIDENT_PAY_MODES = ['ordinary4'] as const;
 export type ResidentPayMode = (typeof RESIDENT_PAY_MODES)[number];
 export const PENSION_MODES = ['monthly', 'prepay6', 'prepay12', 'prepay24', 'none'] as const;
@@ -56,6 +59,8 @@ export type TaxYearRow = {
   salary_after_deduction: number | null; // 給与所得控除後の金額（無ければ salary_income から計算）
   salary_withheld_tax: number | null; // 源泉徴収税額
   salary_social_insurance: number | null; // 社会保険料等の金額（給与天引き）
+  consumption_mode: YearConsumptionMode | null; // その年分の消費税の方式（NULL なら tax_profile。後の年に繰り越さない）
+  simplified_class: number | null; // consumption_mode = simplified のときだけ 1〜6
   source: 'manual' | 'annualized';
   updated_at: string;
 };
@@ -83,7 +88,7 @@ export const PROFILE_COLUMNS = [
 
 export const YEAR_COLUMNS = [
   'kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax',
-  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance', 'source',
+  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance', 'consumption_mode', 'simplified_class', 'source',
 ] as const satisfies readonly (keyof TaxYearValues)[];
 
 // ---- tax_profile ----

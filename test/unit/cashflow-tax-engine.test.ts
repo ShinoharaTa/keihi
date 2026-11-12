@@ -31,7 +31,7 @@ const profile: TaxProfileValues = {
 const yr = (year: number, kind: 'actual' | 'estimate', v: Partial<EstimateYear> = {}): EstimateYear => ({
   year, kind, revenue: null, expenses: null, business_income: null, social_insurance_paid: null, income_tax_final: null,
   consumption_tax_final: null, prepaid_income_tax: null, salary_income: null, salary_after_deduction: null, salary_withheld_tax: null,
-  salary_social_insurance: null, source: 'manual', ...v,
+  salary_social_insurance: null, consumption_mode: null, simplified_class: null, source: 'manual', ...v,
 });
 
 const W = { from: '2026-01-01', to: '2029-12-31' };
@@ -576,5 +576,79 @@ describe('給与所得（源泉徴収票の 4 欄）', () => {
     assert.equal(r.breakdown.find((x) => x.group === 'resident:2026')!.carried_from, undefined);
     assert.equal(line(r, 'resident:2026', '合計所得'), 850_000);
     assert.equal(line(r, 'resident:2026', '社会保険料控除'), 100_000);
+  });
+});
+
+describe('消費税の方式（年ごとの上書き）', () => {
+  const ctaxWarnings = (r: ReturnType<typeof estimate>) => r.warnings.filter((w) => w.kind !== 'income_missing');
+  // profile = 簡易課税 第 5 種・税込（今後ずっと使う方式）。2026 年の行だけ 2 割特例。
+  const p = { consumption_mode: 'simplified', simplified_class: 5, revenue_includes_tax: 1 } as const;
+  const ys = (y2027: Partial<EstimateYear> = {}) => [
+    yr(2026, 'estimate', { revenue: 5_500_000, expenses: 0, consumption_mode: 'special20' }),
+    yr(2027, 'estimate', { revenue: 14_300_000, expenses: 0, ...y2027 }),
+  ];
+
+  test('2026 年分は 2 割特例、2027 年分から profile の簡易課税。中間申告の基準は前の年の方式で出す', () => {
+    const r = run(p, ys());
+    // 2026: 税抜 5,000,000 × 10% × 20% = 100,000。
+    // 2027: 税抜 13,000,000 × 10% × 50% = 650,000。中間申告の基準は 2026 年分（2 割特例）100,000 × 78/100 = 78,000 ≤ 48 万なので無し。
+    // 2028（2027 から繰り越し）: 基準 650,000 × 78/100 = 507,000 → 国税 253,500 + 地方 71,500。確定 650,000 − 325,000。2029-03-31 は土曜。
+    assert.deepEqual(pick(r, 'ctax:').filter(([k]) => !String(k).startsWith('ctax:2029')), [
+      ['ctax:2026:final', '2027-03-31', 100_000],
+      ['ctax:2027:final', '2028-03-31', 650_000],
+      ['ctax:2028:interim1', '2028-08-31', 325_000],
+      ['ctax:2028:final', '2029-04-02', 325_000],
+    ]);
+    const b2028 = r.breakdown.find((b) => b.group === 'ctax:2028')!;
+    assert.deepEqual(b2028.lines.slice(0, 4).map((l) => l.amount), [507_000, 253_500, 71_500, 325_000]);
+    assert.equal(b2028.carried_from, 2027);
+    // special20_expired は出ない（2025 年の行が無いので 2025 年分（期日 2026-03-31）の revenue_missing だけ）。
+    assert.deepEqual(ctaxWarnings(r), [{ kind: 'revenue_missing', year: 2025 }]);
+    const method = (y: number) => {
+      const b = r.breakdown.find((x) => x.group === `ctax:${y}`)!;
+      return [b.method, b.mode_source];
+    };
+    assert.deepEqual(method(2026), ['special20', 'year']);
+    assert.deepEqual(method(2027), ['simplified', 'profile']);
+  });
+
+  test('上書きは後の年に繰り越さない: 2027 年の行に 2 割特例を入れると 2027 年分だけ作らず special20_expired', () => {
+    const r = run(p, ys({ consumption_mode: 'special20' }));
+    assert.deepEqual(pick(r, 'ctax:2027'), []);
+    assert.deepEqual(ctaxWarnings(r), [{ kind: 'special20_expired', year: 2027 }, { kind: 'revenue_missing', year: 2025 }]);
+    // 2028 年分は profile の簡易課税（2027 の売上を繰り越す）。基準の 2027 年分を作らないので中間申告は無し。
+    assert.deepEqual(pick(r, 'ctax:2028'), [['ctax:2028:final', '2029-04-02', 650_000]]);
+    assert.equal(r.breakdown.find((b) => b.group === 'ctax:2028')!.mode_source, 'profile');
+  });
+
+  test('年の行の簡易課税は行の区分を使う。免税の上書きも効く', () => {
+    const r = run({ consumption_mode: 'standard', revenue_includes_tax: 0 }, [
+      yr(2026, 'estimate', { revenue: 5_000_000, expenses: 1_000_000, consumption_mode: 'simplified', simplified_class: 1 }),
+      yr(2027, 'estimate', { revenue: 5_000_000, expenses: 1_000_000, consumption_mode: 'exempt' }),
+      yr(2028, 'estimate', { revenue: 5_000_000, expenses: 1_000_000 }),
+    ]);
+    // 2026: 500,000 × 10% = 50,000（第 1 種 90%）。2027: 免税で作らない。2028: profile の本則 500,000 − 100,000。
+    assert.deepEqual(pick(r, 'ctax:'), [['ctax:2026:final', '2027-03-31', 50_000], ['ctax:2028:final', '2029-04-02', 400_000]]);
+    assert.equal(r.breakdown.find((b) => b.group === 'ctax:2026')!.lines[2].label, '控除（簡易課税 第 1 種: みなし仕入率 90%）');
+  });
+
+  test('profile が unset / 区分なしの警告は、期間の年（前年〜最後の年）に上書きの無い年があるときだけ', () => {
+    const all = [2025, 2026, 2027, 2028, 2029].map((year) => yr(year, 'estimate', { revenue: 5_000_000, expenses: 0, consumption_mode: 'standard' }));
+    for (const prof of [{ consumption_mode: 'unset' }, { consumption_mode: 'simplified', simplified_class: null }] as const) {
+      assert.deepEqual(ctaxWarnings(run(prof, all)), [], prof.consumption_mode);
+      const want = prof.consumption_mode === 'unset' ? 'consumption_tax_mode_unset' : 'simplified_class_missing';
+      // 2029 年の上書きを外すと、その年は profile を使うので警告が出る（2029 年分は作らない）。
+      const r = run(prof, [...all.slice(0, 4), yr(2029, 'estimate', { revenue: 5_000_000, expenses: 0 })]);
+      assert.deepEqual(ctaxWarnings(r), [{ kind: want }], prof.consumption_mode);
+      assert.deepEqual(pick(r, 'ctax:2029'), []);
+    }
+  });
+
+  test('revenue_missing もその年の方式で判定する（上書きで免税にした年は数えない）', () => {
+    const r = run({ consumption_mode: 'standard' }, [
+      yr(2025, 'actual', { business_income: 3_000_000, income_tax_final: 0, consumption_mode: 'exempt' }),
+      yr(2026, 'estimate', { business_income: 3_000_000, consumption_mode: 'exempt' }),
+    ]);
+    assert.deepEqual(r.warnings, [2027, 2028].map((year) => ({ kind: 'revenue_missing', year })));
   });
 });

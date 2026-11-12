@@ -21,6 +21,7 @@ import {
   PENSION_MODES,
   PROFILE_COLUMNS,
   RESIDENT_PAY_MODES,
+  YEAR_CONSUMPTION_MODES,
   YEAR_KINDS,
   getTaxProfile,
   getTaxYear,
@@ -263,7 +264,7 @@ export function parseProfileBody(body: Record<string, unknown>, base: TaxProfile
 
 const YEAR_BODY_KEYS = [
   'kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax',
-  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance',
+  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance', 'consumption_mode', 'simplified_class',
 ] as const;
 
 // PUT /api/tax/years/:year の body を base（無ければ kind 必須）に重ねて検査する。source は manual（annualized は PR2）。
@@ -272,11 +273,16 @@ export function parseYearBody(body: Record<string, unknown>, base: TaxYearValues
     ? { ...base }
     : {
         revenue: null, expenses: null, business_income: null, social_insurance_paid: null, income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null,
-        salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null,
+        salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null, consumption_mode: null, simplified_class: null,
       };
   for (const [k, v] of Object.entries(body)) {
     if (!(YEAR_BODY_KEYS as readonly string[]).includes(k)) throw new TaxError('invalid_field');
-    const ok = k === 'kind' ? isEnum(YEAR_KINDS, v) : k === 'business_income' ? v === null || Number.isSafeInteger(v) : v === null || isInt(v, 0);
+    const ok =
+      k === 'kind' ? isEnum(YEAR_KINDS, v)
+      : k === 'business_income' ? v === null || Number.isSafeInteger(v)
+      : k === 'consumption_mode' ? v === null || isEnum(YEAR_CONSUMPTION_MODES, v)
+      : k === 'simplified_class' ? v === null || isInt(v, 1, 6)
+      : v === null || isInt(v, 0);
     if (!ok) throw new TaxError(`invalid_${k}`);
     out[k] = v;
   }
@@ -288,6 +294,9 @@ export function parseYearBody(body: Record<string, unknown>, base: TaxYearValues
   if ((out.salary_withheld_tax !== null || out.salary_social_insurance !== null) && out.salary_income === null && out.salary_after_deduction === null) {
     throw new TaxError('salary_income_required');
   }
+  // 消費税の方式の上書き（重ねた後の値で）: simplified なら区分が要り、それ以外（null を含む）なら区分は持たない。両方 null で上書きを消す。
+  if (out.consumption_mode === 'simplified' && out.simplified_class === null) throw new TaxError('simplified_class_required');
+  if (out.consumption_mode !== 'simplified' && out.simplified_class !== null) throw new TaxError('invalid_simplified_class');
   out.source = 'manual';
   return out as TaxYearValues;
 }
@@ -422,15 +431,19 @@ export function latestEstimates(db: Db) {
   };
 }
 
-// GET /api/cashflow の warnings に足すもの。simplified_class_missing はプロファイルから、special20_expired は最新の再計算の warnings から。
-export function cashflowTaxWarnings(
-  db: Db,
-): ({ kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' } | { kind: 'simplified_class_missing' } | { kind: 'special20_expired'; year: number })[] {
+type CashflowTaxWarning = { kind: 'tax_profile_missing' } | { kind: 'consumption_tax_mode_unset' } | { kind: 'simplified_class_missing' } | { kind: 'special20_expired'; year: number };
+const CASHFLOW_TAX_WARNING_KINDS = new Set<string>(['consumption_tax_mode_unset', 'simplified_class_missing', 'special20_expired']);
+
+// GET /api/cashflow の warnings に足すもの。消費税の方式の警告は最新の再計算の warnings から（年ごとの上書きを見た engine の判定に揃える）。
+// 再計算がまだ無ければ、プロファイルだけで unset / simplified_class_missing を判定する。
+export function cashflowTaxWarnings(db: Db): CashflowTaxWarning[] {
   const p = getTaxProfile(db);
   if (!p) return [{ kind: 'tax_profile_missing' }];
-  if (p.consumption_mode === 'unset') return [{ kind: 'consumption_tax_mode_unset' }];
-  if (p.consumption_mode === 'simplified' && p.simplified_class === null) return [{ kind: 'simplified_class_missing' }];
   const run = latestTaxEstimateRun(db);
-  if (!run) return [];
-  return (JSON.parse(run.warnings_json) as SyncWarning[]).filter((w): w is { kind: 'special20_expired'; year: number } => w.kind === 'special20_expired');
+  if (!run) {
+    if (p.consumption_mode === 'unset') return [{ kind: 'consumption_tax_mode_unset' }];
+    if (p.consumption_mode === 'simplified' && p.simplified_class === null) return [{ kind: 'simplified_class_missing' }];
+    return [];
+  }
+  return (JSON.parse(run.warnings_json) as SyncWarning[]).filter((w): w is CashflowTaxWarning => CASHFLOW_TAX_WARNING_KINDS.has(w.kind));
 }
