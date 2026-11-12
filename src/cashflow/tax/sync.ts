@@ -261,13 +261,19 @@ export function parseProfileBody(body: Record<string, unknown>, base: TaxProfile
   return p;
 }
 
-const YEAR_BODY_KEYS = ['kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax'] as const;
+const YEAR_BODY_KEYS = [
+  'kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax',
+  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance',
+] as const;
 
 // PUT /api/tax/years/:year の body を base（無ければ kind 必須）に重ねて検査する。source は manual（annualized は PR2）。
 export function parseYearBody(body: Record<string, unknown>, base: TaxYearValues | null): TaxYearValues {
   const out: Record<string, unknown> = base
     ? { ...base }
-    : { revenue: null, expenses: null, business_income: null, social_insurance_paid: null, income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null };
+    : {
+        revenue: null, expenses: null, business_income: null, social_insurance_paid: null, income_tax_final: null, consumption_tax_final: null, prepaid_income_tax: null,
+        salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null,
+      };
   for (const [k, v] of Object.entries(body)) {
     if (!(YEAR_BODY_KEYS as readonly string[]).includes(k)) throw new TaxError('invalid_field');
     const ok = k === 'kind' ? isEnum(YEAR_KINDS, v) : k === 'business_income' ? v === null || Number.isSafeInteger(v) : v === null || isInt(v, 0);
@@ -275,6 +281,13 @@ export function parseYearBody(body: Record<string, unknown>, base: TaxYearValues
     out[k] = v;
   }
   if (out.kind === undefined) throw new TaxError('missing_kind');
+  // 給与の 4 欄は重ねた後の値で確かめる（控除後 ≤ 支払金額。源泉・社保だけで支払金額も控除後も無い行は給与所得が出せない）。
+  if (out.salary_income !== null && out.salary_after_deduction !== null && (out.salary_after_deduction as number) > (out.salary_income as number)) {
+    throw new TaxError('invalid_salary_after_deduction');
+  }
+  if ((out.salary_withheld_tax !== null || out.salary_social_insurance !== null) && out.salary_income === null && out.salary_after_deduction === null) {
+    throw new TaxError('salary_income_required');
+  }
   out.source = 'manual';
   return out as TaxYearValues;
 }

@@ -52,6 +52,10 @@ export type TaxYearRow = {
   income_tax_final: number | null;
   consumption_tax_final: number | null;
   prepaid_income_tax: number | null;
+  salary_income: number | null; // 源泉徴収票の支払金額
+  salary_after_deduction: number | null; // 給与所得控除後の金額（無ければ salary_income から計算）
+  salary_withheld_tax: number | null; // 源泉徴収税額
+  salary_social_insurance: number | null; // 社会保険料等の金額（給与天引き）
   source: 'manual' | 'annualized';
   updated_at: string;
 };
@@ -78,7 +82,8 @@ export const PROFILE_COLUMNS = [
 ] as const satisfies readonly (keyof TaxProfileValues)[];
 
 export const YEAR_COLUMNS = [
-  'kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax', 'source',
+  'kind', 'revenue', 'expenses', 'business_income', 'social_insurance_paid', 'income_tax_final', 'consumption_tax_final', 'prepaid_income_tax',
+  'salary_income', 'salary_after_deduction', 'salary_withheld_tax', 'salary_social_insurance', 'source',
 ] as const satisfies readonly (keyof TaxYearValues)[];
 
 // ---- tax_profile ----

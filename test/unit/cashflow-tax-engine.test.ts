@@ -2,7 +2,7 @@
 // 期待値は rates.ts の数値から手で計算したもの（表駆動）。
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { estimate, nextBusinessDay, nhiRatesOf, splitInstallments, type EstimateYear } from '../../src/cashflow/tax/engine.ts';
+import { estimate, nextBusinessDay, nhiRatesOf, salaryIncomeOf, splitInstallments, type EstimateYear } from '../../src/cashflow/tax/engine.ts';
 import type { TaxProfileValues } from '../../src/cashflow/tax/repo.ts';
 import { ratesFor, PENSION_RATES } from '../../src/cashflow/tax/rates.ts';
 
@@ -30,7 +30,8 @@ const profile: TaxProfileValues = {
 
 const yr = (year: number, kind: 'actual' | 'estimate', v: Partial<EstimateYear> = {}): EstimateYear => ({
   year, kind, revenue: null, expenses: null, business_income: null, social_insurance_paid: null, income_tax_final: null,
-  consumption_tax_final: null, prepaid_income_tax: null, source: 'manual', ...v,
+  consumption_tax_final: null, prepaid_income_tax: null, salary_income: null, salary_after_deduction: null, salary_withheld_tax: null,
+  salary_social_insurance: null, source: 'manual', ...v,
 });
 
 const W = { from: '2026-01-01', to: '2029-12-31' };
@@ -417,5 +418,115 @@ describe('消費税', () => {
     ]);
     // exempt・unset は数えない。
     assert.deepEqual(run({ consumption_mode: 'exempt' }, ys).warnings, []);
+  });
+});
+
+// 2025 年分（令和 7 年分）の値で確かめる（2026 年分の基礎控除は令和 8 年度改正の別 PR で変わるため、2026 年の給与所得控除は salaryIncomeOf 単体だけ）。
+describe('給与所得（源泉徴収票の 4 欄）', () => {
+  const line = (r: ReturnType<typeof estimate>, group: string, label: string) => r.breakdown.find((b) => b.group === group)!.lines.find((l) => l.label === label)?.amount;
+  const total = (r: ReturnType<typeof estimate>, group: string) => r.breakdown.find((b) => b.group === group)?.total;
+  const refunds = (r: ReturnType<typeof estimate>) => r.warnings.filter((w) => w.kind === 'income_tax_refund');
+
+  test('給与所得控除の後の金額（令和 7 年分・令和 8 年分）', () => {
+    for (const [income, want] of [[1_500_000, 850_000], [2_000_000, 1_320_000], [5_000_000, 3_560_000], [7_000_000, 5_200_000], [9_000_000, 7_050_000], [600_000, 0]]) {
+      assert.equal(salaryIncomeOf(income, 2025), want, `2025 ${income}`);
+    }
+    for (const [income, want] of [[2_000_000, 1_260_000], [3_000_000, 2_020_000], [3_001_234, 2_020_000], [500_000, 0]]) {
+      assert.equal(salaryIncomeOf(income, 2026), want, `2026 ${income}`);
+    }
+  });
+
+  test('事業と給与が混ざる年: 合計所得で所得税・住民税・国保、事業税は事業だけ', () => {
+    const r = run({ biz_tax_rate: 0.05 }, [
+      yr(2025, 'estimate', { business_income: 2_000_000, salary_income: 2_000_000, salary_withheld_tax: 60_000, salary_social_insurance: 300_000, social_insurance_paid: 200_000 }),
+    ]);
+    const g = 'income_tax:2025';
+    assert.equal(line(r, g, '2025 年の事業所得'), 2_000_000);
+    assert.equal(line(r, g, '2025 年の給与所得'), 1_320_000);
+    assert.equal(line(r, g, '合計所得'), 3_320_000);
+    assert.equal(line(r, g, '社会保険料控除'), 500_000);
+    assert.equal(line(r, g, '基礎控除'), 880_000);
+    assert.equal(line(r, g, '課税所得'), 1_940_000);
+    assert.equal(line(r, g, '所得税（速算表）'), 97_000);
+    assert.equal(line(r, g, '年税額（復興特別所得税を含む）'), 99_037);
+    assert.equal(line(r, g, '給与の源泉徴収税額'), 60_000);
+    assert.equal(line(r, g, '申告納税額'), 39_000);
+    assert.deepEqual(pick(r, 'income_tax:2025:'), [['income_tax:2025:final', '2026-03-16', 39_000]]);
+    assert.deepEqual(pick(r, 'income_tax:2026:prepay'), []);
+    assert.equal(total(r, 'resident:2026'), 241_500);
+    assert.equal(total(r, 'nhi:2026'), 366_900);
+    // 給与を事業税に入れると (3,320,000 + 650,000 − 2,900,000) × 5% = 53,500 になる。事業だけなら 290 万以下で作らない。
+    assert.deepEqual(pick(r, 'biz_tax:'), []);
+  });
+
+  test('源泉徴収が年税額より多ければ還付: 項目は作らず income_tax_refund', () => {
+    const ys = [yr(2025, 'estimate', { salary_income: 2_000_000, salary_withheld_tax: 150_000, salary_social_insurance: 300_000, social_insurance_paid: 0 })];
+    const r = run({}, ys);
+    // 合計所得 1,320,000 − 社保 300,000 − 基礎控除 950,000 = 70,000 → 3,500 + 73 = 3,573。
+    assert.deepEqual(pick(r, 'income_tax:'), []);
+    assert.deepEqual(refunds(r), [{ kind: 'income_tax_refund', year: 2025, amount: 146_427 }]);
+    // 住民税は合計所得 132 万（事業 0・給与 132 万）で作る。
+    assert.deepEqual(r.breakdown.find((b) => b.group === 'resident:2026')!.lines.slice(0, 3), [
+      { label: '2025 年の事業所得', amount: 0 }, { label: '2025 年の給与所得', amount: 1_320_000 }, { label: '合計所得', amount: 1_320_000 },
+    ]);
+    // 確定申告の期日（2026-03-16）が期間の外なら警告しない。
+    assert.deepEqual(refunds(run({}, ys, { from: '2026-04-01', to: '2029-12-31' })), []);
+  });
+
+  test('予定納税で納めすぎた分も還付: 予定納税の項目は残し、内訳に「還付見込み」', () => {
+    const r = run({ pension_mode: 'none', nhi_preset: null }, [
+      yr(2024, 'actual', { business_income: 3_000_000, income_tax_final: 300_000, prepaid_income_tax: 0 }),
+      yr(2025, 'estimate', { salary_income: 2_000_000, salary_withheld_tax: 10_000, social_insurance_paid: 0 }),
+    ], { from: '2025-01-01', to: '2028-12-31' });
+    // 1,320,000 − 950,000 = 370,000 → 18,500 + 388 = 18,888 − 10,000 = 8,888 → 8,800。予定納税 200,000 − 8,800 = 191,200 の還付。
+    assert.equal(line(r, 'income_tax:2025', '申告納税額'), 8_800);
+    assert.equal(line(r, 'income_tax:2025', '還付見込み'), 191_200);
+    assert.equal(total(r, 'income_tax:2025'), 8_800);
+    assert.deepEqual(pick(r, 'income_tax:2025:'), [['income_tax:2025:prepay1', '2025-07-31', 100_000], ['income_tax:2025:prepay2', '2025-12-01', 100_000]]);
+    assert.deepEqual(refunds(r), [{ kind: 'income_tax_refund', year: 2025, amount: 191_200 }]);
+  });
+
+  test('actual の申告納税額（確定値）からは源泉徴収を引かない', () => {
+    const r = run({}, [yr(2025, 'actual', { income_tax_final: 39_000, salary_withheld_tax: 60_000 })]);
+    assert.deepEqual(pick(r, 'income_tax:2025:'), [['income_tax:2025:final', '2026-03-16', 39_000]]);
+  });
+
+  test('給与の代わりに事業所得へ入れていた行と、給与の列に移した行で住民税・国保が同じ。所得税は源泉の分だけ減る', () => {
+    const old = run({}, [yr(2025, 'actual', { business_income: 3_560_000, social_insurance_paid: 700_000 })]);
+    const neu = run({}, [
+      yr(2025, 'actual', { salary_income: 5_000_000, salary_after_deduction: 3_560_000, salary_social_insurance: 700_000, social_insurance_paid: 0, salary_withheld_tax: 123_030 }),
+    ]);
+    for (const r of [old, neu]) {
+      assert.equal(total(r, 'resident:2026'), 245_500);
+      assert.equal(total(r, 'nhi:2026'), 392_500);
+    }
+    assert.deepEqual(pick(old, 'income_tax:2025:'), [['income_tax:2025:final', '2026-03-16', 123_000]]);
+    assert.deepEqual(pick(neu, 'income_tax:2025:'), []);
+    assert.deepEqual(refunds(neu), []);
+  });
+
+  test('給与は繰り越さない: 行の無い年は事業所得だけを繰り越し、給与天引きの社会保険料も入れない', () => {
+    const ys = (soc: number) => [yr(2025, 'estimate', { business_income: 2_000_000, salary_income: 2_000_000, salary_social_insurance: soc })];
+    const r = run({ pension_mode: 'none', nhi_preset: null }, ys(300_000));
+    assert.equal(r.breakdown.find((x) => x.group === 'income_tax:2026')!.carried_from, 2025);
+    assert.equal(line(r, 'income_tax:2026', '合計所得'), 2_000_000);
+    assert.equal(line(r, 'income_tax:2026', '2025 年の給与所得'), undefined);
+    assert.equal(line(r, 'income_tax:2026', '社会保険料控除'), 0);
+    // 2025 年は天引き分が入る（所得税・住民税とも）。
+    assert.equal(line(r, 'income_tax:2025', '社会保険料控除'), 300_000);
+    assert.equal(line(r, 'resident:2026', '社会保険料控除'), 300_000);
+    // 年金・国保の見積もりがあっても、2026 年分の社会保険料控除は 2025 年の天引き分で変わらない。
+    const soc = (x: ReturnType<typeof estimate>) => line(x, 'income_tax:2026', '社会保険料控除');
+    assert.equal(soc(run({}, ys(300_000))), soc(run({}, ys(0))));
+  });
+
+  test('事業の値が無く給与だけの年は事業 0（前の年の事業を繰り越さない）。estimate の social_insurance_paid も使う', () => {
+    const r = run({}, [
+      yr(2024, 'actual', { business_income: 5_000_000 }),
+      yr(2025, 'estimate', { salary_income: 1_500_000, social_insurance_paid: 100_000 }),
+    ]);
+    assert.equal(r.breakdown.find((x) => x.group === 'resident:2026')!.carried_from, undefined);
+    assert.equal(line(r, 'resident:2026', '合計所得'), 850_000);
+    assert.equal(line(r, 'resident:2026', '社会保険料控除'), 100_000);
   });
 });

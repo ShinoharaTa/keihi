@@ -259,6 +259,7 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | ファイル | 中身 |
 |---|---|
 | `src/db/migrations/0008_tax.sql` | tax_profile（id='default' の 1 行）・tax_years（UNIQUE(year)）・tax_estimate_runs（追記専用）。scheduled_items に `estimate_key`（origin=estimate のときだけ、不変）と `pinned`（0/1、origin=estimate のときだけ）、部分 UNIQUE INDEX `(estimate_key) WHERE active = 1 AND estimate_key IS NOT NULL` |
+| `src/db/migrations/0015_tax_salary.sql` | tax_years に給与の 4 列（salary_income・salary_after_deduction・salary_withheld_tax・salary_social_insurance。NULL 可・0 以上の整数） |
 | `src/cashflow/tax/rates.ts` | 年度別の法定の数値（§14.3）。定義の無い年は前の年の値 |
 | `src/cashflow/tax/engine.ts` | 純関数 `estimate(profile, years, window) → {items, warnings, breakdown}` |
 | `src/cashflow/tax/simulate.ts` | 試算（§14.5）。純関数 `simulate(profile, input)` と body の検査 `parseSimBody`。estimate() を包むだけで engine.ts は変えない |
@@ -266,15 +267,15 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 | `src/web/routes/tax.ts` | API（§14.4） |
 
 ### 14.1 計算
-所得 = 事業所得（青色申告特別控除の後）。tax_years の `business_income` があればそれ、無ければ `revenue − expenses − 青色控除`（負なら 0）。丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨て、端数は 1 期目。期日は名目の日が休日なら翌営業日（`holidays.json` の祝日 + 土日。祝日データの無い年は土日だけ）。
+所得 = 合計所得 = 事業所得 + 給与所得（負なら 0）。事業所得（青色申告特別控除の後）は tax_years の `business_income` があればそれ、無ければ `revenue − expenses − 青色控除`（負なら 0）。給与所得は源泉徴収票の欄から: `salary_after_deduction`（給与所得控除後の金額）があればそれ、無ければ `salary_income`（支払金額）から給与所得控除の表（§14.3）で計算する（中途退職の票は年末調整をしないので控除後の金額が空欄）。内訳の所得の行は「Y 年の事業所得」「Y 年の給与所得」（給与があるとき）「合計所得」。丸め: 課税所得は 1,000 円未満、税額・保険料は 100 円未満を切り捨て。分割は 2 期目以降を「総額 ÷ 期数」の 100 円未満切り捨て、端数は 1 期目。期日は名目の日が休日なら翌営業日（`holidays.json` の祝日 + 土日。祝日データの無い年は土日だけ）。
 
 | key（estimate_key） | 決まる入力 | 式 | 期日 | category |
 |---|---|---|---|---|
-| `income_tax:Y:final` | Y の所得・社会保険料（Y が actual で social_insurance_paid があればそれ、無ければ年金 + 国保の見積もりのうち名目の期日が Y 年のもの）+ other_deductions・基礎控除・配偶者/扶養 38 万 × 人数 | 課税所得 → 速算表 → + 復興 2.1% = 申告納税額。Y が actual で income_tax_final があればそれ。− Y の予定納税（actual の prepaid_income_tax があればそれ、無ければ見積もり）。0 以下なら作らない | Y+1 の 3/15 | tax |
-| `income_tax:Y:prepay1`・`prepay2` | Y−1 年分の申告納税額（予定納税基準額） | 15 万以上なら各 1/3 | Y の 7/31・11/30 | tax |
-| `resident:Y:q1`〜`q4` | Y−1 の所得・社会保険料 | (所得 − 社保 − other − 43 万 − 33 万 × 人数) × 10% − 調整控除 2,500 + 均等割 5,000 | 6/30・8/31・10/31・Y+1 の 1/31 | tax |
-| `nhi:Y:p1`〜 | Y−1 の所得・加入人数・40〜64 歳の人数・プリセット | 課税標準 = 所得 − 43 万。区分ごとに 所得割 + 均等割 × 人数（+ 平等割）を 100 円未満切り捨て、上限で抑える。介護分は 40〜64 歳の人数だけ | nhi_first_month（7）から nhi_installments（8）期、毎月末 | insurance |
-| `biz_tax:Y:1`・`2` | Y−1 の青色控除前の所得 | (所得 − 290 万) × biz_tax_rate。biz_tax_rate が NULL か、(所得 − 290 万) が 0 以下なら作らない。1 万円以下は 8 月に一括 | 8/31・11/30 | tax |
+| `income_tax:Y:final` | Y の合計所得・社会保険料（下）・other_deductions・基礎控除（合計所得で引く）・配偶者/扶養 38 万 × 人数・Y の salary_withheld_tax | 課税所得 → 速算表 → + 復興 2.1%（円未満切り捨て）= 年税額。− 給与の源泉徴収税額 = 申告納税額（0 以上なら 100 円未満切り捨て、負なら還付で円単位）。Y が actual で income_tax_final があればそれを申告納税額とする（申告書の申告納税額は源泉徴収を引いた後なので**引かない**）。− Y の予定納税（actual の prepaid_income_tax があればそれ、無ければ見積もり）。0 なら作らない。負なら作らず警告 `income_tax_refund`（下） | Y+1 の 3/15 | tax |
+| `income_tax:Y:prepay1`・`prepay2` | Y−1 年分の申告納税額（予定納税基準額。源泉徴収を引いた後、還付なら 0） | 15 万以上なら各 1/3 | Y の 7/31・11/30 | tax |
+| `resident:Y:q1`〜`q4` | Y−1 の合計所得・社会保険料 | (所得 − 社保 − other − 43 万 − 33 万 × 人数) × 10% − 調整控除 2,500 + 均等割 5,000 | 6/30・8/31・10/31・Y+1 の 1/31 | tax |
+| `nhi:Y:p1`〜 | Y−1 の合計所得・加入人数・40〜64 歳の人数・プリセット | 課税標準 = 所得 − 43 万。区分ごとに 所得割 + 均等割 × 人数（+ 平等割）を 100 円未満切り捨て、上限で抑える。介護分は 40〜64 歳の人数だけ | nhi_first_month（7）から nhi_installments（8）期、毎月末 | insurance |
+| `biz_tax:Y:1`・`2` | Y−1 の青色控除前の事業所得（給与は入れない。給与だけの年は事業 0 で作らない） | (所得 − 290 万) × biz_tax_rate。biz_tax_rate が NULL か、(所得 − 290 万) が 0 以下なら作らない。1 万円以下は 8 月に一括 | 8/31・11/30 | tax |
 | `pension:F:monthly`（月払い）・`pension:F:MM`（前納） | pension_mode・pension_addon | monthly: 年度ごとに 1 項目（recurrence=monthly、anchor_date = F 年 5 月末、end_date = F+1 年 4 月末、額 = 月額 + 付加 400）。prepay6: 4 月末・10 月末。prepay12: 4 月末。prepay24: 偶数の年度の 4 月末（前納は once） | 月末 | insurance |
 | `ctax:Y:final` | consumption_mode・simplified_class・revenue_includes_tax、Y の revenue・expenses（無ければ前の年で最も新しい revenue を繰り越す） | 税抜売上 = 税込なら revenue × 100/110（円未満切り捨て）。売上税額 = 税抜売上 × 10%。special20: 売上税額 × 20%。simplified: 売上税額 × (1 − みなし仕入率)。standard（**概算**）: 売上税額 − 税抜経費 × 10%（経費は全額課税仕入とみなす。0 以下なら 0）。100 円未満切り捨て = 年税額。− Y の中間申告。0 以下なら作らない | Y+1 の 3/31 | tax |
 | `ctax:Y:interim1` | Y−1 年分の国税分（Y−1 が actual で consumption_tax_final があればそれ。無ければ Y−1 年分の見積もりの年税額 × 78/100） | 国税分が 48 万円超のとき 1 回。国税分 × 6/12（100 円未満切り捨て）+ その 22/78（地方消費税、100 円未満切り捨て） | Y の 8/31 | tax |
@@ -283,11 +284,14 @@ mvp-plan-v3 §7 では 0007_cashflow だったが、0006_mcp を後回しにし�
 - 第 1 版で作った `pension:F:MM` の月ごとの once 項目（pinned=0）は、再計算で key が出なくなるので止まる（期日が対象の期間より前のものは触らない）。新しい monthly 項目と重なっても possible_duplicate は manual / detected だけが相手なので出ない。
 - 2 年前納は「偶数の年度の 4 月」に仮置きしている（実際に始めた年度に合わせるなら rates ではなく engine.ts の判定を変える）。
 
-- 入力が無い年: 直近の前の年の所得を繰り越す（内訳に `carried_from`）。住民税・国保・事業税で Y−1 がどこにも無ければ Y の所得で代える（`assumed_prev_year`）。予定納税は前年の申告納税額が要るので代えない。所得が出せない年は警告 `income_missing`。
+- 社会保険料控除（Y 年）= 給与天引き分 + 自分で払った分。給与天引き分は Y の行の `salary_social_insurance`（Y の給与所得を足したときだけ。繰り越した年には足さない）。自分で払った分は Y の行の `social_insurance_paid`（**給与天引き以外**で払った国保・国民年金など。actual・estimate を問わず、あればそれ）、無ければ年金 + 国保の見積もりのうち名目の期日が Y 年のもの。給与の無い年は従来と同じ値。給与のある年に social_insurance_paid を空にすると、その年の年金・国保の見積もり（加入月を持たないので 1 年分）が混ざるので、払っていなければ 0 を入れる。住民税は Y−1 の所得の年の値を使う。
+- 所得税の還付: 申告納税額 − 予定納税が負（源泉徴収や予定納税の納めすぎ）なら、項目は作らず警告 `income_tax_refund`（`{year, amount}`。Y+1 の 3/15（休日なら翌営業日）が対象の期間に入る年だけ）と内訳の行「還付見込み」。入金日が読めない（申告から 3 週〜1.5 か月）ので入金予定にはしない。内訳の行は「年税額（復興特別所得税を含む）」「給与の源泉徴収税額」（あるとき）「申告納税額」。breakdown の total は申告納税額（還付なら 0）。
+- 入力が無い年: 事業所得は直近の前の年（事業の値を持つ行）から繰り越す（内訳に `carried_from`）。**給与は繰り越さない**: 給与の無い年は給与所得 0、その年の行に給与があれば事業の値が無くても事業 0 で繰り越さない。住民税・国保・事業税で Y−1 がどこにも無ければ Y の所得で代える（`assumed_prev_year`）。予定納税は前年の申告納税額が要るので代えない。事業も給与も無い年は警告 `income_missing`。
+- 給与・退職の範囲: 退職所得（退職金）は分離課税で完結するので対象外。生命保険料・地震保険料・住宅ローンの控除と所得金額調整控除（給与 850 万超 + 子・特別障害者、または給与 + 公的年金の人）は扱わない（必要なら profile.other_deductions で吸収）。2024 年以前の給与所得控除は 2025 年分の値で代える（対象外）。試算（§14.5）の年の行は給与の列が null（事業だけの定常状態）。
 - 項目名は「所得税 2026 年分 確定申告（見積）」「住民税 2026 年度 第 1 期（見積）」「国民健康保険税 2026 年度 第 1 期（見積）」「国民年金 2026 年度 月払い（見積）」「消費税 2026 年分 確定申告（見積）」「消費税 2026 年分 中間申告（見積）」の形。
 - 消費税: みなし仕入率は第 1 種 90% / 第 2 種 80% / 第 3 種 70% / 第 4 種 60% / 第 5 種 50% / 第 6 種 40%。simplified で simplified_class が NULL なら作らず警告 `simplified_class_missing`。2 割特例は 2026 年分まで。2027 年分以降も special20 のままなら、その年分は作らず警告 `special20_expired`（year つき。確定申告の期日が対象の期間に入る年だけ）。消費税を作る方式で、その年分の売上（revenue）が繰り越しも含めてどの年にも無い（所得だけ入れた年）ときは作らず警告 `revenue_missing`（year つき。期日が期間に入る年だけ）。2 割特例が切れた年分は中間申告も作らない。内訳（breakdown）は `method`（方式）と、税抜売上・売上税額・控除・年税額・中間申告で納めた額・確定申告で納める額の行。
 - 消費税の中間申告は年 1 回（前年の国税分 48 万円超〜）だけ。400 万円超の 3 回・4,800 万円超の 11 回、任意の中間申告は対象外（警告も出さない）。前年が見込みのときの国税分は「年税額 × 78/100」で代え、内訳の行に明記する。
-- 概算で切り捨てるもの: 生命保険料・医療費・寄附金の控除、国保の低所得軽減、住民税の調整控除の厳密計算・非課税限度、事業税の専従者控除・損失繰越、源泉徴収の精算、配偶者控除の所得制限。
+- 概算で切り捨てるもの: 生命保険料・地震保険料・医療費・寄附金・住宅ローンの控除、所得金額調整控除、国保の低所得軽減、住民税の調整控除の厳密計算・非課税限度、事業税の専従者控除・損失繰越、給与所得控除の別表第五との差（数千円以内）、配偶者控除の所得制限。
 
 ### 14.2 再計算と台帳の同期ルール
 契機: `POST /api/tax/recalculate`、`PUT /api/tax/profile`・`PUT /api/tax/years/:year`・`PUT /api/tax` の直後（同じトランザクション。`PUT /api/tax` は保存をすべて終えてから 1 回）。daily ジョブの `tax_recalc` 段が毎月 1 日（JST）に 1 回、tax_profile があれば actor=system で走らせる（無ければ skipped、1 日以外は not_due。report に `{run_id, created, updated, deactivated}`）。時間が進んでも 36 か月先までの項目が切れないようにするため。rates.ts を更新したリリースの後は 1 回手で叩く。
@@ -313,6 +317,7 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 | 所得税 速算表 | 〜194.9 万 5% / 〜329.9 万 10% −97,500 / 〜694.9 万 20% −427,500 / 〜899.9 万 23% −636,000 / 〜1,799.9 万 33% −1,536,000 / 〜3,999.9 万 40% −2,796,000 / 4,000 万〜 45% −4,796,000 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm |
 | 復興特別所得税 | 基準所得税額 × 2.1%（令和 9 年以後は防衛特別所得税と組み替え。合計率は不変） | 同上 |
 | 基礎控除（所得税） | 令和 7・8 年分: 合計所得 ≤132 万 95 万 / 〜336 万 88 万 / 〜489 万 68 万 / 〜655 万 63 万 / 〜2,350 万 58 万。令和 9 年分〜: ≤132 万 95 万 / 〜2,350 万 58 万。2,350 万超は 48 / 32 / 16 / 0 万 | https://www.nta.go.jp/users/gensen/2025kiso/index.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm |
+| 給与所得控除 | 令和 7 年分: 収入 ≤190 万 65 万。令和 8・9 年分: ≤220 万 74 万。以降の段は共通: 〜360 万 30% + 8 万 / 〜660 万 20% + 44 万 / 〜850 万 10% + 110 万 / 850 万超 195 万。660 万未満は所得税法別表第五で、A = 収入 ÷ 4（千円未満切り捨て）として 360 万未満 A × 2.8 − 8 万、以上 A × 3.2 − 44 万 で概算。令和 10 年分以後は未確認（令和 8 年分の値を繰り越す） | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1410.htm |
 | 配偶者・扶養控除（一般） | 所得税 38 万、住民税 33 万 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1180.htm |
 | 青色申告特別控除 | 65 万 / 55 万 / 10 万 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2072.htm |
 | 予定納税 | 基準額 15 万円以上。7 月・11 月に各 1/3 | https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2040.htm |
@@ -331,7 +336,7 @@ origin は不変なので estimate ↔ manual の変換はしない。手で作�
 |---|---|---|
 | GET /api/tax/profile | ― | `{profile（無ければ null。revenue_includes_tax・pension_addon・spouse は boolean、nhi_rates_json はオブジェクト）, years, presets: [{id, label}], missing}`。missing は `profile`・`actual:<前年>`・`estimate:<今年>`・`consumption_mode` |
 | PUT /api/tax/profile | プロファイルの列（知らないキーは 400。無いキーは今の値、プロファイルが無ければ PR1 の既定値。nhi_rates_json はプリセットが無いとき 4 区分すべての rate・per_capita・cap が要る。キーを並べて保存） | `{profile, run}`。同じトランザクションで再計算 |
-| PUT /api/tax/years/:year | kind（新しい年は必須）・revenue・expenses・business_income・social_insurance_paid・income_tax_final・consumption_tax_final・prepaid_income_tax | `{year, run}`。同上 |
+| PUT /api/tax/years/:year | kind（新しい年は必須）・revenue・expenses・business_income・social_insurance_paid（給与天引き以外の社会保険料）・income_tax_final・consumption_tax_final・prepaid_income_tax・salary_income（支払金額）・salary_after_deduction（給与所得控除後の金額）・salary_withheld_tax（源泉徴収税額）・salary_social_insurance（社会保険料等の金額）。給与の 4 列は null か 0 以上の整数（違えば 400 `invalid_<列>`）。今の値に重ねた後で、控除後 > 支払金額なら 400 `invalid_salary_after_deduction`、源泉・社保があるのに支払金額も控除後も無ければ 400 `salary_income_required` | `{year, run}`。同上 |
 | PUT /api/tax | `{profile?: プロファイルの部分更新, years?: [{year, ...年の部分更新}]}`。検査は上の 2 つと同じ（知らないキーは 400 `invalid_field`。profile も years も無ければ 400 `empty_body`。profile がオブジェクトでなければ `invalid_profile`、years がオブジェクトの配列でなければ `invalid_years`、year が 2000〜2100 の整数でなければ `invalid_year`） | `{profile（無ければ null）, years（保存後の全年）, run}`。1 トランザクションで profile → years（配列の順）を保存し、再計算は最後に 1 回。どこかで 400 なら何も残らない。監査は tax_profile.updated / tax_year.updated のまま |
 | POST /api/tax/recalculate | ― | `{run_id, created, updated, deactivated, skipped_pinned[], warnings[]}` |
 | GET /api/tax/estimates | ― | 最新の run の `{run_id, created_at, window, items（kind・year・key・amount・due・recurrence・end_date・lines・income_year・assumed_prev_year・carried_from）, breakdown, skipped_pinned, warnings}`。まだ無ければ run_id: null |
