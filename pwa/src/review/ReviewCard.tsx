@@ -2,6 +2,7 @@
 // - 文字列はすべて JSX のテキストとして描画する（HTML・URL・画像の参照として扱わない）。画像は自分のサーバーのサムネイルだけ。
 // - 縦 1 画面: 上にサムネイルと金額、中に日付・取引先・科目チップ・支払手段、下（親指の範囲）に確定の大ボタンと私用・重複。
 // - スキャン（dataModel.integrity_checked がある）だけ「欠け・折れ・裏面を確認した」のチェックを出す（T004）。
+//   確認済み（integrity_checked_at がある）ならチェックを入れて押せなくし、横に確認した日を出す（サーバーは上書きしない）。
 // - 辞書や AI の第 1 候補が正しければ 1 タップ（確定）、第 2・第 3 候補は 2 タップ、修正は各行をタップして入力欄。
 import { useState } from 'preact/hooks';
 import { findComponent, renderableComponents, type DecisionAction } from './catalog.ts';
@@ -10,6 +11,7 @@ import {
   canApprove,
   daysLeftText,
   formatAmount,
+  integrityCheckedText,
   isUrgent,
   missingRequired,
   FIELD_LABELS,
@@ -185,12 +187,7 @@ export function ReviewCard({ card, busy, onDecide }: Props) {
         </div>
       )}
 
-      {isScan && (
-        <label class="toggle">
-          <input type="checkbox" checked={checked} onChange={(e) => setChecked((e.currentTarget as HTMLInputElement).checked)} />
-          <span>欠け・折れ・裏面を確認した</span>
-        </label>
-      )}
+      {isScan && <IntegrityCheck checked={checked} checkedAt={dm.integrity_checked_at ?? null} onChange={setChecked} />}
 
       {bar && (
         <div class="bottom decision">
@@ -212,5 +209,17 @@ export function ReviewCard({ card, busy, onDecide }: Props) {
         </div>
       )}
     </section>
+  );
+}
+
+// 同等確認のチェック（hooks を使わない。SSR のテスト用に分けている）。
+export function IntegrityCheck({ checked, checkedAt, onChange }: { checked: boolean; checkedAt: string | null; onChange: (v: boolean) => void }) {
+  const done = checkedAt !== null;
+  return (
+    <label class="toggle">
+      <input type="checkbox" checked={done || checked} disabled={done} onChange={(e) => onChange((e.currentTarget as HTMLInputElement).checked)} />
+      <span>欠け・折れ・裏面を確認した</span>
+      {done && <span class="sub">{integrityCheckedText(checkedAt)}</span>}
+    </label>
   );
 }

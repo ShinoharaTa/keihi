@@ -60,7 +60,8 @@ export type DataModel = {
   candidates: Candidate[];
   accounts: { id: string; name: string; private: boolean }[];
   warnings: string[];
-  integrity_checked?: boolean; // 同等確認（欠け・折れ・裏面）のチェック。scan のときだけ置く（既定 false。T004）
+  integrity_checked?: boolean; // 同等確認（欠け・折れ・裏面）のチェック。scan のときだけ置く（documents.integrity_checked_at があれば true。T004）
+  integrity_checked_at?: string | null; // 同等確認の時刻（ISO）。scan のときだけ置く。入っていれば PWA はチェックを外せない形で出す
 };
 
 // 保存・比較しない（日々変わる）項目。
@@ -74,7 +75,7 @@ export function storedDataModel(dm: DataModel): StoredDataModel {
 
 export type Card = { surface: Surface; dataModel: DataModel; proposer: 'ai' | 'dictionary' | null };
 
-type DocRow = { id: string; status: string; kind: string; no_ai: number; paper_required: number; deadline_on: string };
+type DocRow = { id: string; status: string; kind: string; no_ai: number; paper_required: number; deadline_on: string; integrity_checked_at: string | null };
 type ExtractionRow = {
   id: string;
   raw_json: string;
@@ -155,7 +156,7 @@ function emptySources(): Sources {
 }
 
 export function buildCard(db: Db, documentId: string, opts: CardOptions): Card | null {
-  const doc = db.prepare('SELECT id, status, kind, no_ai, paper_required, deadline_on FROM documents WHERE id = ?').get(documentId) as DocRow | undefined;
+  const doc = db.prepare('SELECT id, status, kind, no_ai, paper_required, deadline_on, integrity_checked_at FROM documents WHERE id = ?').get(documentId) as DocRow | undefined;
   if (!doc) return null;
   const { accounts } = enabledAccounts(db, PROVIDER, opts.accountMap ?? loadAccountMap());
   const ex = db
@@ -292,7 +293,7 @@ export function buildCard(db: Db, documentId: string, opts: CardOptions): Card |
     candidates,
     accounts: accounts.map((a) => ({ id: a.id, name: a.name, private: a.private })),
     warnings,
-    ...(doc.kind === 'scan' ? { integrity_checked: false } : {}),
+    ...(doc.kind === 'scan' ? { integrity_checked: doc.integrity_checked_at !== null, integrity_checked_at: doc.integrity_checked_at } : {}),
   };
   const proposer = rv ? null : top ? top.source : ex ? 'ai' : null;
   return { surface, dataModel, proposer };
