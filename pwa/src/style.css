@@ -2096,6 +2096,31 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
+/* 折りたたみ（税の年ごとの「給与（源泉徴収票）」）。開いているときは矢印を下に向ける */
+.m-details > summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.m-details > summary::-webkit-details-marker {
+  display: none;
+}
+.m-details > summary .m-chev {
+  transition: transform 160ms var(--m-ease);
+}
+.m-details[open] > summary .m-chev {
+  transform: rotate(90deg);
+}
+.m-details[open] > summary {
+  margin-bottom: 4px;
+}
 /* 口座 */
 .m-acct {
   background: var(--m-card);
