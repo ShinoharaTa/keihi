@@ -14,7 +14,7 @@ import { openDb, type Db } from '../../src/db/index.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { ensureDealRow, markNeedsAttention } from '../../src/deals/stateMachine.ts';
 import { applyMasterItems } from '../../src/masters/sync.ts';
-import { CATALOG } from '../../src/review/card.ts';
+import { buildCard, CATALOG } from '../../src/review/card.ts';
 import { putObject } from '../../src/storage/objects.ts';
 import { upsertVendorRule } from '../../src/vendors/dictionary.ts';
 import { createApp } from '../../src/web/app.ts';
@@ -526,8 +526,33 @@ describe('同等確認 integrity_checked（T004）', () => {
     assert.equal(scan.card.dataModel.integrity_checked, false);
     const stored = JSON.parse((db.prepare('SELECT card_json FROM ui_cards WHERE id = ?').get(scan.card.card_id) as { card_json: string }).card_json);
     assert.equal(stored.dataModel.integrity_checked, false);
+    assert.equal(scan.card.dataModel.integrity_checked_at, null);
     const et = await ready('e_transaction');
     assert.equal(Object.hasOwn(et.card.dataModel, 'integrity_checked'), false);
+    assert.equal(Object.hasOwn(et.card.dataModel, 'integrity_checked_at'), false);
+  });
+
+  test('buildCard: integrity_checked_at が無ければ false と null', () => {
+    const id = addDoc({ kind: 'scan' });
+    const dm = buildCard(db, id, { now: NOW })!.dataModel;
+    assert.equal(dm.integrity_checked, false);
+    assert.equal(dm.integrity_checked_at, null);
+  });
+
+  test('buildCard: integrity_checked_at が入っていれば true とその時刻（訂正で開き直したとき）', () => {
+    const id = addDoc({ kind: 'scan' });
+    db.prepare('UPDATE documents SET integrity_checked_at = ? WHERE id = ?').run(NOW.toISOString(), id);
+    const dm = buildCard(db, id, { now: NOW })!.dataModel;
+    assert.equal(dm.integrity_checked, true);
+    assert.equal(dm.integrity_checked_at, NOW.toISOString());
+  });
+
+  test('確定の後に開き直したカードは確認済み（integrity_checked: true）', async () => {
+    const { id, card } = await ready();
+    assert.equal((await act(id, 'approve', { card_id: card.card_id, expected_version: 0, integrity_checked: true })).status, 200);
+    const card2 = (await getCard(id)).json;
+    assert.equal(card2.dataModel.integrity_checked, true);
+    assert.equal(card2.dataModel.integrity_checked_at, NOW.toISOString());
   });
 
   test('チェック付きの approve で integrity_checked_at が入り、document.integrity_checked を 1 件残す', async () => {
