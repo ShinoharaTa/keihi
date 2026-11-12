@@ -744,6 +744,15 @@ describe('税・保険の見積もりの純関数', () => {
     // 給与だけを入れた新しい年も送る。
     const only = taxYearDrafts(taxYears, TODAY).map((d) => (d.year === 2027 ? { ...d, values: { ...d.values, salary_after_deduction: '1000000' } } : d));
     assert.deepEqual(taxYearBodies(only, taxYears), [{ year: 2027, body: { kind: 'estimate', revenue: null, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary, salary_after_deduction: 1000000 } }]);
+    // 給与の組み合わせの検査（サーバーと同じ条件。年つきで止める）。
+    const withSal = (v: Record<string, string>) => [{ ...drafts[1]!, values: { ...drafts[1]!.values, ...v } }];
+    assert.equal(taxYearBodies(withSal({ salary_income: '2000000', salary_after_deduction: '2000001' }), ys), '2026 年の「給与所得控除後の金額」は「支払金額」以下で入れてください。');
+    assert.equal((taxYearBodies(withSal({ salary_income: '2000000', salary_after_deduction: '2000000' }), ys) as unknown[]).length, 1, '同じ額は通す');
+    assert.equal((taxYearBodies(withSal({ salary_after_deduction: '1000000' }), ys) as unknown[]).length, 1, '控除後だけは通す');
+    const needIncome = '2026 年の「源泉徴収税額」「社会保険料等の金額」を入れるときは、「支払金額」か「給与所得控除後の金額」も入れてください。';
+    assert.equal(taxYearBodies(withSal({ salary_withheld_tax: '60000' }), ys), needIncome);
+    assert.equal(taxYearBodies(withSal({ salary_social_insurance: '0' }), ys), needIncome, '0 も値');
+    assert.equal(taxSaveBody(taxProfileDraft(taxData.profile), withSal({ salary_withheld_tax: '60000' }), { ...taxData, years: ys }), needIncome, '保存の本文も止める');
     assert.equal(taxSalaryOpen(ys[0]), true);
     assert.equal(taxSalaryOpen(ys[1]), false);
     assert.equal(taxSalaryOpen(undefined), false);
@@ -841,8 +850,8 @@ describe('税・保険の見積もりの純関数', () => {
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
     assert.equal(warningText({ kind: 'revenue_missing', year: 2026 }, (x) => x), '2026 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
     assert.equal(taxWarningText({ kind: 'revenue_missing', year: 2025 }), '2025 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
-    assert.equal(taxWarningText({ kind: 'income_tax_refund', year: 2025, amount: 146427 }), '2025 年分は約 146,427 円の還付見込み（入金予定には入れていません）。');
-    assert.match(runText(r({ warnings: [{ kind: 'income_tax_refund', year: 2025, amount: 146427 }] }), '保存しました。'), /。2025 年分は約 146,427 円の還付見込み/);
+    assert.equal(taxWarningText({ kind: 'income_tax_refund', year: 2025, amount: 146427 }), '2025 年分の所得税は約 146,427 円の還付見込み（入金予定には入れていません）。');
+    assert.match(runText(r({ warnings: [{ kind: 'income_tax_refund', year: 2025, amount: 146427 }] }), '保存しました。'), /。2025 年分の所得税は約 146,427 円の還付見込み/);
   });
 });
 

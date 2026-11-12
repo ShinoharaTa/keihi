@@ -296,8 +296,9 @@ export const ERROR_TEXT: Record<string, string> = {
   not_linked: 'この証憑は紐付いていません。読み直してください。',
   document_not_found: '証憑が見つかりませんでした。',
   document_not_matchable: 'この証憑は却下・重複・私用のため紐付けられません。',
-  invalid_salary_after_deduction: '給与所得控除後の金額は支払金額以下で入れてください。',
-  salary_income_required: '源泉徴収税額・社会保険料等の金額を入れるときは、支払金額か給与所得控除後の金額も入れてください。',
+  // 給与の 2 つはサーバーの応答に年が入らない。画面は taxYearBodies が年つきで先に止めるので、ここに来るのは画面を通さない保存だけ。
+  invalid_salary_after_deduction: 'どれかの年で、給与所得控除後の金額が支払金額より大きくなっています。',
+  salary_income_required: 'どれかの年で、源泉徴収税額・社会保険料等の金額だけが入っています。支払金額か給与所得控除後の金額も入れてください。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -1273,10 +1274,24 @@ export function taxYearBodies(drafts: TaxYearDraft[], years: TaxYear[]): { year:
       if (v !== null) any = true;
       if ((row?.[f.k] ?? null) !== v) changed = true;
     }
+    // 給与の欄はサーバー（sync.ts）と同じ検査を先にする（サーバーの 400 には年が入らないので、ここで年つきで止める）。
+    const salaryError = taxSalaryError(d.year, body);
+    if (salaryError) return salaryError;
     if (!row && !any) continue;
     if (changed) out.push({ year: d.year, body: { kind: !row || any ? d.kind : row.kind, ...body } });
   }
   return out;
+}
+
+// 給与の 4 欄の組み合わせの検査（サーバーの invalid_salary_after_deduction・salary_income_required と同じ条件）。良ければ null。
+function taxSalaryError(year: number, b: Record<string, unknown>): string | null {
+  const income = b.salary_income as number | null | undefined;
+  const after = b.salary_after_deduction as number | null | undefined;
+  if (income != null && after != null && after > income) return `${year} 年の「給与所得控除後の金額」は「支払金額」以下で入れてください。`;
+  if ((b.salary_withheld_tax != null || b.salary_social_insurance != null) && income == null && after == null) {
+    return `${year} 年の「源泉徴収税額」「社会保険料等の金額」を入れるときは、「支払金額」か「給与所得控除後の金額」も入れてください。`;
+  }
+  return null;
 }
 
 export function taxWarningText(w: TaxWarning): string {
@@ -1294,7 +1309,7 @@ export function taxWarningText(w: TaxWarning): string {
     case 'income_missing':
       return `${w.year} 年の所得が無い分は作っていません。`;
     case 'income_tax_refund':
-      return `${w.year} 年分は約 ${yen(w.amount)} 円の還付見込み（入金予定には入れていません）。`;
+      return `${w.year} 年分の所得税は約 ${yen(w.amount)} 円の還付見込み（入金予定には入れていません）。`;
     case 'pinned_withdrawn':
       return '計算から外れた手直しの項目を残しています。';
     case 'possible_duplicate':
