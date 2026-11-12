@@ -22,9 +22,8 @@ export const INCOME_TAX_BRACKETS: readonly Bracket[] = [
 export const RECONSTRUCTION_RATE = 0.021;
 
 // 基礎控除（所得税）。合計所得 ≤ upTo なら amount。年分ごと。
-// 令和 7・8 年分: https://www.nta.go.jp/users/gensen/2025kiso/index.htm
-// 令和 9 年分〜: 132 万以下の 95 万だけ残り、それ以外は 58 万（132〜655 万の上乗せは令和 7・8 年分だけ）。
-// 2,350 万超の段階（48 万 / 32 万 / 16 万 / 0）は https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm
+// 2025 = 令和 7 年分、2026 = 令和 8・9 年分（令和 8 年度改正。令和 8 年 12 月 1 日施行、令和 8 年分から適用）、2028 = 令和 10 年分以後。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm （[令和8年4月1日現在法令等]。2026-11-12 に確認）
 export type Step = { upTo: number; amount: number };
 export const INCOME_TAX_BASIC_DEDUCTION: Readonly<Record<number, readonly Step[]>> = {
   2025: [
@@ -38,9 +37,18 @@ export const INCOME_TAX_BASIC_DEDUCTION: Readonly<Record<number, readonly Step[]
     { upTo: 25_000_000, amount: 160_000 },
     { upTo: Infinity, amount: 0 },
   ],
-  2027: [
-    { upTo: 1_320_000, amount: 950_000 },
-    { upTo: 23_500_000, amount: 580_000 },
+  2026: [
+    { upTo: 4_890_000, amount: 1_040_000 },
+    { upTo: 6_550_000, amount: 670_000 },
+    { upTo: 23_500_000, amount: 620_000 },
+    { upTo: 24_000_000, amount: 480_000 },
+    { upTo: 24_500_000, amount: 320_000 },
+    { upTo: 25_000_000, amount: 160_000 },
+    { upTo: Infinity, amount: 0 },
+  ],
+  2028: [
+    { upTo: 1_320_000, amount: 990_000 },
+    { upTo: 23_500_000, amount: 620_000 },
     { upTo: 24_000_000, amount: 480_000 },
     { upTo: 24_500_000, amount: 320_000 },
     { upTo: 25_000_000, amount: 160_000 },
@@ -67,6 +75,7 @@ export const PREPAY_FRACTION = 3;
 // 所得割 市 8% + 県 2%。均等割 市 3,000 + 県 1,000 + 森林環境税（国税）1,000。
 // https://www.city.saitama.lg.jp/001/153/004/002/001/001/p013654.html
 // 基礎控除 43 万（令和 8 年度も据え置き）: https://www.pref.tochigi.lg.jp/b07/life/zeikin/zeikin/documents/09r7zeiseikaiseinogaiyou.pdf
+// 令和 8 年度改正でも変わらない（大綱の概要で引き上げは所得税の基礎控除だけ。2026-11-12 に確認）: https://www.mof.go.jp/tax_policy/tax_reform/outline/fy2026/08taikou_gaiyou.htm
 // 調整控除は単身 2,500 円で仮置き【要確認】。
 // 納期 第 1〜4 期 = 6 月末・8 月末・10 月末・翌 1 月末（休日なら翌開庁日）: https://www.city.saitama.lg.jp/faq/001/001/003/p110417.html
 export type ResidentRates = { rate: number; perCapita: number; basicDeduction: number; adjustmentCredit: number };
