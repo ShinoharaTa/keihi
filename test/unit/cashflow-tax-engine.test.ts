@@ -478,12 +478,47 @@ describe('給与所得（源泉徴収票の 4 欄）', () => {
     // 合計所得 1,320,000 − 社保 300,000 − 基礎控除 950,000 = 70,000 → 3,500 + 73 = 3,573。
     assert.deepEqual(pick(r, 'income_tax:'), []);
     assert.deepEqual(refunds(r), [{ kind: 'income_tax_refund', year: 2025, amount: 146_427 }]);
+    // 項目が無くても内訳は出す（total は max(0, 申告納税額) = 0）。2026 年分の予定納税も無い。
+    assert.equal(line(r, 'income_tax:2025', '年税額（復興特別所得税を含む）'), 3_573);
+    assert.equal(line(r, 'income_tax:2025', '給与の源泉徴収税額'), 150_000);
+    assert.equal(line(r, 'income_tax:2025', '還付見込み'), 146_427);
+    assert.equal(total(r, 'income_tax:2025'), 0);
+    assert.deepEqual(pick(r, 'income_tax:2026:prepay'), []);
     // 住民税は合計所得 132 万（事業 0・給与 132 万）で作る。
     assert.deepEqual(r.breakdown.find((b) => b.group === 'resident:2026')!.lines.slice(0, 3), [
       { label: '2025 年の事業所得', amount: 0 }, { label: '2025 年の給与所得', amount: 1_320_000 }, { label: '合計所得', amount: 1_320_000 },
     ]);
-    // 確定申告の期日（2026-03-16）が期間の外なら警告しない。
-    assert.deepEqual(refunds(run({}, ys, { from: '2026-04-01', to: '2029-12-31' })), []);
+    // 確定申告の期日（2026-03-16）が期間の外なら警告せず、内訳も出さない。
+    const out = run({}, ys, { from: '2026-04-01', to: '2029-12-31' });
+    assert.deepEqual(refunds(out), []);
+    assert.equal(total(out, 'income_tax:2025'), undefined);
+  });
+
+  test('予定納税の基準額は源泉徴収を引いた後', () => {
+    // 2025 年分: 給与 500 万 → 給与所得 3,560,000 − 基礎控除 680,000 = 2,880,000 → 190,500 + 4,000 = 年税額 194,500。
+    const ys = (withheld: number) => [yr(2025, 'estimate', { salary_income: 5_000_000, salary_withheld_tax: withheld, social_insurance_paid: 0 })];
+    // 194,500 − 50,000 = 144,500（15 万未満）→ 2026 年分の予定納税なし（源泉を引かなければ 194,500 で作られる）。
+    const below = run({}, ys(50_000));
+    assert.equal(line(below, 'income_tax:2025', '年税額（復興特別所得税を含む）'), 194_500);
+    assert.deepEqual(pick(below, 'income_tax:2026:prepay'), []);
+    // 194,500 − 20,000 = 174,500 → 各期 174,500 / 3 の 100 円未満切り捨て = 58,100（源泉を引かなければ 64,800）。
+    const above = run({}, ys(20_000));
+    assert.deepEqual(pick(above, 'income_tax:2025:'), [['income_tax:2025:final', '2026-03-16', 174_500]]);
+    assert.deepEqual(pick(above, 'income_tax:2026:prepay'), [['income_tax:2026:prepay1', '2026-07-31', 58_100], ['income_tax:2026:prepay2', '2026-11-30', 58_100]]);
+  });
+
+  test('さかのぼって最初の行が給与だけなら、そこで止めて事業 0 を繰り越す（古い事業の行まで飛ばさない）', () => {
+    const r = run({ biz_tax_rate: 0.05 }, [
+      yr(2024, 'actual', { business_income: 5_000_000 }),
+      yr(2025, 'actual', { salary_income: 2_000_000 }),
+    ]);
+    // 2027 年度の住民税・国保は 2026 年の所得（行なし → 2025 から事業 0 を繰り越し。給与は繰り越さない）。
+    for (const g of ['resident:2027', 'nhi:2027']) {
+      const b = r.breakdown.find((x) => x.group === g)!;
+      assert.equal(b.carried_from, 2025, g);
+      assert.deepEqual(b.lines.slice(0, 2), [{ label: '2025 年の事業所得', amount: 0 }, { label: '合計所得', amount: 0 }], g);
+    }
+    assert.deepEqual(pick(r, 'biz_tax:2027:'), []);
   });
 
   test('予定納税で納めすぎた分も還付: 予定納税の項目は残し、内訳に「還付見込み」', () => {

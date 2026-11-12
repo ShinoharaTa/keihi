@@ -187,6 +187,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   };
   const totalOf = (business: number, salary: number | null) => Math.max(0, business + (salary ?? 0));
   // Y の所得。事業は Y に無ければ前の年で最も新しいものを繰り越す（Y に給与があれば事業 0 で繰り越さない）。給与は繰り越さない。
+  // さかのぼって最初に当たった行が給与だけ（事業の値なし）なら、そこで止めて事業 0 を繰り越す（それより古い事業の行まで飛ばさない）。
   const resolve = (year: number): Resolved | null => {
     const row = rows.get(year);
     const salary = salaryOfRow(row);
@@ -196,8 +197,10 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     for (let i = sortedYears.length - 1; i >= 0; i--) {
       const y = sortedYears[i];
       if (y >= year) continue;
-      const r = incomeOfRow(rows.get(y)!);
+      const prev = rows.get(y)!;
+      const r = incomeOfRow(prev);
       if (r) return { business: r.income, preBlue: r.preBlue, salary: null, total: totalOf(r.income, null), incomeYear: y, carriedFrom: y };
+      if (salaryOfRow(prev) !== null) return { business: 0, preBlue: 0, salary: null, total: 0, incomeYear: y, carriedFrom: y };
     }
     return null;
   };
@@ -395,7 +398,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       }
     }
     const r = refund !== undefined ? { refund } : {};
-    if (dues.length === 0) return { dues, b: null, ...r };
+    // 還付だけの年（項目が無い）も内訳は返す（期間に入るかは呼ぶ側が確定申告の期日で決める）。
+    if (dues.length === 0 && refund === undefined) return { dues, b: null };
     return { dues, b: { group: `income_tax:${year}`, kind: 'income_tax', year, total, lines, ...(it?.r ? meta(it.r) : {}) }, ...r };
   };
 
@@ -568,10 +572,14 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   const refunds: { year: number; amount: number }[] = [];
   for (let y = y0; y <= y1; y++) {
     const itg = incomeTaxGroup(y);
+    const shown = breakdown.length;
     add('income_tax', y, itg);
-    // 還付は、その年分の確定申告の期日が期間に入る年だけ数える。
+    // 還付は、その年分の確定申告の期日が期間に入る年だけ数える。項目が無くても（還付だけの年）内訳は出す。
     const itDue = nextBusinessDay(`${y + 1}-03-15`);
-    if (itg.refund !== undefined && itDue >= window.from && itDue <= window.to) refunds.push({ year: y, amount: itg.refund });
+    if (itg.refund !== undefined && itDue >= window.from && itDue <= window.to) {
+      refunds.push({ year: y, amount: itg.refund });
+      if (breakdown.length === shown && itg.b) breakdown.push(itg.b);
+    }
     add('resident', y, resident(y));
     add('nhi', y, nhi(y));
     add('biz_tax', y, bizTax(y));
