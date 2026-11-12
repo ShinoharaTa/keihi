@@ -1,6 +1,7 @@
 // 税金・保険料の見積もり（docs/cashflow.md §14）。純関数: 税プロファイルと年ごとの所得から、期日と額の一覧を出す。DB には触らない。
 // 対象: 所得税（確定申告 + 予定納税）・住民税（普通徴収 4 期）・国民健康保険税・個人事業税（biz_tax_rate が NULL なら作らない）・国民年金・
 // 消費税（確定申告 + 中間申告 1 回。consumption_mode が exempt なら作らず、unset なら警告だけ）。法定の数値は rates.ts。
+// 消費税の方式は年ごと: Y の行の consumption_mode があればそれ（simplified_class も行のもの）、無ければ profile（後の年に繰り越さない）。
 // どの年の所得で決まるか: 所得税は Y、予定納税は Y−1 の申告納税額、住民税・国保・事業税（Y 年度）は Y−1。
 // 消費税は Y の売上・経費（無ければ前の年で最も新しい売上を繰り越す）、中間申告は Y−1 年分の国税分。
 // 国民年金の月払いは年度ごとに 1 項目（recurrence = monthly、5 月末〜翌 4 月末に 12 回）。社会保険料控除は月ごとの内訳で数える。
@@ -67,6 +68,7 @@ export type Breakdown = {
   assumed_prev_year?: true; // 前年の所得が無く、year の所得で代えた
   carried_from?: number; // 所得をこの年から繰り越した
   method?: Exclude<ConsumptionMode, 'unset' | 'exempt'>; // 消費税の方式
+  mode_source?: 'profile' | 'year'; // 方式を profile から取ったか、その年の行の上書きか
 };
 
 export type EstimateWarning =
@@ -454,8 +456,19 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   };
 
   // ---- 消費税（Y 年分。Y の売上・経費。中間申告は Y−1 年分の国税分） ----
-  const mode = profile.consumption_mode;
-  const ctaxOn = mode === 'special20' || mode === 'simplified' || mode === 'standard';
+  // Y 年分の方式。Y の行に上書きがあればそれ、無ければ profile。
+  const modeOf = (year: number): { mode: ConsumptionMode; cls: number | null; source: 'profile' | 'year' } => {
+    const row = rows.get(year);
+    if (row && row.consumption_mode !== null) return { mode: row.consumption_mode, cls: row.simplified_class, source: 'year' };
+    return { mode: profile.consumption_mode, cls: profile.simplified_class, source: 'profile' };
+  };
+  const ctaxOn = (m: ConsumptionMode) => m === 'special20' || m === 'simplified' || m === 'standard';
+  // 方式の設定で Y 年分を作らない（2 割特例の期限切れ・簡易課税で区分なし）。
+  const special20Over = (year: number) => modeOf(year).mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR;
+  const ctaxBlocked = (year: number) => {
+    const m = modeOf(year);
+    return special20Over(year) || (m.mode === 'simplified' && m.cls === null);
+  };
   const exTax = (x: number) => (profile.revenue_includes_tax ? Math.floor((x * 100) / 110) : x);
   // Y の売上のある行。Y に無ければ前の年で最も新しいものを繰り越す。
   const ctaxRow = (year: number): { row: EstimateYear; carriedFrom?: number } | null => {
@@ -470,9 +483,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   // Y 年分の年税額（国税 + 地方消費税。中間申告を引く前）。
   const ctaxAnnual = (year: number): { tax: number; lines: BreakdownLine[]; incomeYear: number; carriedFrom?: number } | null =>
     cached(`ctax:${year}`, () => {
-      if (!ctaxOn) return null;
-      if (mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR) return null;
-      if (mode === 'simplified' && profile.simplified_class === null) return null;
+      const { mode, cls } = modeOf(year);
+      if (!ctaxOn(mode) || ctaxBlocked(year)) return null;
       const src = ctaxRow(year);
       if (!src) return null;
       const sales = exTax(src.row.revenue!);
@@ -483,9 +495,9 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
         tax = Math.floor((salesTax * 20) / 100);
         lines.push({ label: '控除（2 割特例: 売上税額の 80%）', amount: salesTax - tax });
       } else if (mode === 'simplified') {
-        const pct = CTAX_DEEMED_PURCHASE_PCT[profile.simplified_class!];
+        const pct = CTAX_DEEMED_PURCHASE_PCT[cls!];
         tax = Math.floor((salesTax * (100 - pct)) / 100);
-        lines.push({ label: `控除（簡易課税 第 ${profile.simplified_class} 種: みなし仕入率 ${pct}%）`, amount: salesTax - tax });
+        lines.push({ label: `控除（簡易課税 第 ${cls} 種: みなし仕入率 ${pct}%）`, amount: salesTax - tax });
       } else {
         // 本則（概算）: 経費を全額課税仕入とみなす。
         const purchase = exTax(src.row.expenses ?? 0);
@@ -497,11 +509,11 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       lines.push({ label: '年税額（国税 + 地方消費税）', amount: total });
       return { tax: total, lines, incomeYear: src.row.year, ...(src.carriedFrom !== undefined ? { carriedFrom: src.carriedFrom } : {}) };
     });
-  // Y 年分の中間申告（年 1 回）。Y−1 年分の国税分が 48 万円超のとき。
+  // Y 年分の中間申告（年 1 回）。Y−1 年分の国税分が 48 万円超のとき。基準の見積もりは Y−1 年分の方式で出す。
   const ctaxInterim = (year: number): { due: Due; lines: BreakdownLine[] } | null => {
-    if (!ctaxOn) return null;
+    if (!ctaxOn(modeOf(year).mode)) return null;
     // 2 割特例の期限が切れた年分は確定申告と同じく作らない。
-    if (mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR) return null;
+    if (special20Over(year)) return null;
     const a = actual(year - 1);
     let national: number;
     let label: string;
@@ -549,7 +561,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       year,
       total: an ? an.tax : it!.due.amount,
       lines,
-      method: mode as Exclude<ConsumptionMode, 'unset' | 'exempt'>,
+      method: modeOf(year).mode as Exclude<ConsumptionMode, 'unset' | 'exempt'>,
+      mode_source: modeOf(year).source,
       ...(an ? { income_year: an.incomeYear, ...(an.carriedFrom !== undefined ? { carried_from: an.carriedFrom } : {}) } : {}),
     };
     return { dues, b };
@@ -587,15 +600,16 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     add('ctax', y, ctaxGroup(y));
     // 2 割特例の期限切れは、その年分の確定申告の期日が期間に入る年だけ数える。
     const finalDue = nextBusinessDay(`${y + 1}-03-31`);
-    if (mode === 'special20' && y > CTAX_SPECIAL20_LAST_YEAR && finalDue >= window.from && finalDue <= window.to) special20Expired.push(y);
+    if (special20Over(y) && finalDue >= window.from && finalDue <= window.to) special20Expired.push(y);
     // 売上がどの年にも無い（所得だけ入れた年）なら作らず警告する。方式の設定で作らない年は数えない。
-    const ctaxBlocked = (mode === 'special20' && y > CTAX_SPECIAL20_LAST_YEAR) || (mode === 'simplified' && profile.simplified_class === null);
-    if (ctaxOn && !ctaxBlocked && !ctaxRow(y) && finalDue >= window.from && finalDue <= window.to) revenueMissing.push(y);
+    if (ctaxOn(modeOf(y).mode) && !ctaxBlocked(y) && !ctaxRow(y) && finalDue >= window.from && finalDue <= window.to) revenueMissing.push(y);
   }
   items.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.key < b.key ? -1 : 1));
 
-  if (mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
-  if (mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
+  // profile の方式の警告は、期間の年（y0〜y1）に profile を使う年（上書きの無い年）が 1 つでもあるときだけ。
+  const profileUsed = Array.from({ length: y1 - y0 + 1 }, (_, i) => y0 + i).some((y) => modeOf(y).source === 'profile');
+  if (profileUsed && profile.consumption_mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
+  if (profileUsed && profile.consumption_mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
   for (const year of special20Expired) warnings.push({ kind: 'special20_expired', year });
   for (const year of revenueMissing) warnings.push({ kind: 'revenue_missing', year });
   for (const x of refunds) warnings.push({ kind: 'income_tax_refund', ...x });
