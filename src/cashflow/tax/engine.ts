@@ -18,8 +18,9 @@ import {
   BIZ_TAX_SINGLE_PAYMENT_MAX,
   BLUE_RETURN_DEDUCTION,
   CTAX_DEEMED_PURCHASE_PCT,
+  CTAX_EXEMPT_THRESHOLD,
   CTAX_INTERIM_THRESHOLD,
-  CTAX_SPECIAL20_LAST_YEAR,
+  ctaxSpecialPayPct,
   INCOME_TAX_BASIC_DEDUCTION,
   INCOME_TAX_BRACKETS,
   INCOME_TAX_PERSONAL_DEDUCTION,
@@ -77,7 +78,8 @@ export type Breakdown = {
 export type EstimateWarning =
   | { kind: 'consumption_tax_mode_unset' }
   | { kind: 'simplified_class_missing' } // 簡易課税なのに事業区分が無い（消費税を作らない）
-  | { kind: 'special20_expired'; year: number } // 2 割特例は 2026 年分まで（その年分の消費税を作らない）
+  | { kind: 'special20_expired'; year: number } // 2 割・3 割特例は 2028 年分まで（その年分の消費税を作らない）
+  | { kind: 'special_base_over_10m'; year: number; base_year: number; base_sales: number } // 基準期間（2 年前）の課税売上高が 1,000 万円超で特例を使えない（計算は特例のまま）
   | { kind: 'revenue_missing'; year: number } // 消費税を作る方式なのに、その年分の売上がどの年にも無い（消費税を作らない）
   | { kind: 'income_tax_refund'; year: number; amount: number } // 所得税の還付の見込み（予定には入れない）
   | { kind: 'income_missing'; year: number };
@@ -454,8 +456,8 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     return { mode: profile.consumption_mode, cls: profile.simplified_class, source: 'profile' };
   };
   const ctaxOn = (m: ConsumptionMode) => m === 'special20' || m === 'simplified' || m === 'standard';
-  // 方式の設定で Y 年分を作らない（2 割特例の期限切れ・簡易課税で区分なし）。
-  const special20Over = (year: number) => modeOf(year).mode === 'special20' && year > CTAX_SPECIAL20_LAST_YEAR;
+  // 方式の設定で Y 年分を作らない（2 割・3 割特例の期限切れ・簡易課税で区分なし）。
+  const special20Over = (year: number) => modeOf(year).mode === 'special20' && ctaxSpecialPayPct(year) === null;
   const ctaxBlocked = (year: number) => {
     const m = modeOf(year);
     return special20Over(year) || (m.mode === 'simplified' && m.cls === null);
@@ -483,8 +485,10 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
       const lines: BreakdownLine[] = [{ label: `${src.row.year} 年の売上（税抜）`, amount: sales }, { label: '売上税額（10%）', amount: salesTax }];
       let tax: number;
       if (mode === 'special20') {
-        tax = Math.floor((salesTax * 20) / 100);
-        lines.push({ label: '控除（2 割特例: 売上税額の 80%）', amount: salesTax - tax });
+        // 2026 年分までは 2 割特例、2027・2028 年分は 3 割特例。
+        const pct = ctaxSpecialPayPct(year)!;
+        tax = Math.floor((salesTax * pct) / 100);
+        lines.push({ label: `控除（${pct / 10} 割特例: 売上税額の ${100 - pct}%）`, amount: salesTax - tax });
       } else if (mode === 'simplified') {
         const pct = CTAX_DEEMED_PURCHASE_PCT[cls!];
         tax = Math.floor((salesTax * (100 - pct)) / 100);
@@ -503,7 +507,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   // Y 年分の中間申告（年 1 回）。Y−1 年分の国税分が 48 万円超のとき。基準の見積もりは Y−1 年分の方式で出す。
   const ctaxInterim = (year: number): { due: Due; lines: BreakdownLine[] } | null => {
     if (!ctaxOn(modeOf(year).mode)) return null;
-    // 2 割特例の期限が切れた年分は確定申告と同じく作らない。
+    // 2 割・3 割特例の期限が切れた年分は確定申告と同じく作らない。
     if (special20Over(year)) return null;
     const a = actual(year - 1);
     let national: number;
@@ -572,6 +576,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     breakdown.push(g.b);
   };
   const special20Expired: number[] = [];
+  const specialBaseOver: { year: number; base_year: number; base_sales: number }[] = [];
   const revenueMissing: number[] = [];
   const refunds: { year: number; amount: number }[] = [];
   for (let y = y0; y <= y1; y++) {
@@ -589,9 +594,19 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
     add('biz_tax', y, bizTax(y));
     add('pension', y, pension(y));
     add('ctax', y, ctaxGroup(y));
-    // 2 割特例の期限切れは、その年分の確定申告の期日が期間に入る年だけ数える。
+    // 2 割・3 割特例の期限切れは、その年分の確定申告の期日が期間に入る年だけ数える。
     const finalDue = nextBusinessDay(`${y + 1}-03-31`);
     if (special20Over(y) && finalDue >= window.from && finalDue <= window.to) special20Expired.push(y);
+    // 特例の年でも、基準期間（Y−2 年）の課税売上高が 1,000 万円を超えるなら使えない。Y−2 年の行の売上だけで見る（繰り越さない）。
+    // 警告だけで、計算は特例の率のまま。課税売上高は、Y−2 年が免税（か未設定）なら売上そのまま、課税なら税抜。
+    if (modeOf(y).mode === 'special20' && !special20Over(y) && finalDue >= window.from && finalDue <= window.to) {
+      const base = rows.get(y - 2);
+      if (base && base.revenue !== null) {
+        const bm = modeOf(y - 2).mode;
+        const baseSales = bm === 'exempt' || bm === 'unset' ? base.revenue : exTax(base.revenue);
+        if (baseSales > CTAX_EXEMPT_THRESHOLD) specialBaseOver.push({ year: y, base_year: y - 2, base_sales: baseSales });
+      }
+    }
     // 売上がどの年にも無い（所得だけ入れた年）なら作らず警告する。方式の設定で作らない年は数えない。
     if (ctaxOn(modeOf(y).mode) && !ctaxBlocked(y) && !ctaxRow(y) && finalDue >= window.from && finalDue <= window.to) revenueMissing.push(y);
   }
@@ -602,6 +617,7 @@ export function estimate(profile: TaxProfileValues, years: EstimateYear[], windo
   if (profileUsed && profile.consumption_mode === 'unset') warnings.push({ kind: 'consumption_tax_mode_unset' });
   if (profileUsed && profile.consumption_mode === 'simplified' && profile.simplified_class === null) warnings.push({ kind: 'simplified_class_missing' });
   for (const year of special20Expired) warnings.push({ kind: 'special20_expired', year });
+  for (const x of specialBaseOver) warnings.push({ kind: 'special_base_over_10m', ...x });
   for (const year of revenueMissing) warnings.push({ kind: 'revenue_missing', year });
   for (const x of refunds) warnings.push({ kind: 'income_tax_refund', ...x });
   for (const year of [...missing].sort((a, b) => a - b)) warnings.push({ kind: 'income_missing', year });

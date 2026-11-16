@@ -208,14 +208,13 @@ describe('税の見積もりの API', () => {
     assert.deepEqual([c.status, c.body.year.consumption_mode, c.body.year.simplified_class], [200, null, null]);
     assert.equal(await ctax(), 250_000);
 
-    // 2 割特例で 2027 年以降も保存できる（警告で知らせる）。
+    // 2027 年の行の 2 割特例は 3 割特例で計算する（2026 年の売上を繰り越す: 税抜 5,000,000 × 10% × 30%）。
     const e = await send('PUT', '/api/tax/years/2027', { kind: 'estimate', consumption_mode: 'special20' });
     assert.equal(e.status, 200);
-    assert.ok(e.body.run.warnings.some((w: { kind: string; year?: number }) => w.kind === 'special20_expired' && w.year === 2027));
-    assert.deepEqual(
-      (await get('/api/cashflow')).body.warnings.filter((w: { kind: string }) => w.kind === 'special20_expired'),
-      [{ kind: 'special20_expired', year: 2027 }],
-    );
+    assert.ok(!e.body.run.warnings.some((w: { kind: string }) => w.kind === 'special20_expired'));
+    assert.equal(((await get('/api/scheduled_items')).body.items as Record<string, any>[]).find((i) => i.estimate_key === 'ctax:2027:final' && i.active === 1)?.amount, 150_000);
+    // 期限切れの 2029 年以降も保存できる（期日が期間に入れば special20_expired で知らせる）。
+    assert.equal((await send('PUT', '/api/tax/years/2029', { kind: 'estimate', consumption_mode: 'special20' })).status, 200);
 
     // アプリの検査を通らない値は DB の CHECK でも落ちる。
     assert.throws(() => db.prepare(`UPDATE tax_years SET consumption_mode = 'simplified' WHERE year = 2026`).run(), /CHECK constraint failed/);
@@ -290,7 +289,25 @@ describe('税の見積もりの API', () => {
     const kinds = async () => (await get('/api/cashflow')).body.warnings.filter((w: { kind: string }) => /^(simplified|special20|consumption)/.test(w.kind));
     assert.deepEqual(await kinds(), [{ kind: 'simplified_class_missing' }]);
     assert.equal((await send('PUT', '/api/tax', { profile: { consumption_mode: 'special20' } })).status, 200);
-    assert.deepEqual(await kinds(), [{ kind: 'special20_expired', year: 2027 }, { kind: 'special20_expired', year: 2028 }]);
+    // 2027・2028 年分は 3 割特例。2029 年分の期日（2030-04-01）は期間（〜2030-02-07）の外。
+    assert.deepEqual(await kinds(), []);
+    // 1 年後に再計算すると 2029 年分の期日が期間に入る。
+    const T1 = new Date('2027-11-07T00:00:00.000Z');
+    app = new Hono();
+    app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST] }));
+    app.route('/api', cashflowRoutes({ db, now: () => T1, config: { cashflow: { unplannedLookbackMonths: 6, reserveMonths: 3, includeUnplannedIncome: false } } }));
+    app.route('/api', taxRoutes({ db, now: () => T1 }));
+    assert.equal((await send('PUT', '/api/tax', { profile: { consumption_mode: 'special20' } })).status, 200);
+    assert.deepEqual(await kinds(), [{ kind: 'special20_expired', year: 2029 }]);
+  });
+
+  test('special_base_over_10m は GET /api/tax/estimates の warnings にだけ出る（資金繰りの warnings には出さない）', async () => {
+    // 2026 年: 税込 12,000,000 → 税抜 10,909,090。2028 年分の基準期間。
+    const put = await send('PUT', '/api/tax', { profile: { consumption_mode: 'special20' }, years: [{ year: 2026, kind: 'estimate', revenue: 12_000_000, expenses: 0 }] });
+    assert.equal(put.status, 200, JSON.stringify(put.body));
+    const want = [{ kind: 'special_base_over_10m', year: 2028, base_year: 2026, base_sales: 10_909_090 }];
+    assert.deepEqual((await get('/api/tax/estimates')).body.warnings.filter((w: { kind: string }) => w.kind === 'special_base_over_10m'), want);
+    assert.ok(!(await get('/api/cashflow')).body.warnings.some((w: { kind: string }) => w.kind === 'special_base_over_10m'));
   });
 
   test('PATCH /api/scheduled_items/:id の pinned は見積もりの項目だけ', async () => {
@@ -334,32 +351,35 @@ describe('POST /api/tax/simulate', () => {
 
   test('profile の 2 割特例が Y 年に使えなければ簡易課税に補正、body で明示したら補正しない', async () => {
     assert.equal((await send('PUT', '/api/tax/profile', { consumption_mode: 'special20', simplified_class: 5 })).status, 200);
-    const r = await send('POST', '/api/tax/simulate', { revenue: 6_000_000 });
+    // 既定の翌年（2027）は 3 割特例で使えるので補正しない。
+    const d = await send('POST', '/api/tax/simulate', { revenue: 6_000_000 });
+    assert.deepEqual([d.body.year, d.body.inputs.consumption_mode, d.body.inputs.source.consumption_mode], [2027, 'special20', 'profile']);
+    const r = await send('POST', '/api/tax/simulate', { year: 2029, revenue: 6_000_000 });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual([r.body.year, r.body.inputs.consumption_mode, r.body.inputs.simplified_class, r.body.inputs.source.consumption_mode], [2027, 'simplified', 5, 'defaulted']);
+    assert.deepEqual([r.body.year, r.body.inputs.consumption_mode, r.body.inputs.simplified_class, r.body.inputs.source.consumption_mode], [2029, 'simplified', 5, 'defaulted']);
     assert.deepEqual(r.body.warnings.filter((w: { kind: string }) => w.kind === 'mode_defaulted'), [{ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }]);
-    const b = await send('POST', '/api/tax/simulate', { revenue: 6_000_000, profile: { consumption_mode: 'special20' } });
+    const b = await send('POST', '/api/tax/simulate', { year: 2029, revenue: 6_000_000, profile: { consumption_mode: 'special20' } });
     assert.deepEqual([b.body.inputs.consumption_mode, b.body.inputs.source.consumption_mode], ['special20', 'body']);
     assert.ok(b.body.warnings.some((w: { kind: string }) => w.kind === 'selected_mode_unavailable'));
     assert.ok(!b.body.warnings.some((w: { kind: string }) => w.kind === 'mode_defaulted' || w.kind === 'special20_expired'));
   });
 
   test('試算の方式: body → year の行の上書き → profile の順。year の行の方式も使えなければ補正する', async () => {
-    const sim = (body: Record<string, unknown> = {}) => send('POST', '/api/tax/simulate', { year: 2027, revenue: 6_000_000, ...body });
+    const sim = (body: Record<string, unknown> = {}) => send('POST', '/api/tax/simulate', { year: 2029, revenue: 6_000_000, ...body });
     const modeOf = (r: { body: Record<string, any> }) => [r.body.inputs.consumption_mode, r.body.inputs.simplified_class, r.body.inputs.source.consumption_mode];
     const defaulted = (r: { body: Record<string, any> }) => r.body.warnings.filter((w: { kind: string }) => w.kind === 'mode_defaulted');
 
-    // profile = 2 割特例・第 5 種、2027 年の行 = 簡易課税 第 5 種 → 行の方式（補正なし）。
+    // profile = 2 割特例・第 5 種、2029 年の行 = 簡易課税 第 5 種 → 行の方式（補正なし）。
     assert.equal((await send('PUT', '/api/tax/profile', { consumption_mode: 'special20', simplified_class: 5 })).status, 200);
-    assert.equal((await send('PUT', '/api/tax/years/2027', { kind: 'estimate', consumption_mode: 'simplified', simplified_class: 5 })).status, 200);
+    assert.equal((await send('PUT', '/api/tax/years/2029', { kind: 'estimate', consumption_mode: 'simplified', simplified_class: 5 })).status, 200);
     const a = await sim();
     assert.equal(a.status, 200, JSON.stringify(a.body));
-    assert.deepEqual(modeOf(a), ['simplified', 5, 'tax_years:2027']);
+    assert.deepEqual(modeOf(a), ['simplified', 5, 'tax_years:2029']);
     assert.deepEqual(defaulted(a), []);
 
-    // profile = 簡易課税 第 5 種、2027 年の行 = 2 割特例 → 2027 年分は使えないので簡易課税（profile の区分）に補正。
+    // profile = 簡易課税 第 5 種、2029 年の行 = 2 割特例 → 2029 年分は使えないので簡易課税（profile の区分）に補正。
     assert.equal((await send('PUT', '/api/tax/profile', { consumption_mode: 'simplified', simplified_class: 5 })).status, 200);
-    assert.equal((await send('PUT', '/api/tax/years/2027', { consumption_mode: 'special20', simplified_class: null })).status, 200);
+    assert.equal((await send('PUT', '/api/tax/years/2029', { consumption_mode: 'special20', simplified_class: null })).status, 200);
     const b = await sim();
     assert.deepEqual(modeOf(b), ['simplified', 5, 'defaulted']);
     assert.deepEqual(defaulted(b), [{ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }]);
@@ -370,8 +390,8 @@ describe('POST /api/tax/simulate', () => {
     assert.deepEqual(defaulted(c), []);
     assert.ok(c.body.warnings.some((w: { kind: string }) => w.kind === 'selected_mode_unavailable'));
 
-    // 行の無い年（2028）は profile。
-    assert.deepEqual(modeOf(await sim({ year: 2028 })), ['simplified', 5, 'profile']);
+    // 行の無い年（2030）は profile。
+    assert.deepEqual(modeOf(await sim({ year: 2030 })), ['simplified', 5, 'profile']);
   });
 
   test('profile も tax_years も無ければ 400 income_required、revenue だけなら DEFAULT_PROFILE で 200', async () => {
@@ -429,7 +449,9 @@ describe('POST /api/tax/simulate', () => {
       ['exempt', null], ['special20', null], ['simplified', 1], ['simplified', 2], ['simplified', 3], ['simplified', 4], ['simplified', 5], ['simplified', 6], ['standard', null],
     ]);
     assert.deepEqual(Object.keys(r.body.ctax_compare[0]), ['mode', 'simplified_class', 'available', 'reason', 'tax', 'take_home', 'notes']);
-    assert.deepEqual(r.body.ctax_compare[1], { mode: 'special20', simplified_class: null, available: false, reason: 'special20_expired', tax: null, take_home: null, notes: [] });
+    // 2027 年分は 3 割特例: 税抜 7,272,727 × 10% × 30% = 218,181 → 218,100。
+    const ctax = r.body.amounts.find((a: Record<string, unknown>) => a.kind === 'ctax').amount;
+    assert.deepEqual(r.body.ctax_compare[1], { mode: 'special20', simplified_class: null, available: true, reason: null, tax: 218_100, take_home: r.body.take_home + ctax - 218_100, notes: [] });
     assert.deepEqual(r.body.best, { mode: 'simplified', simplified_class: 1 });
     assert.deepEqual(r.body.assumptions, ['steady_state']);
     assert.equal(r.body.income.pre_blue, 7_000_000);
