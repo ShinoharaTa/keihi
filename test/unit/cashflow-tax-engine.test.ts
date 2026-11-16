@@ -422,6 +422,9 @@ describe('消費税', () => {
     // 2026 年が免税なら売上そのまま。
     const ex = run(sp, [yr(2026, 'estimate', { revenue: 10_000_001, expenses: 0, consumption_mode: 'exempt' })]);
     assert.deepEqual(over(ex), [{ kind: 'special_base_over_10m', year: 2028, base_year: 2026, base_sales: 10_000_001 }]);
+    // 2026 年の方式が未設定（profile も行も指定なし）でも売上そのまま（税抜にすると 9,545,454 で出なくなる額）。
+    const un = run({ revenue_includes_tax: 1 }, [yr(2026, 'estimate', { revenue: 10_500_000, expenses: 0 }), yr(2028, 'estimate', { revenue: 5_500_000, expenses: 0, consumption_mode: 'special20' })]);
+    assert.deepEqual(over(un), [{ kind: 'special_base_over_10m', year: 2028, base_year: 2026, base_sales: 10_500_000 }]);
     // 2026 年の行が無い・売上が null なら出さない（前の年の売上は繰り越さない。2025 年の行は 2027 年分の基準期間）。
     assert.deepEqual(over(run(sp, [yr(2027, 'estimate', { revenue: 12_000_000, expenses: 0 })])), []);
     const carried = run(sp, [yr(2025, 'estimate', { revenue: 12_000_000, expenses: 0 }), yr(2026, 'estimate', { business_income: 3_000_000 })]);
@@ -683,6 +686,23 @@ describe('消費税の方式（年ごとの上書き）', () => {
     const r29 = run(p, [...ys(), yr(2029, 'estimate', { consumption_mode: 'special20' })], { from: '2026-01-01', to: '2030-12-31' });
     assert.deepEqual(pick(r29, 'ctax:2029'), []);
     assert.deepEqual(ctaxWarnings(r29), [{ kind: 'special20_expired', year: 2029 }, { kind: 'revenue_missing', year: 2025 }]);
+  });
+
+  test('2028 年分が 3 割特例・2029 年分が profile の簡易課税: 2029 年分の中間申告の基準は 2028 年分を 30% で出した額', () => {
+    // 2028: 売上税額 4,000,000 × 30% = 1,200,000。
+    // 2029（2028 から繰り越し、簡易 第 5 種）: 4,000,000 × 50% = 2,000,000。
+    // 中間申告の基準 1,200,000 × 78/100 = 936,000（48 万超）→ 国税 468,000 + 地方 132,000 = 600,000。確定 2,000,000 − 600,000。2030-03-31 は日曜。
+    const r = run({ consumption_mode: 'simplified', simplified_class: 5, revenue_includes_tax: 0 }, [
+      yr(2028, 'estimate', { revenue: 40_000_000, expenses: 0, consumption_mode: 'special20' }),
+    ], { from: '2028-01-01', to: '2030-12-31' });
+    assert.deepEqual(pick(r, 'ctax:2028'), [['ctax:2028:final', '2029-04-02', 1_200_000]]);
+    assert.deepEqual(pick(r, 'ctax:2029'), [
+      ['ctax:2029:interim1', '2029-08-31', 600_000],
+      ['ctax:2029:final', '2030-04-01', 1_400_000],
+    ]);
+    const b2029 = r.breakdown.find((b) => b.group === 'ctax:2029')!;
+    assert.deepEqual([b2029.method, b2029.mode_source], ['simplified', 'profile']);
+    assert.deepEqual(r.warnings.filter((w) => w.kind === 'special20_expired'), []);
   });
 
   test('年の行の簡易課税は行の区分を使う。免税の上書きも効く', () => {
