@@ -1151,13 +1151,13 @@ export function taxIncome(years: TaxYear[], year: number, blue: BlueReturn): num
 // ISO の日時 → 東京の暦日（YYYY-MM-DD）。
 export const tokyoDate = (iso: string) => new Date(Date.parse(iso) + 9 * 3600000).toISOString().slice(0, 10);
 
-// カードの 1 行: 「2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7」。
+// カードの 1 行: 「2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7」。消費税はその年に効く方式（年の行の指定 → プロファイル）。
 export function taxCardLine(t: TaxSummary, today: string): string {
   const y = Number(today.slice(0, 4));
   const inc = taxIncome(t.years, y, t.profile?.blue_return ?? '65');
   const last = t.last_run_at ? md(tokyoDate(t.last_run_at)) : '—';
-  const mode = t.profile?.consumption_mode ?? 'unset';
-  return `${y} 年分 所得 ${inc === null ? '未入力' : `${man(inc)}円`} · 消費税 ${CONSUMPTION_LABELS[mode] ?? mode} / 最終計算 ${last}`;
+  const eff = yearCtaxEffective(y, [], t.years, { mode: t.profile?.consumption_mode ?? 'unset', cls: t.profile?.simplified_class ?? null });
+  return `${y} 年分 所得 ${inc === null ? '未入力' : `${man(inc)}円`} · 消費税 ${consumptionModeLabel(eff.mode, eff.cls, y)} / 最終計算 ${last}`;
 }
 
 export type TaxProfileDraft = {

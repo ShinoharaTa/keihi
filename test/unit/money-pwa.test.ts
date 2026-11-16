@@ -706,7 +706,11 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(tokyoDate('2026-11-06T15:30:00.000Z'), '2026-11-07');
     assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 · 消費税 未設定 / 最終計算 11/7');
     const s20 = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' as const }, last_run_at: '2026-11-06T15:30:00.000Z' };
-    assert.equal(taxCardLine(s20, TODAY), '2026 年分 所得 400万円 · 消費税 2 割・3 割特例 / 最終計算 11/7');
+    assert.equal(taxCardLine(s20, TODAY), '2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7');
+    assert.equal(taxCardLine(s20, '2027-06-01'), '2027 年分 所得 400万円 · 消費税 3 割特例 / 最終計算 11/7', '2027 年分は 3 割特例');
+    // 年の行の指定がプロファイルより先（2026 年の行だけ簡易課税 第 5 種）。
+    const over = { ...s20, years: s20.years.map((r) => (r.year === 2026 ? { ...r, consumption_mode: 'simplified' as const, simplified_class: 5 } : r)) };
+    assert.equal(taxCardLine(over, TODAY), '2026 年分 所得 400万円 · 消費税 簡易課税 第 5 種 / 最終計算 11/7');
     assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 · 消費税 未設定 / 最終計算 —');
   });
   test('合計所得 = 事業所得 + 給与所得（engine の resolve と同じ。給与は繰り越さない）', () => {
@@ -1438,12 +1442,12 @@ describe('SSR スナップショット', () => {
     assert.doesNotMatch(unset, /再計算/);
     assert.match(set, /2026 年分 所得 400万円 · 消費税 未設定 \/ 最終計算 11\/7/);
     const set20 = html(m.TaxCard!, { tax: { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' }, last_run_at: '2026-11-06T15:30:00.000Z' }, today: TODAY, busy: false, onOpen: noop, onRecalc: noop });
-    assert.match(set20, /2026 年分 所得 400万円 · 消費税 2 割・3 割特例 \/ 最終計算 11\/7/);
+    assert.match(set20, /2026 年分 所得 400万円 · 消費税 2 割特例 \/ 最終計算 11\/7/);
     assert.match(set, /設定を開く[\s\S]*再計算/);
     const draft = taxProfileDraft(taxData.profile);
     const form = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [account(), { ...wallet, active: false }], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(form, /aria-pressed="true">65 万/);
-    assert.match(form, /<legend>消費税の方式（年ごとの指定が無い年）<\/legend>[\s\S]*>免税<\/button>[\s\S]*>2 割・3 割特例<\/button>[\s\S]*>簡易課税<\/button>[\s\S]*>本則<\/button>[\s\S]*<span class="m-sub">未設定<\/span>[\s\S]*2 割特例は 2026 年分まで/);
+    assert.match(form, /<legend>消費税の方式（年ごとの指定が無い年）<\/legend>[\s\S]*>免税<\/button>[\s\S]*>2 割・3 割特例<\/button>[\s\S]*>簡易課税<\/button>[\s\S]*>本則<\/button>[\s\S]*<span class="m-sub">未設定<\/span>[\s\S]*2 割特例は 2026 年分まで、2027・2028 年分は 3 割特例です。2029 年分からは簡易課税か本則を選んでください。/);
     assert.doesNotMatch(form.split('<legend>消費税の方式（年ごとの指定が無い年）</legend>')[1]!.split('</fieldset>')[0]!, /aria-pressed="true"/, '未設定ならどれも選ばない');
     assert.doesNotMatch(form, /事業区分|売上の入力は税込/, '未設定なら事業区分もトグルも出さない');
     const simp = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'simplified', simplified_class: '' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
@@ -1496,13 +1500,13 @@ describe('SSR スナップショット', () => {
     const form = html(m.TaxForm!, { data, draft: taxProfileDraft(profile), years, accounts: [], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     for (const y of [2025, 2026, 2027, 2028]) assert.match(form, new RegExp(`<select id="m-tax-${y}-ctax" class="m-field"`), `${y} 年の欄に方式の select`);
     const block = (y: number) => form.split(`<legend>${y} 年`)[1]!.split('</fieldset>')[0]!;
-    assert.match(block(2026), /消費税の方式<\/span><select id="m-tax-2026-ctax" class="m-field" value="special20"><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">2 割特例<\/option>/);
-    assert.match(block(2027), /<select id="m-tax-2027-ctax" class="m-field" value=""><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">3 割特例<\/option>/);
-    assert.match(block(2027), /<span class="m-sub">前の年分に 2 割・3 割特例を使っていれば、簡易課税制度選択届出書は 2027 年分の確定申告の期限（2028 年 3 月 31 日。土日なら翌月曜）までに出せば/);
+    assert.match(block(2026), /<label class="m-label" for="m-tax-2026-ctax">消費税の方式<\/label>\s*<select id="m-tax-2026-ctax" class="m-field" value="special20"><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">2 割特例<\/option>/);
+    assert.match(block(2027), /<select id="m-tax-2027-ctax" class="m-field" value="" aria-describedby="m-tax-2027-ctax-n0 m-tax-2027-ctax-n1"><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">3 割特例<\/option>/);
+    assert.match(block(2027), /<\/select>\s*<span id="m-tax-2027-ctax-n0" class="m-sub">前の年分に 2 割・3 割特例を使っていれば、簡易課税制度選択届出書は 2027 年分の確定申告の期限（2028 年 3 月 31 日。土日なら翌月曜）までに出せば/);
     assert.match(block(2027), /3 割特例は売上税額の 30%、簡易課税 第 5 種は 50% です。/);
-    assert.match(block(2028), /<span class="m-sub">3 割特例は売上税額の 30%/);
+    assert.match(block(2028), /<span id="m-tax-2028-ctax-n0" class="m-sub">3 割特例は売上税額の 30%/);
     assert.doesNotMatch(block(2028), /前の年分に 2 割・3 割特例|12 月 31 日までに/, '続けて簡易課税なら届出の注記は出さない');
-    assert.doesNotMatch(block(2026).split('m-tax-2026-ctax')[1]!, /class="m-sub">/, '2026 年の 2 割特例には注記なし');
+    assert.doesNotMatch(block(2026).split('<select id="m-tax-2026-ctax"')[1]!, /class="m-sub"|aria-describedby/, '2026 年の 2 割特例には注記なし');
     // 下書きで 2027 年を本則にしたら、2028 年の注記は 12 月 31 日の期限になる。
     const edited = html(m.TaxForm!, { data, draft: taxProfileDraft(profile), years: years.map((d) => (d.year === 2027 ? { ...d, ctax: 'standard' } : d)), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(edited.split('<legend>2028 年')[1]!.split('</fieldset>')[0]!, /2028 年分から簡易課税にするには、2027 年 12 月 31 日までに/);
