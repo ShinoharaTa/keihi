@@ -9,7 +9,7 @@ import path from 'node:path';
 import { verifyAudit } from '../../src/audit.ts';
 import { assertSafeTargets, EXCLUDES, isCheckDue, runBackup } from '../../src/backup/backup.ts';
 import { runDrill } from '../../src/backup/drill.ts';
-import { ALLOWED_SUBCOMMANDS, createRestic, parseBackupSummary } from '../../src/backup/restic.ts';
+import { ALLOWED_SUBCOMMANDS, childEnv, createRestic, parseBackupSummary } from '../../src/backup/restic.ts';
 import { findRestic, loadBackupSettings, type BackupSettings } from '../../src/backup/settings.ts';
 import { ConfigError } from '../../src/config.ts';
 import { openDb, type Db } from '../../src/db/index.ts';
@@ -171,6 +171,22 @@ describe('restic ラッパ', () => {
     assert.equal(l.env.password, 'p');
     assert.ok(!l.env.keys.includes('GEMINI_API_KEY'));
     assert.ok(!l.env.keys.includes('RESTIC_BIN'));
+  });
+
+  test('childEnv: PATH の先頭に <HOME>/.local/bin（重複させない）。rclone の設定の場所は渡し、他のシークレットは渡さない', () => {
+    const home = '/home/u';
+    assert.equal(childEnv({}, { HOME: home, PATH: '/usr/bin:/bin' }).PATH, '/home/u/.local/bin:/usr/bin:/bin');
+    assert.equal(childEnv({}, { HOME: home, PATH: '/usr/bin:/home/u/.local/bin' }).PATH, '/usr/bin:/home/u/.local/bin');
+    assert.equal(childEnv({}, { HOME: home }).PATH, '/home/u/.local/bin');
+    assert.equal(childEnv({}, { PATH: '/usr/bin' }).PATH, '/usr/bin');
+    const e = childEnv(
+      { RESTIC_PASSWORD: 'p' },
+      { HOME: home, PATH: '/usr/bin', RCLONE_CONFIG: '/x/rclone.conf', XDG_CONFIG_HOME: '/x', GEMINI_API_KEY: 'g', FREEE_CLIENT_SECRET: 'f', RESTIC_BIN: '/b' },
+    );
+    assert.equal(e.RCLONE_CONFIG, '/x/rclone.conf');
+    assert.equal(e.XDG_CONFIG_HOME, '/x');
+    assert.equal(e.RESTIC_PASSWORD, 'p');
+    for (const k of ['GEMINI_API_KEY', 'FREEE_CLIENT_SECRET', 'RESTIC_BIN']) assert.ok(!(k in e), k);
   });
 
   test('parseBackupSummary', () => {

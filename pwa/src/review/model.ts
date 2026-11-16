@@ -2,6 +2,7 @@
 // - 下書き（Draft）はカードの dataModel.values から始める。確定のときはカードの値から変えた項目だけを送る
 //   （変えていなければ values は空 = 差分なしの 1 タップ確定）。
 // - スキャン（dataModel.integrity_checked がある）は、同等確認のチェックを approve のときだけ integrity_checked で送る（T004）。
+//   integrity_checked_at が入っていれば確認済みの日付を出す（東京の暦日）。
 // - 確定ボタンは R10 の必須（日付・金額・取引先・科目・税・支払手段）がそろったときだけ押せる。
 import type { TaxCategory, TaxRow } from './catalog.ts';
 
@@ -31,6 +32,7 @@ export type DataModel = {
   accounts: { id: string; name: string; private: boolean }[];
   warnings: string[];
   integrity_checked?: boolean; // scan のときだけある
+  integrity_checked_at?: string | null; // scan のときだけある。入っていれば確認済み（サーバーは上書きしないので外せない）
 };
 
 export type CardResponse = { card_id: string; surface: unknown; dataModel: DataModel };
@@ -76,6 +78,9 @@ export function changedValues(card: Values, draft: Values): Partial<Values> {
   }
   return out;
 }
+
+// 確認済みの表示。ISO の日時 → 東京の暦日（YYYY-MM-DD）。
+export const integrityCheckedText = (iso: string) => `確認済み（${new Date(Date.parse(iso) + 9 * 3600000).toISOString().slice(0, 10)}、東京時間）`;
 
 export type RequestBody = { card_id: string; expected_version: number; values?: Partial<Values>; integrity_checked?: boolean };
 

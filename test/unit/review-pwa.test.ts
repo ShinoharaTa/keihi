@@ -1,10 +1,24 @@
-// PWA の確認画面の純関数（docs/mvp-plan.md T2-10）。描画する部品の選別と、確定で送る本文（U8）。
-import { describe, test } from 'node:test';
+// PWA の確認画面の純関数（docs/mvp-plan.md T2-10）。描画する部品の選別と、確定で送る本文（U8）。同等確認のチェックの描画（SSR）。
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { h } from 'preact';
+import type { ViteDevServer } from 'vite';
 import { renderableComponents } from '../../pwa/src/review/catalog.ts';
 import { reasonText, resolveMessage, resolveUrl } from '../../pwa/src/review/attention.ts';
 import { backupWarning, mailReauthWarnings, reauthWarning } from '../../pwa/src/status.ts';
-import { canApprove, changedValues, errorText, missingRequired, parseAmount, pickCandidate, requestBody, type DataModel, type Values } from '../../pwa/src/review/model.ts';
+import {
+  canApprove,
+  changedValues,
+  errorText,
+  integrityCheckedText,
+  missingRequired,
+  parseAmount,
+  pickCandidate,
+  requestBody,
+  type DataModel,
+  type Values,
+} from '../../pwa/src/review/model.ts';
+import { renderHtml, startSsr } from './pwa-ssr-helpers.ts';
 
 const values = (over: Partial<Values> = {}): Values => ({
   txn_date: '2026-10-14',
@@ -141,5 +155,37 @@ describe('メールの再認可の帯', () => {
     assert.deepEqual(mailReauthWarnings({ mail: { enabled: false, accounts } }), []);
     assert.deepEqual(mailReauthWarnings({ mail: { enabled: true, accounts: [] } }), []);
     assert.deepEqual(mailReauthWarnings({}), []);
+  });
+});
+
+describe('同等確認のチェック（T004）', () => {
+  let vite: ViteDevServer;
+  before(async () => {
+    vite = await startSsr();
+  });
+  after(async () => {
+    await vite.close();
+  });
+  const render = async (props: object) => {
+    const { IntegrityCheck } = (await vite.ssrLoadModule('/src/review/ReviewCard.tsx')) as Record<string, (p: never) => unknown>;
+    return renderHtml(h(IntegrityCheck as never, { onChange: () => {}, ...props } as never));
+  };
+
+  test('確認済みの日付は東京の暦日', () => {
+    assert.equal(integrityCheckedText('2026-10-15T15:30:00.000Z'), '確認済み（2026-10-16、東京時間）');
+    assert.equal(integrityCheckedText('2026-10-16T14:59:59.000Z'), '確認済み（2026-10-16、東京時間）');
+  });
+
+  test('確認済みならチェックを入れて押せなくし、確認した日を出す', async () => {
+    const html = await render({ checked: false, checkedAt: '2026-10-15T15:30:00.000Z' });
+    assert.equal(
+      html,
+      '<label class="toggle"><input type="checkbox" checked disabled><span>欠け・折れ・裏面を確認した</span><span class="sub">確認済み（2026-10-16、東京時間）</span></label>',
+    );
+  });
+
+  test('確認済みでなければ今まで通り（押せる・日付なし）', async () => {
+    assert.equal(await render({ checked: false, checkedAt: null }), '<label class="toggle"><input type="checkbox"><span>欠け・折れ・裏面を確認した</span></label>');
+    assert.equal(await render({ checked: true, checkedAt: null }), '<label class="toggle"><input type="checkbox" checked><span>欠け・折れ・裏面を確認した</span></label>');
   });
 });
