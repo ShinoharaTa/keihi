@@ -34,10 +34,54 @@ cd ~ && rm -rf /tmp/restic-dl
   `~/.local/bin` が入らないので、この場所に置く。見つからなければ「restic が見つからない」と出して終了コード 2（audit にも残る）。
 - 更新は同じ手順で上書きする。更新の前後で `restic version` を記録しておく。
 
+### rclone を入れる（保存先を Google Drive にする場合。§2）
+
+restic の `rclone:` バックエンドは rclone を子プロセスとして起動する。restic と同じく GitHub release のバイナリを `~/.local/bin` に入れる（手作業）。
+`<ver>` は https://github.com/rclone/rclone/releases の最新版（例 `1.68.2`）。
+
+```sh
+ver=<ver>
+mkdir -p ~/.local/bin /tmp/rclone-dl && cd /tmp/rclone-dl
+curl -fLO https://github.com/rclone/rclone/releases/download/v${ver}/rclone-v${ver}-linux-amd64.zip
+curl -fLO https://github.com/rclone/rclone/releases/download/v${ver}/SHA256SUMS
+# チェックサムの検証（OK と出ること）
+grep " rclone-v${ver}-linux-amd64.zip\$" SHA256SUMS | sha256sum -c -
+unzip -q rclone-v${ver}-linux-amd64.zip
+install -m 0755 rclone-v${ver}-linux-amd64/rclone ~/.local/bin/rclone
+~/.local/bin/rclone version
+cd ~ && rm -rf /tmp/rclone-dl
+```
+
+- restic の子プロセスの PATH には、keihi が先頭に `~/.local/bin` を足す（`src/backup/restic.ts` の `childEnv`）。systemd --user から動かしても restic が rclone を見つけられる。
+- 更新は同じ手順で上書きする。
+
 ## 2. 保存先（Q4）
 
-既定案は **Backblaze B2（EU リージョン）+ Versioning + Object Lock（governance、保持 8 年）**。採否は未確定（mvp-plan.md Q4）。
+本機は **Google Drive（restic の `rclone:` バックエンド）** を使う。**Backblaze B2（EU リージョン）+ Versioning + Object Lock（governance、保持 8 年）** は代替。
 保存先は `RESTIC_REPOSITORY` で差し替えられる（`b2:` / `s3:`（S3 互換）/ `sftp:` / ローカルパス）。コードは保存先を前提にしない。
+
+### Google Drive（rclone）
+
+ユーザーの手作業（rclone は §1 の手順で入れておく）:
+1. `~/.local/bin/rclone config` で新しいリモートを作る（`n`）。
+   - name: 例 `gdrive`
+   - Storage: `drive`
+   - client_id / client_secret: 空でもよい（rclone 共用のものになる）。共用は混むので、自前の OAuth クライアントを作って入れるのを推奨。
+   - scope: **`drive.file`**（rclone が作ったファイルだけ触れる。Drive の他のファイルは見えない）
+   - root_folder_id・service_account_file: 空
+   - Edit advanced config: No
+   - **Use auto config: No**（この機械はヘッドレスでブラウザが無い）
+2. ブラウザのある PC に rclone を入れ、表示された指示どおり `rclone authorize "drive"` を実行する（client_id を自前にした場合はそれも渡す）。
+   ブラウザで許可すると、その PC の端末にトークン（JSON）が出る。それをこの機械の `rclone config` の入力に貼る。
+3. Configure as team drive: No。設定を保存して終了する。`~/.local/bin/rclone lsd gdrive:` がエラーなく終わること。
+4. 保存先は `RESTIC_REPOSITORY=rclone:gdrive:keihi-backup`（§3）。
+5. `restic init` は手作業で 1 回だけ行う（§4。`tools/backup/run.ts` の許可リストに `init` は無い）。
+   restic のパスワード（`RESTIC_PASSWORD`）は**パスワードマネージャに保存する**（紛失すると復元できない）。
+
+**Object Lock に相当するものが無い。** `drive.file` のトークンは rclone が作ったファイル（= バックアップ）を消せるので、
+この機械が乗っ取られるとバックアップも消され得る。**Drive のゴミ箱（30 日）が最後の砦**。消されたことに気づいたら 30 日以内にゴミ箱から戻す。
+
+### Backblaze B2（代替）
 
 ユーザーの手作業（B2 に決めた場合）:
 1. B2 のアカウントを作る（カード登録が要る）。
@@ -60,6 +104,17 @@ B2_ACCOUNT_ID=...             # B2 のアプリケーションキー ID
 B2_ACCOUNT_KEY=...            # B2 のアプリケーションキー
 # S3 互換の場合: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION
 ```
+
+Google Drive（rclone）の場合は B2 の行が要らない:
+
+```sh
+RESTIC_PASSWORD=...           # パスワードマネージャにも保存
+RESTIC_REPOSITORY=rclone:gdrive:keihi-backup
+```
+
+- rclone のトークンは `~/.config/rclone/rclone.conf` にある（secrets.env には書かない）。keihi のバックアップの対象外なので、
+  復元したら §2 の手順で rclone を再認可する。設定ファイルの場所を変えた場合は `RCLONE_CONFIG`（または `XDG_CONFIG_HOME`）を
+  親の環境に置けば restic の子プロセスに引き継がれる。
 
 - restic の子プロセスに渡すのは上の名前だけ（`src/backup/settings.ts` の `RESTIC_SECRET_KEYS`）。`GEMINI_API_KEY`・`FREEE_*` は渡さない。
 - バックアップの対象は「その日のスナップショット（`<data_dir>/snapshots/keihi-<ts>.db` と `.manifest.json`）」と `<data_dir>/objects/` だけ。
