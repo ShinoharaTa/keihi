@@ -11,7 +11,7 @@ import {
   BLUE_RETURN_DEDUCTION,
   CTAX_EXEMPT_THRESHOLD,
   CTAX_SIMPLIFIED_THRESHOLD,
-  CTAX_SPECIAL20_LAST_YEAR,
+  ctaxSpecialPayPct,
   ratesLatestYears,
 } from './rates.ts';
 import { getTaxProfile, listTaxYears, type BlueReturn, type ConsumptionMode, type TaxProfileRow, type TaxProfileValues } from './repo.ts';
@@ -144,7 +144,7 @@ function unavailable(profile: TaxProfileValues, input: SimInput, mode: CompareMo
   if (input.revenue === null) return 'revenue_missing';
   const sales = exTaxOf(profile, input.revenue);
   if (mode === 'exempt') return sales > CTAX_EXEMPT_THRESHOLD ? 'over_10m' : null;
-  if (mode === 'special20') return input.year > CTAX_SPECIAL20_LAST_YEAR ? 'special20_expired' : sales > CTAX_EXEMPT_THRESHOLD ? 'over_10m' : null;
+  if (mode === 'special20') return ctaxSpecialPayPct(input.year) === null ? 'special20_expired' : sales > CTAX_EXEMPT_THRESHOLD ? 'over_10m' : null;
   if (mode === 'simplified') return sales > CTAX_SIMPLIFIED_THRESHOLD ? 'over_50m' : null;
   return null;
 }
@@ -155,7 +155,7 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   // 2 年前納は年額と社会保険料控除が年ごとに振れるので、試算では 1 年前納で代える。
   let prof: TaxProfileValues = profile.pension_mode === 'prepay24' ? { ...profile, pension_mode: 'prepay12' } : profile;
   if (profile.pension_mode === 'prepay24') assumptions.push('pension_prepay24_as_prepay12');
-  // body で方式を指定せず、profile（か year の行の上書き）の方式が Y 年に使えない（2 割特例の期限切れ・売上 1,000 万超）なら、
+  // body で方式を指定せず、profile（か year の行の上書き）の方式が Y 年に使えない（2 割・3 割特例の期限切れ（2029 年分から）・売上 1,000 万超）なら、
   // 区分があれば簡易課税（その区分）、無ければ本則で計算する。簡易も使えない（5,000 万超）なら本則。
   let modeSource: SimModeSource = input.source?.consumption_mode ?? 'profile';
   let defaulted: SimWarning | null = null;
@@ -199,8 +199,11 @@ export function simulate(profile: TaxProfileValues, input: SimInput): SimResult 
   for (const r of compare) if (r.mode !== 'exempt' && r.available && (best === null || r.tax! < best.tax!)) best = r;
 
   // エンジンは期間の中の他の年の分も警告するので、year を持つものは Y の分だけ残す。
-  // special20_expired は台帳向けの文なので落とす（試算では比較表の reason と selected_mode_unavailable / mode_defaulted で伝える）。
-  const warnings: SimWarning[] = main.warnings.filter((w) => w.kind !== 'special20_expired' && (!('year' in w) || w.year === input.year));
+  // special20_expired・special_base_over_10m は台帳向けの文なので落とす（試算では比較表の reason（special20_expired / over_10m）と
+  // selected_mode_unavailable / mode_defaulted で伝える）。
+  const warnings: SimWarning[] = main.warnings.filter(
+    (w) => w.kind !== 'special20_expired' && w.kind !== 'special_base_over_10m' && (!('year' in w) || w.year === input.year),
+  );
   if (defaulted) warnings.push(defaulted);
   const has = (kind: string) => warnings.some((w) => w.kind === kind);
   const mode = prof.consumption_mode;

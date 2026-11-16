@@ -157,12 +157,24 @@ export const PENSION_ADDON_MONTHLY = 400;
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6509.htm
 export const CTAX_DEEMED_PURCHASE_PCT: Readonly<Record<number, number>> = { 1: 90, 2: 80, 3: 70, 4: 60, 5: 50, 6: 40 };
 
-// 2 割特例（売上税額 × 20%）はインボイス登録で課税事業者になった人の令和 5〜8 年分（2026 年分）まで。
-// 2027 年分以降は作らず special20_expired の警告。
+// インボイス登録で課税事業者になった人の特例。2 割は 2026 年分まで（売上税額 × 20%、令和 5〜8 年分）。
+// 2027・2028 年分は 3 割特例（売上税額 × 30%。個人事業者、届出不要）。
+// 2029 年分以降は作らず special20_expired の警告。基準期間（2 年前）の課税売上高が 1,000 万円を超える年は使えない（special_base_over_10m）。
 // https://www.nta.go.jp/publication/pamph/shohi/kaisei/202304/01.htm
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/invoice-review/index.htm
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/pdf/qa/114-2.pdf （問 114-2）
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/pdf/qa/115-2.pdf （問 115-2）
 export const CTAX_SPECIAL20_LAST_YEAR = 2026;
+export const CTAX_SPECIAL30_LAST_YEAR = 2028;
 
-// 免税事業者の判定（基準期間の課税売上高 1,000 万円以下）と簡易課税を選べる上限（同 5,000 万円以下）。試算（simulate.ts）の方式の比較だけで使う。
+// Y 年分の特例の納付率（売上税額に対する %）。特例の期限が切れた年は null。
+export function ctaxSpecialPayPct(year: number): 20 | 30 | null {
+  if (year <= CTAX_SPECIAL20_LAST_YEAR) return 20;
+  if (year <= CTAX_SPECIAL30_LAST_YEAR) return 30;
+  return null;
+}
+
+// 免税事業者の判定（基準期間の課税売上高 1,000 万円以下）と簡易課税を選べる上限（同 5,000 万円以下）。試算（simulate.ts）の方式の比較と、特例の基準期間の警告（engine.ts の special_base_over_10m）で使う。
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6501.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6505.htm
 export const CTAX_EXEMPT_THRESHOLD = 10_000_000;
 export const CTAX_SIMPLIFIED_THRESHOLD = 50_000_000;
