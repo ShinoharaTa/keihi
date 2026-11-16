@@ -192,7 +192,7 @@ export function TaxSimResult({ res, inputClass, profileClass }: { res: TaxSimRes
           {rows.map((r) => (
             <Fragment key={`${r.mode}-${r.simplified_class}`}>
               <dt class={r.available ? undefined : 'm-sim-off'}>
-                {ctaxRowLabel(r)}
+                {ctaxRowLabel(r, res.year)}
                 {r === best && <span class="m-badge b-income m-sim-best">最安</span>}
               </dt>
               {r.available && r.tax !== null && r.take_home !== null ? (

@@ -299,6 +299,9 @@ export const ERROR_TEXT: Record<string, string> = {
   // 給与の 2 つはサーバーの応答に年が入らない。画面は taxYearBodies が年つきで先に止めるので、ここに来るのは画面を通さない保存だけ。
   invalid_salary_after_deduction: 'どれかの年で、給与所得控除後の金額が支払金額より大きくなっています。',
   salary_income_required: 'どれかの年で、源泉徴収税額・社会保険料等の金額だけが入っています。支払金額か給与所得控除後の金額も入れてください。',
+  invalid_consumption_mode: '消費税の方式の値が正しくありません。',
+  simplified_class_required: '簡易課税は事業区分（第 1〜6 種）を選んでください。',
+  invalid_simplified_class: '事業区分は簡易課税のときだけ選べます。',
 };
 
 export function failText(status: number, body?: unknown): string {
@@ -1040,12 +1043,16 @@ export type TaxYear = {
   salary_after_deduction: number | null; // 給与所得控除後の金額（無ければ支払金額から計算）
   salary_withheld_tax: number | null; // 源泉徴収税額
   salary_social_insurance: number | null; // 社会保険料等の金額
+  // その年分の消費税の方式（null = プロファイルの方式を使う）。簡易課税なら事業区分も。
+  consumption_mode: Exclude<ConsumptionMode, 'unset'> | null;
+  simplified_class: number | null;
 };
 export type TaxProfileResponse = { profile: TaxProfile | null; years: TaxYear[]; presets: { id: string; label: string }[]; missing: string[] };
 export type TaxWarning =
   | { kind: 'tax_profile_missing' }
   | { kind: 'consumption_tax_mode_unset' }
   | { kind: 'special20_expired'; year: number }
+  | { kind: 'special_base_over_10m'; year: number; base_year: number; base_sales: number }
   | { kind: 'simplified_class_missing' }
   | { kind: 'revenue_missing'; year: number }
   | { kind: 'income_missing'; year: number }
@@ -1061,7 +1068,7 @@ export const BLUE_RETURNS: readonly BlueReturn[] = ['65', '55', '10', 'white'];
 const BLUE_DEDUCTION: Record<BlueReturn, number> = { '65': 650000, '55': 550000, '10': 100000, white: 0 };
 export const PENSION_LABELS: Record<Exclude<PensionMode, 'none'>, string> = { monthly: '月払い', prepay6: '6 か月', prepay12: '1 年', prepay24: '2 年' };
 export const PENSION_MODES: readonly Exclude<PensionMode, 'none'>[] = ['monthly', 'prepay6', 'prepay12', 'prepay24'];
-export const CONSUMPTION_LABELS: Record<string, string> = { unset: '未設定', exempt: '免税', special20: '2 割特例', simplified: '簡易課税', standard: '本則' };
+export const CONSUMPTION_LABELS: Record<string, string> = { unset: '未設定', exempt: '免税', special20: '2 割・3 割特例', simplified: '簡易課税', standard: '本則' };
 export const CONSUMPTION_MODES: readonly Exclude<ConsumptionMode, 'unset'>[] = ['exempt', 'special20', 'simplified', 'standard'];
 // 簡易課税の事業区分（みなし仕入率）。
 export const SIMPLIFIED_CLASS_LABELS: readonly { v: number; label: string }[] = [
@@ -1072,7 +1079,25 @@ export const SIMPLIFIED_CLASS_LABELS: readonly { v: number; label: string }[] = 
   { v: 5, label: '第 5 種 サービス 50%' },
   { v: 6, label: '第 6 種 不動産 40%' },
 ];
-export const SPECIAL20_EXPIRED = '2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。';
+// 2 割特例・3 割特例の最後の年分（src/cashflow/tax/rates.ts の CTAX_SPECIAL20_LAST_YEAR）。方式の値は 2 つとも special20。
+export const SPECIAL20_LAST_YEAR = 2026;
+export const SPECIAL30_LAST_YEAR = 2028;
+// 特例で納める割合（売上税額に対する %）。期限切れの年は null。
+export function specialPayPct(year: number): 20 | 30 | null {
+  if (year <= SPECIAL20_LAST_YEAR) return 20;
+  if (year <= SPECIAL30_LAST_YEAR) return 30;
+  return null;
+}
+export const SPECIAL20_EXPIRED = '2 割・3 割特例は 2028 年分までです（2026 年分までは 2 割、2027・2028 年分は 3 割）。2029 年分以降の消費税は、方式を選ぶまで見通しに入りません。';
+// 方式の表示名。year があれば special20 をその年の特例（2 割 / 3 割）で出す。
+export function consumptionModeLabel(mode: ConsumptionMode, cls: number | null, year?: number): string {
+  if (mode === 'special20') {
+    const pct = year === undefined ? null : specialPayPct(year);
+    return pct === 20 ? '2 割特例' : pct === 30 ? '3 割特例' : CONSUMPTION_LABELS.special20!;
+  }
+  if (mode === 'simplified') return cls === null ? '簡易課税' : `簡易課税 第 ${cls} 種`;
+  return CONSUMPTION_LABELS[mode] ?? mode;
+}
 export const SIMPLIFIED_CLASS_MISSING = '簡易課税の事業区分が未設定なので消費税は見通しに入りません。';
 // 消費税を作る方式なのに、その年分の売上が無い（所得を直接入れた年）。
 export const revenueMissing = (year: number) => `${year} 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。`;
@@ -1215,7 +1240,7 @@ export function taxProfileBody(d: TaxProfileDraft): Record<string, unknown> | st
 }
 
 // 年ごとの入力の列。確定の年と見込みの年で項目が違う。
-export type TaxYearField = Exclude<keyof TaxYear, 'year' | 'kind'>;
+export type TaxYearField = Exclude<keyof TaxYear, 'year' | 'kind' | 'consumption_mode' | 'simplified_class'>;
 // social_insurance_paid は給与天引き以外で払った社会保険料（国保・国民年金など。空なら年金・国保の見積もり。docs/cashflow.md §14）。
 export type TaxYearFieldDef = { k: TaxYearField; label: string; placeholder?: string; note?: string };
 const SOCIAL_SELF: TaxYearFieldDef = { k: 'social_insurance_paid', label: '社会保険料（給与天引き以外）', placeholder: '空なら見積もり' };
@@ -1241,8 +1266,74 @@ export const SALARY_FIELDS: readonly TaxYearFieldDef[] = [
 ];
 // 給与の欄を開いておくか（保存した行に給与の値がどれかあれば開く）。
 export const taxSalaryOpen = (row: TaxYear | undefined): boolean => !!row && SALARY_FIELDS.some((f) => row[f.k] != null);
+// ---- 年ごとの消費税の方式（GET /api/tax/profile の years の consumption_mode・simplified_class。null = プロファイルの方式） ----
+
+export type CtaxPick = { mode: ConsumptionMode; cls: number | null };
+type YearCtax = { consumption_mode: Exclude<ConsumptionMode, 'unset'> | null; simplified_class: number | null };
+
+// select の値: ''（基本の設定）・'exempt'・'special20'・'simplified:1'〜'simplified:6'・'standard'。
+export function yearCtaxValue(row: Partial<YearCtax> | undefined): string {
+  const mode = row?.consumption_mode ?? null;
+  if (mode === null) return '';
+  return mode === 'simplified' ? `simplified:${row?.simplified_class ?? ''}` : mode;
+}
+export function parseYearCtaxValue(v: string): YearCtax {
+  if (v === '') return { consumption_mode: null, simplified_class: null };
+  if (v.startsWith('simplified:')) return { consumption_mode: 'simplified', simplified_class: Number(v.slice('simplified:'.length)) };
+  return { consumption_mode: v as Exclude<ConsumptionMode, 'unset'>, simplified_class: null };
+}
+// 年の select の選択肢。先頭は「基本の設定（プロファイルの方式）」。
+export function yearCtaxOptions(year: number, profile: CtaxPick | null): { v: string; label: string }[] {
+  const base = !profile || profile.mode === 'unset' ? '未設定' : consumptionModeLabel(profile.mode, profile.cls, year);
+  return [
+    { v: '', label: `基本の設定（${base}）` },
+    { v: 'exempt', label: CONSUMPTION_LABELS.exempt! },
+    { v: 'special20', label: consumptionModeLabel('special20', null, year) },
+    ...SIMPLIFIED_CLASS_LABELS.map((c) => ({ v: `simplified:${c.v}`, label: consumptionModeLabel('simplified', c.v, year) })),
+    { v: 'standard', label: CONSUMPTION_LABELS.standard! },
+  ];
+}
+// その年に効く方式。下書きの年は下書きの値、下書きに無い年は保存した行、指定が無ければプロファイル。
+export function yearCtaxEffective(year: number, drafts: TaxYearDraft[], years: TaxYear[], profile: CtaxPick): CtaxPick {
+  const d = drafts.find((x) => x.year === year);
+  const v = d ? parseYearCtaxValue(d.ctax) : (years.find((r) => r.year === year) ?? { consumption_mode: null, simplified_class: null });
+  return v.consumption_mode === null ? profile : { mode: v.consumption_mode, cls: v.simplified_class };
+}
+// 簡易課税の区分ごとの納める割合（売上税額に対する %。100 − みなし仕入率）。
+const SIMPLIFIED_PAY_PCT: Record<number, number> = { 1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60 };
+// 年の欄の下に出す注記。cur はその年、prev は前の年に効く方式。
+export function yearCtaxNotes(year: number, cur: CtaxPick, prev: CtaxPick): string[] {
+  const out: string[] = [];
+  const pct = specialPayPct(year);
+  if (cur.mode === 'special20' && pct === null) out.push(SPECIAL20_EXPIRED);
+  if (cur.mode === 'special20' && pct === 30) {
+    out.push(`3 割特例（売上税額の 30%）で計算します。2 年前（${year - 2} 年）の課税売上が 1,000 万円を超える年は使えません。`);
+  }
+  if (cur.mode === 'simplified') {
+    const afterSpecial = prev.mode === 'special20' && year - 1 <= SPECIAL30_LAST_YEAR;
+    if (afterSpecial) {
+      out.push(
+        `前の年分に 2 割・3 割特例を使っていれば、簡易課税制度選択届出書は ${year} 年分の確定申告の期限（${year + 1} 年 3 月 31 日。土日なら翌月曜）までに出せば、${year} 年分から簡易課税にできます。簡易課税は 2 年続ける必要があります。`,
+      );
+    } else if (prev.mode !== 'simplified') {
+      out.push(`${year} 年分から簡易課税にするには、${year - 1} 年 12 月 31 日までに簡易課税制度選択届出書を出す必要があります。`);
+    }
+    if (pct === 30 && cur.cls !== null && cur.cls >= 4) {
+      out.push(`3 割特例は売上税額の 30%、簡易課税 第 ${cur.cls} 種は ${SIMPLIFIED_PAY_PCT[cur.cls]}% です。3 割特例は 2 年前（${year - 2} 年）の課税売上が 1,000 万円以下の年だけ使えます。`);
+    }
+  }
+  return out;
+}
+
 // placeholders: 確定の年に見込みの行（売上・経費だけ）が残っているときの所得欄の注記。
-export type TaxYearDraft = { year: number; kind: TaxYearKind; values: Partial<Record<TaxYearField, string>>; placeholders?: Partial<Record<TaxYearField, string>> };
+// ctax: 消費税の方式の select の値（yearCtaxValue。'' は基本の設定）。
+export type TaxYearDraft = {
+  year: number;
+  kind: TaxYearKind;
+  values: Partial<Record<TaxYearField, string>>;
+  ctax: string;
+  placeholders?: Partial<Record<TaxYearField, string>>;
+};
 export const ESTIMATE_KEPT = '見込みの値（売上 − 経費）のまま';
 const fieldsOf = (kind: TaxYearKind) => [...(kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS), ...SALARY_FIELDS];
 
@@ -1253,8 +1344,9 @@ export function taxYearDrafts(years: TaxYear[], today: string): TaxYearDraft[] {
     const kind: TaxYearKind = year < y ? 'actual' : 'estimate';
     const row = years.find((r) => r.year === year);
     const values = Object.fromEntries(fieldsOf(kind).map((f) => [f.k, row?.[f.k] == null ? '' : String(row[f.k])]));
+    const ctax = yearCtaxValue(row);
     const kept = kind === 'actual' && row && row.business_income === null && row.revenue !== null && row.expenses !== null;
-    return kept ? { year, kind, values, placeholders: { business_income: ESTIMATE_KEPT } } : { year, kind, values };
+    return kept ? { year, kind, values, ctax, placeholders: { business_income: ESTIMATE_KEPT } } : { year, kind, values, ctax };
   });
 }
 
@@ -1277,7 +1369,12 @@ export function taxYearBodies(drafts: TaxYearDraft[], years: TaxYear[]): { year:
     // 給与の欄はサーバー（sync.ts）と同じ検査を先にする（サーバーの 400 には年が入らないので、ここで年つきで止める）。
     const salaryError = taxSalaryError(d.year, body);
     if (salaryError) return salaryError;
-    if (!row && !any) continue;
+    // 消費税の方式（両方 null で上書きを消す）。方式だけを選んだまだ無い年も送る。kind の判定（any）には数えない。
+    const ctax = parseYearCtaxValue(d.ctax ?? '');
+    body.consumption_mode = ctax.consumption_mode;
+    body.simplified_class = ctax.simplified_class;
+    if ((row?.consumption_mode ?? null) !== ctax.consumption_mode || (row?.simplified_class ?? null) !== ctax.simplified_class) changed = true;
+    if (!row && !any && ctax.consumption_mode === null) continue;
     if (changed) out.push({ year: d.year, body: { kind: !row || any ? d.kind : row.kind, ...body } });
   }
   return out;
@@ -1302,6 +1399,8 @@ export function taxWarningText(w: TaxWarning): string {
       return '消費税は未反映です。';
     case 'special20_expired':
       return SPECIAL20_EXPIRED;
+    case 'special_base_over_10m':
+      return `${w.year} 年分は 2 割・3 割特例を使えない見込みです（基準期間の ${w.base_year} 年の課税売上が 1,000 万円を超えています）。簡易課税か本則を選んでください。今は特例のまま計算しています。`;
     case 'simplified_class_missing':
       return SIMPLIFIED_CLASS_MISSING;
     case 'revenue_missing':
@@ -1505,10 +1604,11 @@ export function simCompareRows(rows: CtaxCompareRow[], inputClass: number | null
   const pick = (mode: CtaxCompareRow['mode'], c: number | null = null) => rows.find((r) => r.mode === mode && (c === null || r.simplified_class === c));
   return [pick('special20'), pick('simplified', cls), pick('standard')].filter((r): r is CtaxCompareRow => r !== undefined);
 }
-export function ctaxRowLabel(r: CtaxCompareRow): string {
+// year は試算の年（special20 の行を 2 割特例 / 3 割特例で出す）。
+export function ctaxRowLabel(r: CtaxCompareRow, year?: number): string {
   if (r.mode === 'simplified') return `簡易（第 ${r.simplified_class} 種）`;
   if (r.mode === 'standard') return '本則（概算）';
-  return CONSUMPTION_LABELS[r.mode] ?? r.mode;
+  return consumptionModeLabel(r.mode, null, year);
 }
 // 「最安」の行: 表示する行（simCompareRows の結果）のうち、使えて消費税が最小の行。同額なら前の行（2 割特例 → 簡易 → 本則）。
 // API の best は簡易の全区分から選ぶので使わない。使える行が無ければ null。
@@ -1520,14 +1620,12 @@ export function bestRow(rows: CtaxCompareRow[]): CtaxCompareRow | null {
 
 // 方式が使えない理由。
 export const CTAX_REASON_TEXT: Record<CtaxReason, string> = {
-  special20_expired: '2026 年分まで',
+  special20_expired: `${SPECIAL30_LAST_YEAR} 年分まで`,
   over_10m: '売上 1,000 万超',
   over_50m: '売上 5,000 万超',
   revenue_missing: '売上が未入力',
 };
 export const ctaxReasonText = (r: CtaxReason) => CTAX_REASON_TEXT[r] ?? r;
-// 2 割特例の最後の年分（src/cashflow/tax/rates.ts の CTAX_SPECIAL20_LAST_YEAR）。
-const SPECIAL20_LAST_YEAR = 2026;
 
 // year は試算の年（mode_defaulted の理由を分けるのに使う）。
 export function simWarningText(w: TaxSimWarning, year?: number): string {
@@ -1544,10 +1642,10 @@ export function simWarningText(w: TaxSimWarning, year?: number): string {
         w.reason === 'special20_expired' ? '消費税は 0 円で計算しています。' : '消費税はその方式のまま計算しています。'
       }`;
     case 'mode_defaulted': {
-      // 2 割特例は期限切れか売上 1,000 万超、免税は売上 1,000 万超。
+      // 2 割・3 割特例は期限切れか売上 1,000 万超、免税は売上 1,000 万超。
       const why =
-        w.from === 'special20' && (year === undefined || year > SPECIAL20_LAST_YEAR)
-          ? `2 割特例は ${SPECIAL20_LAST_YEAR + 1} 年分から使えないため`
+        w.from === 'special20' && (year === undefined || year > SPECIAL30_LAST_YEAR)
+          ? `2 割・3 割特例は ${SPECIAL30_LAST_YEAR + 1} 年分から使えないため`
           : '売上 1,000 万円超のため';
       return `${why}、${w.to === 'simplified' ? `簡易課税（第 ${w.simplified_class} 種）` : '本則（概算）'}で計算しています。`;
     }
