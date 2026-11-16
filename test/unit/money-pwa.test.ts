@@ -118,9 +118,17 @@ import {
   verdict,
   waitingText,
   warningText,
+  consumptionModeLabel,
+  parseYearCtaxValue,
+  specialPayPct,
+  yearCtaxEffective,
+  yearCtaxNotes,
+  yearCtaxOptions,
+  yearCtaxValue,
   yearGroups,
   yearSummary,
   yen,
+  type CtaxPick,
   type Account,
   type BankStatus,
   type Candidate,
@@ -666,10 +674,12 @@ const taxYear = (year: number, over: Partial<TaxYear> = {}): TaxYear => ({
   salary_after_deduction: null,
   salary_withheld_tax: null,
   salary_social_insurance: null,
+  consumption_mode: null,
+  simplified_class: null,
   ...over,
 });
-// 給与の 4 欄が空の本文（年の本文は常に送る）。
-const noSalary = { salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null };
+// 給与の 4 欄と消費税の方式が空の本文（年の本文は常に送る）。
+const noSalary = { salary_income: null, salary_after_deduction: null, salary_withheld_tax: null, salary_social_insurance: null, consumption_mode: null, simplified_class: null };
 const taxYears = [
   taxYear(2025, { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000 }),
   taxYear(2026, { revenue: 5000000, expenses: 350000 }),
@@ -697,6 +707,10 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(taxCardLine({ ...taxData, last_run_at: '2026-11-06T15:30:00.000Z' }, TODAY), '2026 年分 所得 400万円 · 消費税 未設定 / 最終計算 11/7');
     const s20 = { ...taxData, profile: { ...taxData.profile!, consumption_mode: 'special20' as const }, last_run_at: '2026-11-06T15:30:00.000Z' };
     assert.equal(taxCardLine(s20, TODAY), '2026 年分 所得 400万円 · 消費税 2 割特例 / 最終計算 11/7');
+    assert.equal(taxCardLine(s20, '2027-06-01'), '2027 年分 所得 400万円 · 消費税 3 割特例 / 最終計算 11/7', '2027 年分は 3 割特例');
+    // 年の行の指定がプロファイルより先（2026 年の行だけ簡易課税 第 5 種）。
+    const over = { ...s20, years: s20.years.map((r) => (r.year === 2026 ? { ...r, consumption_mode: 'simplified' as const, simplified_class: 5 } : r)) };
+    assert.equal(taxCardLine(over, TODAY), '2026 年分 所得 400万円 · 消費税 簡易課税 第 5 種 / 最終計算 11/7');
     assert.equal(taxCardLine({ ...taxData, years: [], last_run_at: null }, TODAY), '2026 年分 所得 未入力 · 消費税 未設定 / 最終計算 —');
   });
   test('合計所得 = 事業所得 + 給与所得（engine の resolve と同じ。給与は繰り越さない）', () => {
@@ -734,9 +748,9 @@ describe('税・保険の見積もりの純関数', () => {
     assert.deepEqual(taxYearBodies(edited, ys), [
       {
         year: 2025,
-        body: { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000, salary_income: 5000000, salary_after_deduction: null, salary_withheld_tax: 123030, salary_social_insurance: null },
+        body: { kind: 'actual', business_income: 3200000, income_tax_final: 180000, prepaid_income_tax: 0, consumption_tax_final: 210000, social_insurance_paid: 620000, salary_income: 5000000, salary_after_deduction: null, salary_withheld_tax: 123030, salary_social_insurance: null, consumption_mode: null, simplified_class: null },
       },
-      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: 350000, business_income: null, social_insurance_paid: 200000, salary_income: 2000000, salary_after_deduction: null, salary_withheld_tax: 60000, salary_social_insurance: null } },
+      { year: 2026, body: { kind: 'estimate', revenue: 5000000, expenses: 350000, business_income: null, social_insurance_paid: 200000, salary_income: 2000000, salary_after_deduction: null, salary_withheld_tax: 60000, salary_social_insurance: null, consumption_mode: null, simplified_class: null } },
     ]);
     const saved = taxSaveBody(taxProfileDraft(taxData.profile), edited, { ...taxData, years: ys }) as { years: Record<string, unknown>[] };
     assert.equal(saved.years[1]!.salary_income, 2000000, 'PUT /api/tax の years に数値で入る');
@@ -842,9 +856,9 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(runText(r({ warnings: [{ kind: 'tax_profile_missing' }] }), '再計算しました。'), '再計算しました。予定は作成 0・更新 0・停止 0 件。設定がまだ無いので作っていません。');
     assert.equal(
       runText(r({ created: 2, deactivated: 1, warnings: [{ kind: 'special20_expired', year: 2027 }, { kind: 'simplified_class_missing' }] }), '保存しました。'),
-      '保存しました。予定は作成 2・更新 0・停止 1 件。2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。簡易課税の事業区分が未設定なので消費税は見通しに入りません。',
+      '保存しました。予定は作成 2・更新 0・停止 1 件。2 割・3 割特例は 2028 年分までです（2026 年分までは 2 割、2027・2028 年分は 3 割）。2029 年分以降の消費税は、方式を選ぶまで見通しに入りません。簡易課税の事業区分が未設定なので消費税は見通しに入りません。',
     );
-    assert.equal(warningText({ kind: 'special20_expired', year: 2027 }, (x) => x), '2 割特例は 2026 年分までです。2027 年分以降の消費税は方式を選ぶまで見通しに入りません。');
+    assert.equal(warningText({ kind: 'special20_expired', year: 2027 }, (x) => x), '2 割・3 割特例は 2028 年分までです（2026 年分までは 2 割、2027・2028 年分は 3 割）。2029 年分以降の消費税は、方式を選ぶまで見通しに入りません。');
     assert.equal(warningText({ kind: 'simplified_class_missing' }, (x) => x), '簡易課税の事業区分が未設定なので消費税は見通しに入りません。');
     assert.match(warningText({ kind: 'tax_profile_missing' }, (x) => x), /税・保険の見積もりが未設定/);
     assert.match(warningText({ kind: 'consumption_tax_mode_unset' }, (x) => x), /消費税は見通しに入っていません/);
@@ -852,6 +866,85 @@ describe('税・保険の見積もりの純関数', () => {
     assert.equal(taxWarningText({ kind: 'revenue_missing', year: 2025 }), '2025 年分は売上が未入力なので消費税は見通しに入りません（所得だけでは計算できません）。');
     assert.equal(taxWarningText({ kind: 'income_tax_refund', year: 2025, amount: 146427 }), '2025 年分の所得税は約 146,427 円の還付見込み（入金予定には入れていません）。');
     assert.match(runText(r({ warnings: [{ kind: 'income_tax_refund', year: 2025, amount: 146427 }] }), '保存しました。'), /。2025 年分の所得税は約 146,427 円の還付見込み/);
+  });
+  test('見積もりの警告: 基準期間の課税売上が 1,000 万円超なら 2 割・3 割特例を使えない見込み', () => {
+    assert.equal(
+      taxWarningText({ kind: 'special_base_over_10m', year: 2027, base_year: 2025, base_sales: 12000000 }),
+      '2027 年分は 2 割・3 割特例を使えない見込みです（基準期間の 2025 年の課税売上が 1,000 万円を超えています）。簡易課税か本則を選んでください。今は特例のまま計算しています。',
+    );
+  });
+  test('年ごとの消費税の方式: select の値 ↔ 方式と区分、ラベル、選択肢', () => {
+    assert.deepEqual(parseYearCtaxValue(''), { consumption_mode: null, simplified_class: null }, '基本の設定は両方 null');
+    assert.deepEqual(parseYearCtaxValue('simplified:5'), { consumption_mode: 'simplified', simplified_class: 5 });
+    assert.deepEqual(parseYearCtaxValue('special20'), { consumption_mode: 'special20', simplified_class: null });
+    for (const r of [taxYear(2027), taxYear(2027, { consumption_mode: 'simplified', simplified_class: 3 }), taxYear(2027, { consumption_mode: 'standard' }), taxYear(2027, { consumption_mode: 'exempt' })]) {
+      assert.deepEqual(parseYearCtaxValue(yearCtaxValue(r)), { consumption_mode: r.consumption_mode, simplified_class: r.simplified_class }, '行 → 値 → 行');
+    }
+    assert.equal(yearCtaxValue(undefined), '');
+    assert.equal(yearCtaxValue(taxYear(2027, { consumption_mode: 'simplified', simplified_class: 3 })), 'simplified:3');
+    assert.deepEqual([2026, 2027, 2028, 2029].map(specialPayPct), [20, 30, 30, null]);
+    assert.equal(consumptionModeLabel('special20', null, 2026), '2 割特例');
+    assert.equal(consumptionModeLabel('special20', null, 2027), '3 割特例');
+    assert.equal(consumptionModeLabel('special20', null, 2029), '2 割・3 割特例');
+    assert.equal(consumptionModeLabel('special20', null), '2 割・3 割特例');
+    assert.equal(consumptionModeLabel('simplified', 5), '簡易課税 第 5 種');
+    assert.equal(consumptionModeLabel('simplified', null), '簡易課税');
+    assert.equal(consumptionModeLabel('standard', null), '本則');
+    const opts = yearCtaxOptions(2027, { mode: 'simplified', cls: 5 });
+    assert.deepEqual(opts[0], { v: '', label: '基本の設定（簡易課税 第 5 種）' });
+    assert.deepEqual(opts.map((o) => o.v), ['', 'exempt', 'special20', 'simplified:1', 'simplified:2', 'simplified:3', 'simplified:4', 'simplified:5', 'simplified:6', 'standard']);
+    assert.deepEqual(opts.map((o) => o.label).slice(1, 4), ['免税', '3 割特例', '簡易課税 第 1 種']);
+    assert.equal(yearCtaxOptions(2026, { mode: 'special20', cls: null })[0]!.label, '基本の設定（2 割特例）');
+    assert.equal(yearCtaxOptions(2026, { mode: 'unset', cls: null })[0]!.label, '基本の設定（未設定）');
+    assert.equal(yearCtaxOptions(2026, null)[0]!.label, '基本の設定（未設定）');
+  });
+  test('年ごとの消費税の方式: 効く方式は下書き → 保存した行 → プロファイル', () => {
+    const profile: CtaxPick = { mode: 'simplified', cls: 5 };
+    const ys = [taxYear(2024, { consumption_mode: 'special20' }), taxYear(2026, { consumption_mode: 'standard' })];
+    const drafts = taxYearDrafts(ys, TODAY).map((d) => (d.year === 2027 ? { ...d, ctax: 'exempt' } : d.year === 2026 ? { ...d, ctax: '' } : d));
+    assert.deepEqual(yearCtaxEffective(2027, drafts, ys, profile), { mode: 'exempt', cls: null }, '下書きの値');
+    assert.deepEqual(yearCtaxEffective(2026, drafts, ys, profile), profile, '下書きで基本の設定に戻したらプロファイル');
+    assert.deepEqual(yearCtaxEffective(2024, drafts, ys, profile), { mode: 'special20', cls: null }, '下書きに無い年は保存した行');
+    assert.deepEqual(yearCtaxEffective(2023, drafts, ys, profile), profile, '行も無ければプロファイル');
+  });
+  test('年ごとの消費税の方式: 注記（期限切れ・3 割特例・届出の期限・3 割特例との比較）', () => {
+    const s20: CtaxPick = { mode: 'special20', cls: null };
+    const simp = (cls: number): CtaxPick => ({ mode: 'simplified', cls });
+    const std: CtaxPick = { mode: 'standard', cls: null };
+    const a = '2 割・3 割特例は 2028 年分までです（2026 年分までは 2 割、2027・2028 年分は 3 割）。2029 年分以降の消費税は、方式を選ぶまで見通しに入りません。';
+    const b = '3 割特例（売上税額の 30%）で計算します。2 年前（2025 年）の課税売上が 1,000 万円を超える年は使えません。';
+    const c = (y: number) =>
+      `前の年分に 2 割・3 割特例を使っていれば、簡易課税制度選択届出書は ${y} 年分の確定申告の期限（${y + 1} 年 3 月 31 日。土日なら翌月曜）までに出せば、${y} 年分から簡易課税にできます。簡易課税は 2 年続ける必要があります。`;
+    const d = '2027 年分から簡易課税にするには、2026 年 12 月 31 日までに簡易課税制度選択届出書を出す必要があります。';
+    const e = '3 割特例は売上税額の 30%、簡易課税 第 5 種は 50% です。3 割特例は 2 年前（2025 年）の課税売上が 1,000 万円以下の年だけ使えます。';
+    assert.deepEqual(yearCtaxNotes(2029, s20, s20), [a]);
+    assert.deepEqual(yearCtaxNotes(2027, s20, s20), [b]);
+    assert.deepEqual(yearCtaxNotes(2027, simp(5), s20), [c(2027), e]);
+    assert.deepEqual(yearCtaxNotes(2029, simp(5), s20), [c(2029)], '2028 年分の特例の次の年も届出は申告期限まで。3 割特例との比較は出さない');
+    assert.deepEqual(yearCtaxNotes(2027, simp(5), std), [d, e]);
+    assert.deepEqual(yearCtaxNotes(2027, simp(1), simp(1)), [], '続けて簡易課税・第 1〜3 種なら何も出さない');
+    assert.deepEqual(yearCtaxNotes(2026, s20, s20), []);
+    assert.deepEqual(yearCtaxNotes(2030, simp(5), s20), ['2030 年分から簡易課税にするには、2029 年 12 月 31 日までに簡易課税制度選択届出書を出す必要があります。'], '期限切れの特例の次の年は 12 月 31 日まで');
+    assert.equal(yearCtaxNotes(2028, simp(6), std)[1], '3 割特例は売上税額の 30%、簡易課税 第 6 種は 60% です。3 割特例は 2 年前（2026 年）の課税売上が 1,000 万円以下の年だけ使えます。');
+    assert.equal(yearCtaxNotes(2027, simp(4), simp(4))[0], '3 割特例は売上税額の 30%、簡易課税 第 4 種は 40% です。3 割特例は 2 年前（2025 年）の課税売上が 1,000 万円以下の年だけ使えます。');
+  });
+  test('年ごとの消費税の方式: 保存の本文に consumption_mode・simplified_class を入れる', () => {
+    const ys = [...taxYears.slice(0, 1), { ...taxYears[1]!, consumption_mode: 'special20' as const }];
+    const drafts = taxYearDrafts(ys, TODAY);
+    assert.deepEqual(drafts.map((d) => d.ctax), ['', 'special20', '', '']);
+    assert.equal(taxSaveBody(taxProfileDraft(taxData.profile), drafts, { ...taxData, years: ys }), null, '何も変えていなければ送らない');
+    // 2027 年に簡易課税 第 5 種を選ぶ（まだ無い年でも方式だけで送る）。
+    const picked = drafts.map((d) => (d.year === 2027 ? { ...d, ctax: 'simplified:5' } : d));
+    assert.deepEqual(taxSaveBody(taxProfileDraft(taxData.profile), picked, { ...taxData, years: ys }), {
+      years: [{ year: 2027, kind: 'estimate', revenue: null, expenses: null, business_income: null, social_insurance_paid: null, ...noSalary, consumption_mode: 'simplified', simplified_class: 5 }],
+    });
+    // 方式を変えていない年も、ほかの欄を変えたら今の方式をそのまま送る。基本の設定に戻したら両方 null。
+    const edited = drafts.map((d) => (d.year === 2026 ? { ...d, values: { ...d.values, expenses: '400000' } } : d));
+    const body = taxSaveBody(taxProfileDraft(taxData.profile), edited, { ...taxData, years: ys }) as { years: Record<string, unknown>[] };
+    assert.deepEqual([body.years[0]!.consumption_mode, body.years[0]!.simplified_class], ['special20', null]);
+    const cleared = drafts.map((d) => (d.year === 2026 ? { ...d, ctax: '' } : d));
+    const body2 = taxSaveBody(taxProfileDraft(taxData.profile), cleared, { ...taxData, years: ys }) as { years: Record<string, unknown>[] };
+    assert.deepEqual(body2.years, [{ year: 2026, kind: 'estimate', revenue: 5000000, expenses: 350000, business_income: null, social_insurance_paid: null, ...noSalary }]);
   });
 });
 
@@ -964,13 +1057,13 @@ describe('税の試算の純関数', () => {
     assert.equal(marginalText(simRes.marginal), '+100万で手取り +62.3万（負担率 37.7%）');
   });
   test('比較表の 3 行: 2 割特例 / 簡易（入力 → プロファイル → 第 5 種）/ 本則。免税は出さない', () => {
-    const rows = (i: number | null, p: number | null) => simCompareRows(simCompare, i, p).map(ctaxRowLabel);
+    const rows = (i: number | null, p: number | null) => simCompareRows(simCompare, i, p).map((r) => ctaxRowLabel(r, 2026));
     assert.deepEqual(rows(3, 2), ['2 割特例', '簡易（第 3 種）', '本則（概算）']);
     assert.deepEqual(rows(null, 2), ['2 割特例', '簡易（第 2 種）', '本則（概算）']);
     assert.deepEqual(rows(null, null), ['2 割特例', '簡易（第 5 種）', '本則（概算）']);
     const best = (rows: CtaxCompareRow[]) => {
       const b = bestRow(rows);
-      return b === null ? null : ctaxRowLabel(b);
+      return b === null ? null : ctaxRowLabel(b, 2026);
     };
     assert.equal(best(simCompareRows(simCompare, 1, null)), '簡易（第 1 種）', '表示する 3 行の中で最小（API の best は使わない）');
     assert.equal(best(simCompareRows(simCompare, 5, null)), '簡易（第 5 種）', '区分 5 でも簡易が最安');
@@ -982,20 +1075,25 @@ describe('税の試算の純関数', () => {
     assert.equal(best(simCompareRows(none, 5, null)), null, '使える行が無ければ印なし');
   });
   test('理由と警告の文言', () => {
-    assert.equal(ctaxReasonText('special20_expired'), '2026 年分まで');
+    assert.equal(ctaxReasonText('special20_expired'), '2028 年分まで');
+    // 比較表の special20 の行は試算の年で 2 割特例 / 3 割特例。年が無ければ 2 つまとめた名前。
+    const s20row = simCompare.find((r) => r.mode === 'special20')!;
+    assert.deepEqual([2026, 2027, 2028, 2029].map((y) => ctaxRowLabel(s20row, y)), ['2 割特例', '3 割特例', '3 割特例', '2 割・3 割特例']);
+    assert.equal(ctaxRowLabel(s20row), '2 割・3 割特例');
     assert.equal(ctaxReasonText('over_10m'), '売上 1,000 万超');
     assert.equal(ctaxReasonText('over_50m'), '売上 5,000 万超');
     assert.equal(ctaxReasonText('revenue_missing'), '売上が未入力');
     assert.equal(simWarningText({ kind: 'consumption_tax_mode_unset' }), '消費税の方式が未設定なので、消費税は 0 円で計算しています。');
-    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }), '選んだ方式（2 割特例）は使えない条件です（2026 年分まで）。消費税は 0 円で計算しています。');
-    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'over_10m' }), '選んだ方式（2 割特例）は使えない条件です（売上 1,000 万超）。消費税はその方式のまま計算しています。');
+    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'special20_expired' }), '選んだ方式（2 割・3 割特例）は使えない条件です（2028 年分まで）。消費税は 0 円で計算しています。');
+    assert.equal(simWarningText({ kind: 'selected_mode_unavailable', mode: 'special20', reason: 'over_10m' }), '選んだ方式（2 割・3 割特例）は使えない条件です（売上 1,000 万超）。消費税はその方式のまま計算しています。');
     assert.equal(simWarningText({ kind: 'rates_assumed', year: 2028, latest: 2026 }), '2028 年の税率・料率はまだ無いので、2026 年の値で計算しています。');
     assert.equal(simWarningText({ kind: 'special20_expired', year: 2027 }), taxWarningText({ kind: 'special20_expired', year: 2027 }), '知らない kind は見積もりの文言');
     assert.equal(
-      simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }, 2027),
-      '2 割特例は 2027 年分から使えないため、簡易課税（第 5 種）で計算しています。',
+      simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 5 }, 2029),
+      '2 割・3 割特例は 2029 年分から使えないため、簡易課税（第 5 種）で計算しています。',
     );
-    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'standard', simplified_class: null }, 2028), '2 割特例は 2027 年分から使えないため、本則（概算）で計算しています。');
+    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'standard', simplified_class: null }, 2030), '2 割・3 割特例は 2029 年分から使えないため、本則（概算）で計算しています。');
+    assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'standard', simplified_class: null }, 2028), '売上 1,000 万円超のため、本則（概算）で計算しています。', '2028 年分は 3 割特例の期限内');
     assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'special20', to: 'simplified', simplified_class: 3 }, 2026), '売上 1,000 万円超のため、簡易課税（第 3 種）で計算しています。');
     assert.equal(simWarningText({ kind: 'mode_defaulted', from: 'exempt', to: 'standard', simplified_class: null }, 2027), '売上 1,000 万円超のため、本則（概算）で計算しています。');
     assert.deepEqual(simNotices({ year: 2027, warnings: [{ kind: 'simplified_class_missing' }, { kind: 'simplified_class_missing' }], assumptions: ['steady_state', 'pension_prepay24_as_prepay12'] }), [
@@ -1349,8 +1447,8 @@ describe('SSR スナップショット', () => {
     const draft = taxProfileDraft(taxData.profile);
     const form = html(m.TaxForm!, { data: taxData, draft, years: taxYearDrafts(taxYears, TODAY), accounts: [account(), { ...wallet, active: false }], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(form, /aria-pressed="true">65 万/);
-    assert.match(form, /<legend>消費税の方式<\/legend>[\s\S]*>免税<\/button>[\s\S]*>2 割特例<\/button>[\s\S]*>簡易課税<\/button>[\s\S]*>本則<\/button>[\s\S]*<span class="m-sub">未設定<\/span>[\s\S]*2 割特例は 2026 年分まで/);
-    assert.doesNotMatch(form.split('<legend>消費税の方式</legend>')[1]!.split('</fieldset>')[0]!, /aria-pressed="true"/, '未設定ならどれも選ばない');
+    assert.match(form, /<legend>消費税の方式（年ごとの指定が無い年）<\/legend>[\s\S]*>免税<\/button>[\s\S]*>2 割・3 割特例<\/button>[\s\S]*>簡易課税<\/button>[\s\S]*>本則<\/button>[\s\S]*<span class="m-sub">未設定<\/span>[\s\S]*2 割特例は 2026 年分まで、2027・2028 年分は 3 割特例です。2029 年分からは簡易課税か本則を選んでください。/);
+    assert.doesNotMatch(form.split('<legend>消費税の方式（年ごとの指定が無い年）</legend>')[1]!.split('</fieldset>')[0]!, /aria-pressed="true"/, '未設定ならどれも選ばない');
     assert.doesNotMatch(form, /事業区分|売上の入力は税込/, '未設定なら事業区分もトグルも出さない');
     const simp = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'simplified', simplified_class: '' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.match(simp, /aria-pressed="true">簡易課税/);
@@ -1360,7 +1458,7 @@ describe('SSR スナップショット', () => {
     const s20 = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'special20' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.doesNotMatch(s20, /事業区分/);
     assert.match(s20, /売上の入力は税込/);
-    assert.match(s20, /2 割特例は 2026 年分まで/);
+    assert.doesNotMatch(s20, /2 割特例は 2026 年分まで/, '特例の期限の注記は年の欄に出す');
     const ex = html(m.TaxForm!, { data: taxData, draft: { ...draft, consumption_mode: 'exempt' }, years: taxYearDrafts(taxYears, TODAY), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
     assert.doesNotMatch(ex, /売上の入力は税込|事業区分|2 割特例は 2026 年分まで/, '免税ならトグルも注記も出さない');
     assert.match(form, /<option value="saitama-city-2026">さいたま市 令和 8 年度<\/option>/);
@@ -1393,6 +1491,25 @@ describe('SSR スナップショット', () => {
     assert.equal(sal.match(/<details class="m-details" open>/g)?.length, 1, '値のある年だけ開く');
     assert.match(sal, /<details class="m-details" open>[\s\S]*?id="m-tax-2025-salary_income" class="m-field" inputMode="numeric" value="5000000"/);
     t.assert.snapshot(lines([unset, set, set20, form, simp, sal].join('\n')));
+  });
+  test('税・保険の見積もり: 年ごとの消費税の方式の select と注記（下書きの値で出す）', async () => {
+    const m = await load('/src/money/Tax.tsx');
+    const profile = { ...taxData.profile!, consumption_mode: 'simplified' as const, simplified_class: 5 };
+    const data = { ...taxData, profile, years: [taxYears[0]!, { ...taxYears[1]!, consumption_mode: 'special20' as const }] };
+    const years = taxYearDrafts(data.years, TODAY);
+    const form = html(m.TaxForm!, { data, draft: taxProfileDraft(profile), years, accounts: [], busy: false, error: null, dirty: false, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    for (const y of [2025, 2026, 2027, 2028]) assert.match(form, new RegExp(`<select id="m-tax-${y}-ctax" class="m-field"`), `${y} 年の欄に方式の select`);
+    const block = (y: number) => form.split(`<legend>${y} 年`)[1]!.split('</fieldset>')[0]!;
+    assert.match(block(2026), /<label class="m-label" for="m-tax-2026-ctax">消費税の方式<\/label>\s*<select id="m-tax-2026-ctax" class="m-field" value="special20"><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">2 割特例<\/option>/);
+    assert.match(block(2027), /<select id="m-tax-2027-ctax" class="m-field" value="" aria-describedby="m-tax-2027-ctax-n0 m-tax-2027-ctax-n1"><option value="">基本の設定（簡易課税 第 5 種）<\/option>[\s\S]*<option value="special20">3 割特例<\/option>/);
+    assert.match(block(2027), /<\/select>\s*<span id="m-tax-2027-ctax-n0" class="m-sub">前の年分に 2 割・3 割特例を使っていれば、簡易課税制度選択届出書は 2027 年分の確定申告の期限（2028 年 3 月 31 日。土日なら翌月曜）までに出せば/);
+    assert.match(block(2027), /3 割特例は売上税額の 30%、簡易課税 第 5 種は 50% です。/);
+    assert.match(block(2028), /<span id="m-tax-2028-ctax-n0" class="m-sub">3 割特例は売上税額の 30%/);
+    assert.doesNotMatch(block(2028), /前の年分に 2 割・3 割特例|12 月 31 日までに/, '続けて簡易課税なら届出の注記は出さない');
+    assert.doesNotMatch(block(2026).split('<select id="m-tax-2026-ctax"')[1]!, /class="m-sub"|aria-describedby/, '2026 年の 2 割特例には注記なし');
+    // 下書きで 2027 年を本則にしたら、2028 年の注記は 12 月 31 日の期限になる。
+    const edited = html(m.TaxForm!, { data, draft: taxProfileDraft(profile), years: years.map((d) => (d.year === 2027 ? { ...d, ctax: 'standard' } : d)), accounts: [], busy: false, error: null, dirty: true, onDraft: noop, onYears: noop, onSave: noop, onReset: noop });
+    assert.match(edited.split('<legend>2028 年')[1]!.split('</fieldset>')[0]!, /2028 年分から簡易課税にするには、2027 年 12 月 31 日までに/);
   });
 
   test('税・保険の見積もり: 台帳の「 · 見積」「 · 手直し」、編集の注記と「自動計算に戻す」、見通しの月の「 · 見積」', async (t) => {
@@ -1438,7 +1555,7 @@ describe('SSR スナップショット', () => {
     const withSaving = { ...simRes, deductions: { ideco: 240000, kyosai: 0, saving: 72000 }, free_cash: 4290000, warnings: [{ kind: 'rates_assumed' as const, year: 2028, latest: 2026 }] };
     const out = html(m.TaxSimResult!, { res: withSaving, inputClass: 5, profileClass: 5 });
     assert.doesNotMatch(out, /個人事業税|免税/);
-    assert.match(out, /2026 年分まで/);
+    assert.match(out, /2028 年分まで/);
     assert.match(out, /自由に使える額/);
     assert.match(out, /2028 年の税率・料率はまだ無い/);
     const best = html(m.TaxSimResult!, { res: simRes, inputClass: 1, profileClass: 5 });
