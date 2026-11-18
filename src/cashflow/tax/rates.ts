@@ -22,9 +22,8 @@ export const INCOME_TAX_BRACKETS: readonly Bracket[] = [
 export const RECONSTRUCTION_RATE = 0.021;
 
 // 基礎控除（所得税）。合計所得 ≤ upTo なら amount。年分ごと。
-// 令和 7・8 年分: https://www.nta.go.jp/users/gensen/2025kiso/index.htm
-// 令和 9 年分〜: 132 万以下の 95 万だけ残り、それ以外は 58 万（132〜655 万の上乗せは令和 7・8 年分だけ）。
-// 2,350 万超の段階（48 万 / 32 万 / 16 万 / 0）は https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm
+// 2025 = 令和 7 年分、2026 = 令和 8・9 年分（令和 8 年度改正。令和 8 年 12 月 1 日施行、令和 8 年分から適用）、2028 = 令和 10 年分以後。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1199.htm （[令和8年4月1日現在法令等]。2026-11-12 に確認）
 export type Step = { upTo: number; amount: number };
 export const INCOME_TAX_BASIC_DEDUCTION: Readonly<Record<number, readonly Step[]>> = {
   2025: [
@@ -38,15 +37,47 @@ export const INCOME_TAX_BASIC_DEDUCTION: Readonly<Record<number, readonly Step[]
     { upTo: 25_000_000, amount: 160_000 },
     { upTo: Infinity, amount: 0 },
   ],
-  2027: [
-    { upTo: 1_320_000, amount: 950_000 },
-    { upTo: 23_500_000, amount: 580_000 },
+  2026: [
+    { upTo: 4_890_000, amount: 1_040_000 },
+    { upTo: 6_550_000, amount: 670_000 },
+    { upTo: 23_500_000, amount: 620_000 },
+    { upTo: 24_000_000, amount: 480_000 },
+    { upTo: 24_500_000, amount: 320_000 },
+    { upTo: 25_000_000, amount: 160_000 },
+    { upTo: Infinity, amount: 0 },
+  ],
+  2028: [
+    { upTo: 1_320_000, amount: 990_000 },
+    { upTo: 23_500_000, amount: 620_000 },
     { upTo: 24_000_000, amount: 480_000 },
     { upTo: 24_500_000, amount: 320_000 },
     { upTo: 25_000_000, amount: 160_000 },
     { upTo: Infinity, amount: 0 },
   ],
 };
+
+// 給与所得控除。収入 ≤ flatUpTo なら min、それより上の段（30% + 8 万 / 20% + 44 万 / 10% + 110 万 / 上限 195 万）は年分で共通。
+// 660 万未満は所得税法別表第五で、下の salaryIncomeOf が A = 収入 ÷ 4 の千円未満切り捨て の式で概算する（別表との差は数千円以内）。
+// 令和 7 年分 190 万以下 65 万、令和 8・9 年分 220 万以下 74 万。令和 10 年分以後は未確認（2026 の値を繰り越す）。2024 年以前も 2025 の値で代える（対象外）。
+// https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1410.htm
+export type SalaryDeduction = { min: number; flatUpTo: number };
+export const SALARY_DEDUCTION: Readonly<Record<number, SalaryDeduction>> = {
+  2025: { min: 650_000, flatUpTo: 1_900_000 },
+  2026: { min: 740_000, flatUpTo: 2_200_000 },
+};
+
+// 給与所得（給与所得控除の後）。660 万未満は別表第五を A = 収入 ÷ 4 の千円未満切り捨て の式で概算する。
+// engine.ts と PWA（pwa/src/money/model.ts の taxIncome）の両方から使うので、ここ（import の無いファイル）に置く。
+export function salaryIncomeOf(income: number, year: number): number {
+  const d = ratesFor(SALARY_DEDUCTION, year);
+  if (income <= d.flatUpTo) return Math.max(0, income - d.min);
+  if (income < 6_600_000) {
+    const a = Math.floor(income / 4 / 1000) * 1000;
+    return income < 3_600_000 ? Math.round(a * 2.8) - 80_000 : Math.round(a * 3.2) - 440_000;
+  }
+  if (income <= 8_500_000) return Math.floor(income * 0.9) - 1_100_000;
+  return income - 1_950_000;
+}
 
 // 配偶者控除・扶養控除（一般）。所得税 38 万、住民税 33 万。所得制限・特定扶養などの細部は見ない（概算）。
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1191.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1180.htm
@@ -67,6 +98,7 @@ export const PREPAY_FRACTION = 3;
 // 所得割 市 8% + 県 2%。均等割 市 3,000 + 県 1,000 + 森林環境税（国税）1,000。
 // https://www.city.saitama.lg.jp/001/153/004/002/001/001/p013654.html
 // 基礎控除 43 万（令和 8 年度も据え置き）: https://www.pref.tochigi.lg.jp/b07/life/zeikin/zeikin/documents/09r7zeiseikaiseinogaiyou.pdf
+// 令和 8 年度改正でも変わらない（大綱の概要で引き上げは所得税の基礎控除だけ。2026-11-12 に確認）: https://www.mof.go.jp/tax_policy/tax_reform/outline/fy2026/08taikou_gaiyou.htm
 // 調整控除は単身 2,500 円で仮置き【要確認】。
 // 納期 第 1〜4 期 = 6 月末・8 月末・10 月末・翌 1 月末（休日なら翌開庁日）: https://www.city.saitama.lg.jp/faq/001/001/003/p110417.html
 export type ResidentRates = { rate: number; perCapita: number; basicDeduction: number; adjustmentCredit: number };
@@ -125,12 +157,24 @@ export const PENSION_ADDON_MONTHLY = 400;
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6509.htm
 export const CTAX_DEEMED_PURCHASE_PCT: Readonly<Record<number, number>> = { 1: 90, 2: 80, 3: 70, 4: 60, 5: 50, 6: 40 };
 
-// 2 割特例（売上税額 × 20%）はインボイス登録で課税事業者になった人の令和 5〜8 年分（2026 年分）まで。
-// 2027 年分以降は作らず special20_expired の警告。
+// インボイス登録で課税事業者になった人の特例。2 割は 2026 年分まで（売上税額 × 20%、令和 5〜8 年分）。
+// 2027・2028 年分は 3 割特例（売上税額 × 30%。個人事業者、届出不要）。
+// 2029 年分以降は作らず special20_expired の警告。基準期間（2 年前）の課税売上高が 1,000 万円を超える年は使えない（special_base_over_10m）。
 // https://www.nta.go.jp/publication/pamph/shohi/kaisei/202304/01.htm
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/invoice-review/index.htm
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/pdf/qa/114-2.pdf （問 114-2）
+// https://www.nta.go.jp/taxes/shiraberu/zeimokubetsu/shohi/keigenzeiritsu/pdf/qa/115-2.pdf （問 115-2）
 export const CTAX_SPECIAL20_LAST_YEAR = 2026;
+export const CTAX_SPECIAL30_LAST_YEAR = 2028;
 
-// 免税事業者の判定（基準期間の課税売上高 1,000 万円以下）と簡易課税を選べる上限（同 5,000 万円以下）。試算（simulate.ts）の方式の比較だけで使う。
+// Y 年分の特例の納付率（売上税額に対する %）。特例の期限が切れた年は null。
+export function ctaxSpecialPayPct(year: number): 20 | 30 | null {
+  if (year <= CTAX_SPECIAL20_LAST_YEAR) return 20;
+  if (year <= CTAX_SPECIAL30_LAST_YEAR) return 30;
+  return null;
+}
+
+// 免税事業者の判定（基準期間の課税売上高 1,000 万円以下）と簡易課税を選べる上限（同 5,000 万円以下）。試算（simulate.ts）の方式の比較と、特例の基準期間の警告（engine.ts の special_base_over_10m）で使う。
 // https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6501.htm / https://www.nta.go.jp/taxes/shiraberu/taxanswer/shohi/6505.htm
 export const CTAX_EXEMPT_THRESHOLD = 10_000_000;
 export const CTAX_SIMPLIFIED_THRESHOLD = 50_000_000;

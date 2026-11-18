@@ -1,12 +1,15 @@
 // 税・保険の見積もり（docs/cashflow.md §14、src/web/routes/tax.ts）。予定の先頭のカード（TaxCard）と設定画面（Tax）。
-// カード: プロファイルが無ければ「設定する」だけ。あれば「2026 年分 所得 ○○万円 · 消費税 2 割特例 / 最終計算 11/7」と「設定を開く」「再計算」（POST /api/tax/recalculate）。
+// カード: プロファイルが無ければ「設定する」だけ。あれば「2026 年分 所得 ○○万円 · 消費税 2 割特例 / 最終計算 11/7」（方式はその年に効くもの）と「設定を開く」「再計算」（POST /api/tax/recalculate）。
 // 設定画面（1 画面・縦スクロール）: 青色の区分・消費税の方式（簡易課税なら事業区分、方式を選んだら税込のトグル）・国保・個人事業税・国民年金・配偶者と扶養・iDeCo 等・納税口座・年ごとの所得。
 // 保存はプロファイルの変えた列と変えた年を 1 回の PUT /api/tax で送る（再計算を返す）。結果の件数と警告を画面の上に 1 行で出す。
-// 年ごとの所得は年を縦に並べる（スマホで横にはみ出さないように）。入力を変えている間は onLock(true) で「戻る」と「試算」を止める。
+// 年ごとの所得は年を縦に並べる（スマホで横にはみ出さないように）。各年に「給与（源泉徴収票）」の折りたたみ（保存した値があれば開く）と、
+// その年分の消費税の方式（空ならプロファイルの方式。下に届出・特例の注記）。PC とスマホで同じ部品。
+// 入力を変えている間は onLock(true) で「戻る」と「試算」を止める。
 // カードの下と設定画面の頭の右端に「試算」（税の試算 TaxSim.tsx へ）。
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { getJson, putJson } from '../api.ts';
 import { Switch } from './Accounts.tsx';
+import { Icon } from './Icons.tsx';
 import {
   ACTUAL_FIELDS,
   BIZ_TAX_RATE,
@@ -19,12 +22,18 @@ import {
   PENSION_LABELS,
   PENSION_MODES,
   runText,
+  SALARY_FIELDS,
   SIMPLIFIED_CLASS_LABELS,
   taxCardLine,
   taxProfileDraft,
+  taxSalaryOpen,
   taxSaveBody,
   taxYearDrafts,
+  yearCtaxEffective,
+  yearCtaxNotes,
+  yearCtaxOptions,
   type Account,
+  type CtaxPick,
   type RunSummary,
   type TaxProfileDraft,
   type TaxProfileResponse,
@@ -81,11 +90,12 @@ export function TaxCard({
   );
 }
 
-function Num({ id, label, value, placeholder, onInput }: { id: string; label: string; value: string; placeholder?: string; onInput: (v: string) => void }) {
+function Num({ id, label, value, placeholder, note, onInput }: { id: string; label: string; value: string; placeholder?: string; note?: string; onInput: (v: string) => void }) {
   return (
     <label class="m-field-wrap" for={id}>
       <span class="m-label">{label}</span>
       <input id={id} class="m-field" inputMode="numeric" placeholder={placeholder} value={value} onInput={(e) => onInput(e.currentTarget.value)} />
+      {note && <span class="m-sub">{note}</span>}
     </label>
   );
 }
@@ -118,6 +128,10 @@ export function TaxForm({
 }) {
   const set = <K extends keyof TaxProfileDraft>(k: K, v: TaxProfileDraft[K]) => onDraft({ ...draft, [k]: v });
   const setYear = (i: number, k: string, v: string) => onYears(years.map((y, j) => (j === i ? { ...y, values: { ...y.values, [k]: v } } : y)));
+  const setCtax = (i: number, v: string) => onYears(years.map((y, j) => (j === i ? { ...y, ctax: v } : y)));
+  // 年の方式が空の年に使うプロファイルの方式（編集中の値）。
+  const base: CtaxPick = { mode: draft.consumption_mode, cls: draft.simplified_class === '' ? null : Number(draft.simplified_class) };
+  const effective = (year: number) => yearCtaxEffective(year, years, data.years, base);
   return (
     <>
       <section class="m-card m-form" aria-labelledby="m-tax-basic">
@@ -135,7 +149,7 @@ export function TaxForm({
           </div>
         </fieldset>
         <fieldset class="m-fs m-fs-sm">
-          <legend>消費税の方式</legend>
+          <legend>消費税の方式（年ごとの指定が無い年）</legend>
           <div class="m-seg m-seg-4">
             {CONSUMPTION_MODES.map((c) => (
               <button type="button" key={c} aria-pressed={draft.consumption_mode === c} onClick={() => set('consumption_mode', c)}>
@@ -144,9 +158,7 @@ export function TaxForm({
             ))}
           </div>
           {draft.consumption_mode === 'unset' && <span class="m-sub">未設定</span>}
-          {(draft.consumption_mode === 'unset' || draft.consumption_mode === 'special20') && (
-            <span class="m-sub">2 割特例は 2026 年分まで。2027 年分からは簡易課税か本則を選んでください。</span>
-          )}
+          {draft.consumption_mode === 'unset' && <span class="m-sub">2 割特例は 2026 年分まで、2027・2028 年分は 3 割特例です。2029 年分からは簡易課税か本則を選んでください。</span>}
         </fieldset>
         {draft.consumption_mode === 'simplified' && (
           <label class="m-field-wrap" for="m-tax-class">
@@ -235,9 +247,34 @@ export function TaxForm({
             </legend>
             <div class="m-form-2">
               {(y.kind === 'actual' ? ACTUAL_FIELDS : ESTIMATE_FIELDS).map((f) => (
-                <Num key={f.k} id={`m-tax-${y.year}-${f.k}`} label={f.label} value={y.values[f.k] ?? ''} placeholder={y.placeholders?.[f.k]} onInput={(v) => setYear(i, f.k, v)} />
+                <Num
+                  key={f.k}
+                  id={`m-tax-${y.year}-${f.k}`}
+                  label={f.label}
+                  value={y.values[f.k] ?? ''}
+                  placeholder={y.placeholders?.[f.k] ?? f.placeholder}
+                  onInput={(v) => setYear(i, f.k, v)}
+                />
               ))}
             </div>
+            <details class="m-details" open={taxSalaryOpen(data.years.find((r) => r.year === y.year))}>
+              <summary>
+                <Icon name="next" size={16} class="m-chev" />
+                給与（源泉徴収票）
+              </summary>
+              <div class="m-form-2">
+                {SALARY_FIELDS.map((f) => (
+                  <Num key={f.k} id={`m-tax-${y.year}-${f.k}`} label={f.label} value={y.values[f.k] ?? ''} note={f.note} onInput={(v) => setYear(i, f.k, v)} />
+                ))}
+              </div>
+            </details>
+            <CtaxField
+              id={`m-tax-${y.year}-ctax`}
+              value={y.ctax}
+              options={yearCtaxOptions(y.year, base)}
+              notes={yearCtaxNotes(y.year, effective(y.year), effective(y.year - 1))}
+              onChange={(v) => setCtax(i, v)}
+            />
           </fieldset>
         ))}
       </section>
@@ -363,5 +400,29 @@ export function Tax({
         )}
       </div>
     </>
+  );
+}
+
+// 年ごとの消費税の方式の欄。注記は label の外に置き、select から aria-describedby で指す（読み上げで注記がラベルに混ざらないように）。
+function CtaxField(p: { id: string; value: string; options: { v: string; label: string }[]; notes: string[]; onChange: (v: string) => void }) {
+  const noteIds = p.notes.map((_, j) => `${p.id}-n${j}`);
+  return (
+    <div class="m-field-wrap">
+      <label class="m-label" for={p.id}>
+        消費税の方式
+      </label>
+      <select id={p.id} class="m-field" value={p.value} aria-describedby={noteIds.length ? noteIds.join(' ') : undefined} onChange={(e) => p.onChange(e.currentTarget.value)}>
+        {p.options.map((o) => (
+          <option key={o.v} value={o.v}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {p.notes.map((n, j) => (
+        <span key={n} id={noteIds[j]} class="m-sub">
+          {n}
+        </span>
+      ))}
+    </div>
   );
 }
