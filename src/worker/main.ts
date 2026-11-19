@@ -166,15 +166,51 @@ export async function runWith(rt: WorkerRuntime, opts: RunOptions = {}) {
   }
 }
 
+// SIGTERM / SIGINT を受けたら、実行中のジョブを終えてから止まる（runUntilEmpty の shouldStop）。
+// linger の待ちは信号で切り上げる（web の stop() は待ちきれなければ SIGKILL を送るので、待ちで時間を使わない）。
+export type StopSignal = { shouldStop(): boolean; sleep(ms: number): Promise<void>; dispose(): void };
+
+export function createStopSignal(proc: Pick<NodeJS.Process, 'on' | 'off'> = process): StopSignal {
+  let stopped = false;
+  const wakers = new Set<() => void>();
+  const onSignal = () => {
+    stopped = true;
+    for (const w of wakers) w();
+    wakers.clear();
+  };
+  proc.on('SIGTERM', onSignal);
+  proc.on('SIGINT', onSignal);
+  return {
+    shouldStop: () => stopped,
+    sleep: (ms) =>
+      new Promise<void>((resolve) => {
+        if (stopped) return resolve();
+        const wake = () => {
+          clearTimeout(t);
+          wakers.delete(wake);
+          resolve();
+        };
+        const t = setTimeout(wake, ms);
+        wakers.add(wake);
+      }),
+    dispose: () => {
+      proc.off('SIGTERM', onSignal);
+      proc.off('SIGINT', onSignal);
+    },
+  };
+}
+
 export async function main(argv: string[]): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { db: { type: 'string' } } });
   const cfg = loadConfig();
   const db = openDb(values.db ?? cfg.dbPath);
+  const stop = createStopSignal();
   try {
-    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s), lingerMs: cfg.worker.lingerMs });
+    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s), lingerMs: cfg.worker.lingerMs, shouldStop: stop.shouldStop, sleep: stop.sleep });
     console.log(`worker: done=${s.done} failed=${s.failed}`);
     return 0;
   } finally {
+    stop.dispose();
     db.close();
   }
 }
