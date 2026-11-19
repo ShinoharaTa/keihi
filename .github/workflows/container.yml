@@ -1,0 +1,21 @@
+# コンテナイメージがリポジトリのコードからビルドでき、起動・ヘルスチェック・停止・データの保持が通ることを確かめる。
+# 外部の API は呼ばない（シークレットを使わない）。イメージの公開はしない。
+name: container
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: ビルドと動作確認
+        run: tools/docker/smoke.sh

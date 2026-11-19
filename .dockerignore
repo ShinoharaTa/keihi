@@ -1,0 +1,30 @@
+# ビルドコンテキストに入れないもの（イメージに要るのは package*.json・tsconfig.json・tools/dev・src・pwa だけ）
+.git
+.github
+.claude
+node_modules
+pwa/dist
+pwa/node_modules
+test
+docs
+deploy
+poc
+tools/*
+!tools/dev
+*.md
+Dockerfile
+.dockerignore
+
+# 秘密とデータ（万一リポジトリの下に置かれていても、イメージに入れない）
+.env
+.env.*
+**/*.env
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+data/
+receipts/
+storage/
+models/
+.venv/
