@@ -149,4 +149,15 @@ describe('マスキング', () => {
     t.log.info('Bearer abc');
     assert.deepEqual(t.out, ['Bearer ***']);
   });
+  test('JWT の形の文字列は、登録していなくても ***（text・json、フィールドの中も）', () => {
+    // 形だけの偽物（秘密の検査に掛からないよう、組み立てて作る）
+    const fake = ['ey' + 'J' + 'a'.repeat(20), 'b'.repeat(30), 'c_-'.repeat(10)].join('.');
+    const j = capture({ LOG_FORMAT: 'json' });
+    j.log.warn(`rejected ${fake} from client`, { detail: { token: 'x', raw: fake } });
+    assert.ok(!j.err[0].includes(fake));
+    assert.equal(JSON.parse(j.err[0]).msg, 'rejected *** from client');
+    const t = capture({});
+    t.log.info(`a.b.c と eyJ.short.x はそのまま ${fake}`);
+    assert.deepEqual(t.out, ['a.b.c と eyJ.short.x はそのまま ***']);
+  });
 });

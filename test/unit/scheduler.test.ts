@@ -321,6 +321,36 @@ describe('spawn', () => {
     assert.equal(sp.running(), 1);
   });
 
+  test('stop: SIGKILL の後も終わりを知らせて来なければ 2 秒で諦める。2 回目の stop も同じ結果を待つ', async () => {
+    const { clock, sp, control } = make();
+    control.trigger();
+    const c = sp.last();
+    let n = 0;
+    const p1 = control.stop().then(() => n++);
+    const p2 = control.stop().then(() => n++);
+    await new Promise((r) => setImmediate(r));
+    clock.advance(5_000);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(c.signals, ['SIGTERM', 'SIGKILL']);
+    assert.equal(n, 0);
+    clock.advance(2_000);
+    await Promise.all([p1, p2]);
+    assert.equal(n, 2);
+    assert.deepEqual(c.signals, ['SIGTERM', 'SIGKILL']);
+  });
+
+  test('workerArgs と workerEnv を子に渡す（省けば引数なし・env なし）', () => {
+    const clock = fakeClock(T0);
+    const sp = fakeSpawn();
+    const base = { mode: 'spawn' as const, db, spawn: sp.spawn, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer, log: memLog().log, workerEntry: '/app/src/worker/main.ts' };
+    createWorkerControl({ ...base, workerArgs: ['--db', '/data/keihi.db'], workerEnv: { KEIHI_DATA_DIR: '/data' } }).trigger();
+    assert.deepEqual(sp.calls[0].args, ['/app/src/worker/main.ts', '--db', '/data/keihi.db']);
+    assert.deepEqual(sp.calls[0].opts, { stdio: 'inherit', env: { KEIHI_DATA_DIR: '/data' } });
+    createWorkerControl(base).trigger();
+    assert.deepEqual(sp.calls[1].args, ['/app/src/worker/main.ts']);
+    assert.deepEqual(sp.calls[1].opts, { stdio: 'inherit' });
+  });
+
   test('子がいないときの stop はすぐ終わる', async () => {
     const { sp, control } = make();
     await control.stop();

@@ -306,7 +306,8 @@ function applyEnv(t: Table, env: NodeJS.ProcessEnv): void {
 // DATABASE_URL は sqlite:///絶対パス だけ（sqlite: の後ろの // は任意）。値はエラーに含めない（パスワード入りの URL が来うる）。
 function dbPathFromUrl(url: string): string {
   const m = /^sqlite:(?:\/\/)?(.*)$/.exec(url);
-  if (!m || !path.isAbsolute(m[1])) throw new ConfigError('DATABASE_URL は sqlite:///絶対パス だけ（keihi は SQLite だけに対応）');
+  // `?mode=ro` のようなクエリは解釈しない（そのままファイル名になってしまう）ので、受け付けない。
+  if (!m || !path.isAbsolute(m[1]) || /[?#]/.test(m[1])) throw new ConfigError('DATABASE_URL は sqlite:///絶対パス だけ（クエリは付けられない。keihi は SQLite だけに対応）');
   return m[1];
 }
 

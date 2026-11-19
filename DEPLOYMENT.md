@@ -43,7 +43,7 @@ systemd の構成との対応:
 | `~/.local/share/keihi/` | `/data`（ボリューム） |
 | Tailscale Serve が付ける `Tailscale-User-Login` | Cloudflare Access の JWT（`Cf-Access-Jwt-Assertion`）を検証 |
 | journald | 標準出力・標準エラー（JSON） |
-| `keihi-backup.timer`（ローカルのスナップショット + restic でオフサイト） | **未対応**（§13 の 2。切り替えの前に決める） |
+| `keihi-backup.timer`（ローカルのスナップショット + restic でオフサイト。導入している場合） | **未対応**（§13 の 2。切り替えの前に決める） |
 
 ## 2. ビルドと起動
 
@@ -74,7 +74,8 @@ curl -s -H 'Tailscale-User-Login: you@example.com' http://127.0.0.1:18795/api/st
 `KEIHI_INSECURE_HEADER_AUTH=1` は「ヘッダを信じるだけの認証のまま `0.0.0.0` で待ち受ける」のを許す、手元の検証専用の設定。
 **本番では使わない**（付けなければ、その組み合わせでは起動を拒否する）。
 
-停止は `docker stop keihi`（SIGTERM）。新しい接続を止め、処理中のリクエスト（最大 8 秒）と worker の実行中のジョブ（最大 20 秒）を待ってから、終了コード 0 で終わる。
+停止は `docker stop -t 30 keihi`（SIGTERM）。新しい接続を止め、処理中のリクエスト（最大 8 秒）と worker の実行中のジョブ（最大 20 秒、止まらなければ SIGKILL してさらに最大 2 秒）を待ってから、終了コード 0 で終わる。
+`docker stop` の猶予は既定で 10 秒しかないので、`-t 30` を付ける（付けないと、10 秒を超えるジョブの途中でコンテナごと SIGKILL され、終了コードは 137 になる）。
 
 ## 3. 環境変数
 
@@ -101,6 +102,7 @@ Coolify では **Build time を「Not available during build」（Runtime only�
 | `GMAIL_CLIENT_ID`・`GMAIL_CLIENT_SECRET` | Gmail の取り込みを使うとき |
 
 `/config/secrets.env` があるときはそのファイルだけを読み、環境変数のシークレットは見ない（従来の構成と同じ規則）。
+ファイルで渡すときは、コンテナの実行ユーザー（`node`、uid 1000）が読めるようにする（root 所有の 0600 だと起動に失敗する）。
 
 ### 業務の設定
 
@@ -137,7 +139,7 @@ Coolify では **Build time を「Not available during build」（Runtime only�
 | `KEIHI_BIND_HOST` | `0.0.0.0` | 待ち受けるアドレス |
 | `KEIHI_WORKER_MODE` | `spawn` | worker を子プロセスで動かす |
 | `KEIHI_MIGRATE_ON_START` | `1` | 起動時に未適用のマイグレーションを適用する |
-| `DATABASE_URL` | （未設定） | DB の場所を変えるときだけ。`sqlite:///data/keihi.db` の形（SQLite だけ） |
+| `DATABASE_URL` | （未設定） | DB の場所を変えるときだけ。`sqlite:///data/keihi.db` の形（SQLite だけ。クエリは付けられない）。それ以外の値が入っていると起動しないので、基盤が共通の `DATABASE_URL` を自動で入れる設定にしない |
 
 ## 4. Coolify の登録
 
@@ -149,10 +151,10 @@ Coolify では **Build time を「Not available during build」（Runtime only�
 | Ports Mappings | **空**（ホストにポートを出さない。Traefik が中から届く） |
 | Domains | 公開するホスト名（`KEIHI_WEB_ALLOWED_HOSTS` と同じもの） |
 | Auto Deploy | 有効（`main` への push でデプロイ） |
-| Persistent Storage | Volume Mount、Destination Path `/data` |
+| Persistent Storage | Volume Mount、Destination Path `/data`。**付け忘れてもエラーにならない**（イメージの `VOLUME` で匿名ボリュームができ、再デプロイでデータが見えなくなる）。初回のデプロイの後に、名前付きのボリュームが `/data` に付いていることを確かめる |
 | Healthcheck | §5 |
 | Container naming | **Consistent name (no rolling updates)**（下の注意） |
-| Stop Grace Period | 30 秒（既定のまま） |
+| Stop Grace Period | 30 秒（既定がこの値であることを画面で確かめる。短ければ 30 秒にする） |
 | Environment Variables | §3。シークレットは Runtime only |
 
 注意:
@@ -235,7 +237,7 @@ Coolify の設定（Healthcheck を有効にする。画面の設定はコンテ
 | `keihi.db`（`-wal`・`-shm`） | すべての記録と監査ログ | 全損 |
 | `objects/` | 証憑の原本（画像・PDF。内容の sha256 が名前、読み取り専用） | 電子帳簿保存法の原本を失う |
 | `freee-token.json`・`gmail-token-*.json` | OAuth のトークン（0600） | 再認可が要る（§13） |
-| `snapshots/` | DB のスナップショット（従来の構成では `keihi-backup.timer` が毎日作る。**コンテナでは今は作られない**。§13 の 2） | バックアップの元を失う |
+| `snapshots/` | DB のスナップショット（従来の構成では、`keihi-backup.timer` を導入していれば毎日作る。**コンテナでは今は作られない**。§13 の 2） | バックアップの元を失う |
 | `drill/` | リストア訓練の作業場所 | 困らない |
 
 コンテナの中の他の場所（`/tmp` など）には、残す必要のあるものを書かない。
@@ -249,8 +251,8 @@ Coolify の設定（Healthcheck を有効にする。画面の設定はコンテ
   これと `objects/`・トークンのファイルを合わせて持ち出す。**動作中の `keihi.db` を `cp` しない**（WAL の中身が欠ける）。
 - **インポート**: コンテナを止めた状態で、`keihi.db`（`-wal`・`-shm` は置かない）・`objects/`・トークンを `/data` に置き、所有者を uid 1000、トークンを 0600 にする。
   起動すると、足りないマイグレーションが当たる。
-- **バックアップ**: **コンテナには、自動のバックアップがまだ無い。** 従来の構成では `keihi-backup.timer`（`tools/backup/run.ts`）が毎日
-  スナップショットを作って restic でオフサイトに送っているが、イメージには restic も `tools/` も入れていない（§13 の 2。**切り替えの前に決める**）。
+- **バックアップ**: **コンテナには、自動のバックアップがまだ無い。** 従来の構成では `keihi-backup.timer`（`tools/backup/run.ts`。導入している場合）が毎日
+  スナップショットを作って restic でオフサイトに送るが、イメージには restic も `tools/` も入れていない（§13 の 2。**切り替えの前に決める**）。
   基盤側でボリュームを取る場合は、動作中の `keihi.db` をそのまま写すのではなく、上のエクスポートで作ったファイルと `objects/`・トークンを対象にする。
 - **復旧**: インポートと同じ手順。確認は `/health/ready` が 200、画面の件数が合うこと。
 
@@ -413,3 +415,4 @@ GitHub Actions（`.github/workflows/container.yml`）が、PR と `main` への 
 | 4 | **Access のセッション切れ** | PWA を開いたままセッションが切れると、API の応答がログイン画面へのリダイレクトになり、画面にはエラーとして出る。開き直せば戻る。検知して再読み込みを促す表示は未実装 |
 | 5 | **停止時のジョブ** | 停止のとき、20 秒待っても終わらないジョブは打ち切られる（デプロイのたびに起きうる）。15 分後に自動で取り直されるが、その間は処理が止まって見える |
 | 6 | **実機での確認** | Coolify・Traefik・Cloudflare Tunnel・Access を通した確認（ログイン、manifest、Service Worker、iOS ショートカットのサービストークン、Loki への到達）は、基盤ができてから行う。Access の JWT の検証は、偽の鍵を使った単体テストでだけ確かめてある |
+| 7 | **Access の署名鍵のキャッシュ** | 鍵（JWKS）を取り直せない間は、最後に取れた鍵を期限なく使い続ける（Cloudflare 側の障害でログインできなくなるのを避けるため）。ローテーションで外れた鍵も、その間は通る。「最後の取得から 24 時間を過ぎたら通さない」などの上限は未実装 |

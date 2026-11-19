@@ -32,7 +32,7 @@ export type ChildLike = {
   on(ev: 'exit', fn: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
   on(ev: 'error', fn: (e: Error) => void): unknown;
 };
-export type WorkerSpawn = (cmd: string, args: string[], opts: { stdio: 'inherit' }) => ChildLike;
+export type WorkerSpawn = (cmd: string, args: string[], opts: { stdio: 'inherit'; env?: NodeJS.ProcessEnv }) => ChildLike;
 
 export type SetTimer = (fn: () => void, ms: number) => unknown;
 export type ClearTimer = (t: unknown) => void;
@@ -65,6 +65,9 @@ export function createWorkerControl(opts: {
   clearTimer?: ClearTimer;
   log?: ControlLog;
   workerEntry?: string;
+  // 子の worker に渡す引数と環境変数（web と同じ設定・DB を開かせる）。env を省くと親の環境をそのまま継ぐ。
+  workerArgs?: string[];
+  workerEnv?: NodeJS.ProcessEnv;
   bootDelayMs?: number;
   idleIntervalMs?: number;
   stopTimeoutMs?: number;
@@ -111,7 +114,7 @@ export function createWorkerControl(opts: {
     pending = false;
     let c: ChildLike;
     try {
-      c = spawn(process.execPath, [workerEntry], { stdio: 'inherit' });
+      c = spawn(process.execPath, [workerEntry, ...(opts.workerArgs ?? [])], opts.workerEnv ? { stdio: 'inherit', env: opts.workerEnv } : { stdio: 'inherit' });
     } catch (e) {
       log.error('worker: 起動できない', { err: e });
       schedulePeriodic(idleIntervalMs);
@@ -176,8 +179,13 @@ export function createWorkerControl(opts: {
   scheduleDaily(t0);
   if (!child) schedulePeriodic(bootDelayMs);
 
-  async function stop(): Promise<void> {
-    if (stopped) return exited ?? undefined;
+  // 2 回目以降の stop は、1 回目と同じ結果を待つ（子が終わりを知らせて来なくても、1 回目と同じ上限で返る）。
+  let stopping: Promise<void> | null = null;
+  function stop(): Promise<void> {
+    return (stopping ??= stopOnce());
+  }
+
+  async function stopOnce(): Promise<void> {
     stopped = true;
     pending = false;
     if (periodicTimer !== null) clearTimer(periodicTimer);

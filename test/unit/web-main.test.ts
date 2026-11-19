@@ -152,6 +152,31 @@ describe('startWeb と停止', () => {
       assert.equal(err.some((l) => l.includes('worker を止められない')), failing);
     }
   });
+  test('spawn 方式の worker には、web が使っている設定の場所と DB を渡す（--config-dir / --data-dir で起動しても同じ）', async () => {
+    const { configDir, dataDir } = await dirs(TOML);
+    const { log } = capture();
+    const calls: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
+    const { server, db, control } = startWeb(['--config-dir', configDir, '--data-dir', dataDir], {
+      env: { KEIHI_WORKER_MODE: 'spawn', KEIHI_MIGRATE_ON_START: '1', OTHER: 'x' },
+      log,
+      port: 0,
+      spawn: (_cmd, args, o) => {
+        calls.push({ args, env: o.env });
+        return { pid: 1, kill: () => true, on: () => undefined };
+      },
+    });
+    try {
+      await listening(server);
+      control.trigger();
+      assert.equal(calls.length, 1);
+      assert.match(calls[0].args[0], /src\/worker\/main\.ts$/);
+      assert.deepEqual(calls[0].args.slice(1), ['--db', path.join(dataDir, 'keihi.db')]);
+      assert.deepEqual(calls[0].env, { KEIHI_WORKER_MODE: 'spawn', KEIHI_MIGRATE_ON_START: '1', OTHER: 'x', KEIHI_CONFIG_DIR: configDir, KEIHI_DATA_DIR: dataDir });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
   test('[worker] mode = "spawn" なら control を作る（補填なし・子プロセスは起動しない）。stop で片付く', async () => {
     const { configDir, dataDir } = await dirs(TOML);
     const { log, out } = capture();

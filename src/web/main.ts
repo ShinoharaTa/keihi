@@ -17,7 +17,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import { ConfigError, loadConfig, WEB_HOST, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { migrate } from '../db/migrate.ts';
-import { createWorkerControl, type WorkerControl } from '../jobs/scheduler.ts';
+import { createWorkerControl, type WorkerControl, type WorkerSpawn } from '../jobs/scheduler.ts';
 import { addSecrets, log as processLog, setService, type Logger } from '../log.ts';
 import { createApp, requestLogEnabled } from './app.ts';
 import { createAuth } from './auth.ts';
@@ -40,7 +40,8 @@ export function checkBindAuth(web: Pick<Config['web'], 'host' | 'auth'>, env: No
   throw new ConfigError('ヘッダだけの認証は 127.0.0.1 でしか使えない。[web] auth = "cloudflare_access" にする');
 }
 
-export type StartOptions = { env?: NodeJS.ProcessEnv; log?: Logger; port?: number };
+// spawn はテスト用（子の worker の起動を差し替える）。
+export type StartOptions = { env?: NodeJS.ProcessEnv; log?: Logger; port?: number; spawn?: WorkerSpawn };
 
 // 設定を読み、DB を開き、listen を始める（listen の失敗は server の 'error' で来る）。port はテスト用の上書き（0 で空いているポート）。
 export function startWeb(argv: string[], opts: StartOptions = {}): { server: ServerType; db: Db; cfg: Config; control: WorkerControl } {
@@ -61,7 +62,16 @@ export function startWeb(argv: string[], opts: StartOptions = {}): { server: Ser
     const pwaDir = existsSync(PWA_DIST) ? PWA_DIST : undefined;
     if (!pwaDir) log.warn(`web: ${PWA_DIST} が無いので PWA は配信しない（npm run build）`);
     // spawn の方式は jobs 表を読む（daily の補填）ので、マイグレーションの後に作る。
-    const worker = (control = createWorkerControl({ mode: cfg.worker.mode, db, log, stopTimeoutMs: WORKER_STOP_TIMEOUT_MS }));
+    // 子の worker には、web が実際に使っている設定の場所と DB を渡す（--config-dir / --data-dir で起動しても同じものを開く）。
+    const worker = (control = createWorkerControl({
+      mode: cfg.worker.mode,
+      db,
+      log,
+      stopTimeoutMs: WORKER_STOP_TIMEOUT_MS,
+      spawn: opts.spawn,
+      workerArgs: ['--db', cfg.dbPath],
+      workerEnv: { ...env, KEIHI_CONFIG_DIR: cfg.configDir, KEIHI_DATA_DIR: cfg.dataDir },
+    }));
     if (cfg.worker.mode !== 'systemd') log.info(`web: worker の起動は ${cfg.worker.mode}`);
     const app = createApp({
       db,

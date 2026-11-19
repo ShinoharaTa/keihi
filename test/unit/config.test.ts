@@ -398,7 +398,7 @@ describe('環境変数（コンテナ用）', () => {
     assert.equal(c.freeeTokenPath, '/data/keihi/freee-token.json');
     assert.equal(load('', { DATABASE_URL: 'sqlite:/db/keihi.db' }).dbPath, '/db/keihi.db');
     assert.equal(load('', { DATABASE_URL: '' }).dbPath, '/data/keihi/keihi.db');
-    for (const url of ['postgres://user:hunter2-password@db.example.com/keihi', 'sqlite://relative.db', 'sqlite:relative.db', 'mysql:///x']) {
+    for (const url of ['postgres://user:hunter2-password@db.example.com/keihi', 'sqlite://relative.db', 'sqlite:relative.db', 'mysql:///x', 'sqlite:///db/keihi.db?mode=ro', 'sqlite:///db/keihi.db#x']) {
       const m = msgOf(() => load('', { DATABASE_URL: url }));
       assert.match(m, /DATABASE_URL は sqlite:\/\/\/絶対パス だけ/);
       assert.ok(!m.includes(url) && !m.includes('hunter2'), m);

@@ -2,7 +2,7 @@
 // - LOG_FORMAT=text（既定）: 今までと同じ見た目。メッセージだけを 1 行（fields は出さない。fields.err が Error なら次の行に stack）。
 // - LOG_FORMAT=json: 1 行 1 JSON（{"ts","level","service","env","msg",...fields}。fields.err は error・stack に展開）。
 // - info・debug は stdout、warn・error は stderr。LOG_LEVEL（debug / info / warn / error、既定 info）より下は出さない。
-// - マスキング（text・json の両方）: 秘密らしいキー名の値、addSecrets で登録した値、`Bearer <何か>` を *** にする。
+// - マスキング（text・json の両方）: 秘密らしいキー名の値、addSecrets で登録した値、`Bearer <何か>`、JWT の形の文字列を *** にする。
 export type Level = 'debug' | 'info' | 'warn' | 'error';
 export type Fields = Record<string, unknown>;
 export type Logger = {
@@ -38,7 +38,8 @@ export function addSecrets(values: (string | null | undefined)[]): void {
 function maskText(s: string): string {
   let out = s;
   for (const v of secretList) if (out.includes(v)) out = out.split(v).join('***');
-  return out.replace(/\bBearer\s+\S+/gi, 'Bearer ***');
+  // JWT の形（header.payload.signature、どれも base64url）は、登録していなくても隠す。
+  return out.replace(/\bBearer\s+\S+/gi, 'Bearer ***').replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '***');
 }
 
 function maskValue(v: unknown, depth: number): unknown {
