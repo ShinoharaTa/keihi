@@ -9,6 +9,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
+import { log as processLog, setService } from '../log.ts';
 import { enqueue } from './queue.ts';
 
 export const WORKER_UNIT = 'keihi-worker.service';
@@ -30,7 +31,7 @@ export function enqueueDaily(db: Db, now: Date = new Date()): { id: number; crea
 }
 
 export function main(argv: string[], deps: { spawn?: SpawnLike; log?: (s: string) => void } = {}): number {
-  const log = deps.log ?? ((s: string) => console.log(s));
+  const log = deps.log ?? ((s: string) => processLog.info(s));
   const { values, positionals } = parseArgs({ args: argv, options: { db: { type: 'string' } }, allowPositionals: true });
   if (positionals.length !== 1 || positionals[0] !== 'daily') {
     log('使い方: node src/jobs/trigger.ts daily [--db /path/to.db]');
@@ -48,5 +49,6 @@ export function main(argv: string[], deps: { spawn?: SpawnLike; log?: (s: string
 }
 
 if (import.meta.main) {
+  setService('keihi-daily');
   process.exitCode = main(process.argv.slice(2));
 }

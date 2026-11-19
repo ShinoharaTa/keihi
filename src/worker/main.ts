@@ -13,6 +13,7 @@ import { matchWindowsOf } from '../bank/match.ts';
 import { loadConfig, requireFreee, requireGmail, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers, type RunOptions } from '../jobs/worker.ts';
+import { addSecrets, log, setService } from '../log.ts';
 import { createGmailTokenProvider, gmailTokenPaths, type GmailToken } from '../mail/gmail/auth.ts';
 import { createGmailClient, type GmailClient } from '../mail/gmail/client.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
@@ -203,11 +204,12 @@ export function createStopSignal(proc: Pick<NodeJS.Process, 'on' | 'off'> = proc
 export async function main(argv: string[]): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { db: { type: 'string' } } });
   const cfg = loadConfig();
+  addSecrets(Object.values(cfg.secrets));
   const db = openDb(values.db ?? cfg.dbPath);
   const stop = createStopSignal();
   try {
-    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s), lingerMs: cfg.worker.lingerMs, shouldStop: stop.shouldStop, sleep: stop.sleep });
-    console.log(`worker: done=${s.done} failed=${s.failed}`);
+    const s = await runWith(createRuntime(cfg, db), { log: (s) => log.info(s), lingerMs: cfg.worker.lingerMs, shouldStop: stop.shouldStop, sleep: stop.sleep });
+    log.info(`worker: done=${s.done} failed=${s.failed}`);
     return 0;
   } finally {
     stop.dispose();
@@ -216,5 +218,6 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) {
+  setService('keihi-worker');
   process.exitCode = await main(process.argv.slice(2));
 }

@@ -1,46 +1,140 @@
 // web サーバーの起動（docs/mvp-plan.md T1-14、docs/mvp-plan-v0.1.md T1-14・D4、§4.4 keihi-web.service）。
-// - 127.0.0.1 の web.port（既定 8795）にだけバインドする。バインド先は設定にしない。
+// - 既定は 127.0.0.1 の web.port（既定 8795）にだけバインドする。0.0.0.0 は環境変数 KEIHI_BIND_HOST でだけ（コンテナ用）。
+//   ヘッダだけの認証（[web] auth = "tailscale"）のまま 127.0.0.1 以外にバインドしようとしたら起動しない（KEIHI_INSECURE_HEADER_AUTH=1 は手元の検証用）。
 // - mcp.port（既定 8796）は M7 まで予約のみ。ここでは何も開かない。
-// - マイグレーションはしない（先に `npm run migrate`）。データディレクトリも作らない。
+// - マイグレーションは既定ではしない（先に `npm run migrate`）。KEIHI_MIGRATE_ON_START=1 のときだけ listen の前に適用する。データディレクトリは作らない。
 // - PWA は pwa/dist/（`npm run build` の成果物）を配信する。無ければ API だけ動く。
+// - SIGTERM / SIGINT で新しい接続を止め、処理中のリクエストを待って（最大 SHUTDOWN_GRACE_MS）DB を閉じて終わる。
 //
 //   node src/web/main.ts [--config-dir DIR] [--data-dir DIR]
 import { existsSync } from 'node:fs';
+import type { Server } from 'node:http';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { serve } from '@hono/node-server';
-import { loadConfig, WEB_HOST } from '../config.ts';
-import { openDb } from '../db/index.ts';
+import { serve, type ServerType } from '@hono/node-server';
+import { ConfigError, loadConfig, WEB_HOST, type Config } from '../config.ts';
+import { openDb, type Db } from '../db/index.ts';
+import { migrate } from '../db/migrate.ts';
 import { triggerWorker } from '../jobs/trigger.ts';
-import { createApp } from './app.ts';
+import { addSecrets, log as processLog, setService, type Logger } from '../log.ts';
+import { createApp, requestLogEnabled } from './app.ts';
 import { createAuth } from './auth.ts';
 
 export const PWA_DIST = path.resolve(import.meta.dirname, '../../pwa/dist');
+// 停止のとき、処理中のリクエストを待つ上限。過ぎたら残りの接続を切る。
+export const SHUTDOWN_GRACE_MS = 8000;
+
+// 起動時の検査。ヘッダ（Tailscale-User-Login）だけの認証は、127.0.0.1 に来た接続を信用する前提（D7）なので、それ以外では使わない。
+export function checkBindAuth(web: Pick<Config['web'], 'host' | 'auth'>, env: NodeJS.ProcessEnv, log: Logger = processLog): void {
+  if (web.host === WEB_HOST || web.auth !== 'tailscale') return;
+  if (env.KEIHI_INSECURE_HEADER_AUTH === '1') {
+    log.warn(`web: KEIHI_INSECURE_HEADER_AUTH=1 なので、${web.host} にヘッダだけの認証のまま起動する（手元の検証用。公開しない）`);
+    return;
+  }
+  throw new ConfigError('ヘッダだけの認証は 127.0.0.1 でしか使えない。[web] auth = "cloudflare_access" にする');
+}
+
+export type StartOptions = { env?: NodeJS.ProcessEnv; log?: Logger; port?: number };
+
+// 設定を読み、DB を開き、listen を始める（listen の失敗は server の 'error' で来る）。port はテスト用の上書き（0 で空いているポート）。
+export function startWeb(argv: string[], opts: StartOptions = {}): { server: ServerType; db: Db; cfg: Config } {
+  const env = opts.env ?? process.env;
+  const log = opts.log ?? processLog;
+  const { values } = parseArgs({ args: argv, options: { 'config-dir': { type: 'string' }, 'data-dir': { type: 'string' } } });
+  const cfg = loadConfig({ configDir: values['config-dir'], dataDir: values['data-dir'], env });
+  addSecrets(Object.values(cfg.secrets));
+  checkBindAuth(cfg.web, env, log);
+  if (cfg.web.allowedUsers.length === 0) log.warn('web: [web] allowed_users が空なので、/healthz 以外はすべて 403 になる');
+  const db = openDb(cfg.dbPath);
+  try {
+    if (env.KEIHI_MIGRATE_ON_START === '1') {
+      const done = migrate(db);
+      log.info(done.length ? `web: マイグレーションを適用: ${done.join(', ')}` : 'web: 適用するマイグレーションは無い');
+    }
+    const pwaDir = existsSync(PWA_DIST) ? PWA_DIST : undefined;
+    if (!pwaDir) log.warn(`web: ${PWA_DIST} が無いので PWA は配信しない（npm run build）`);
+    const app = createApp({
+      db,
+      objectsDir: cfg.objectsDir,
+      config: cfg,
+      auth: createAuth(cfg.web),
+      triggerWorker: () => triggerWorker(),
+      pwaDir,
+      requestLog: requestLogEnabled(env),
+      log,
+    });
+    const server = serve({ fetch: app.fetch, hostname: cfg.web.host, port: opts.port ?? cfg.web.port }, (info) => {
+      log.info(`web: listening on http://${info.address}:${info.port}`);
+    });
+    return { server, db, cfg };
+  } catch (e) {
+    db.close();
+    throw e;
+  }
+}
+
+// SIGTERM / SIGINT の処理（2 回目以降は無視）。close の後の片付けは afterClose に足す。
+export function createShutdown(
+  server: ServerType,
+  db: Db,
+  opts: { log?: Logger; exit?: (code: number) => void; graceMs?: number } = {},
+): () => void {
+  const log = opts.log ?? processLog;
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const http = server as Server;
+  let stopping = false;
+  const afterClose = async () => {
+    try {
+      db.close();
+    } finally {
+      exit(0);
+    }
+  };
+  return () => {
+    if (stopping) return;
+    stopping = true;
+    log.info('web: shutting down');
+    const timer = setTimeout(() => http.closeAllConnections(), opts.graceMs ?? SHUTDOWN_GRACE_MS);
+    timer.unref();
+    http.close(() => {
+      clearTimeout(timer);
+      void afterClose();
+    });
+    http.closeIdleConnections();
+  };
+}
 
 export function main(argv: string[]): void {
-  const { values } = parseArgs({ args: argv, options: { 'config-dir': { type: 'string' }, 'data-dir': { type: 'string' } } });
-  const cfg = loadConfig({ configDir: values['config-dir'], dataDir: values['data-dir'] });
-  if (cfg.web.allowedUsers.length === 0) console.warn('web: [web] allowed_users が空なので、/healthz 以外はすべて 403 になる');
-  const db = openDb(cfg.dbPath);
-  const pwaDir = existsSync(PWA_DIST) ? PWA_DIST : undefined;
-  if (!pwaDir) console.warn(`web: ${PWA_DIST} が無いので PWA は配信しない（npm run build）`);
-  const app = createApp({
-    db,
-    objectsDir: cfg.objectsDir,
-    config: cfg,
-    auth: createAuth(cfg.web),
-    triggerWorker: () => triggerWorker(),
-    pwaDir,
+  setService('keihi-web');
+  const log = processLog;
+  process.on('uncaughtException', (err) => {
+    log.error('web: uncaught exception', { err });
+    process.exit(1);
   });
-  const server = serve({ fetch: app.fetch, hostname: WEB_HOST, port: cfg.web.port }, (info) => {
-    console.log(`web: listening on http://${info.address}:${info.port}`);
+  process.on('unhandledRejection', (err) => {
+    log.error('web: unhandled rejection', { err });
+    process.exit(1);
   });
-  const stop = () => {
-    server.close(() => {
+  let started: ReturnType<typeof startWeb>;
+  try {
+    started = startWeb(argv);
+  } catch (e) {
+    if (e instanceof ConfigError) log.error(`web: 起動しない: ${e.message}`);
+    else log.error('web: 起動に失敗', { err: e });
+    process.exitCode = 1;
+    return;
+  }
+  const { server, db } = started;
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    log.error(`web: listen に失敗（${err.code ?? err.message}）`, { err });
+    try {
       db.close();
-      process.exit(0);
-    });
-  };
+    } catch {
+      // 閉じ済み
+    }
+    process.exitCode = 1;
+  });
+  const stop = createShutdown(server, db);
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

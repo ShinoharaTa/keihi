@@ -17,6 +17,7 @@ import { GeminiError, type Gemini, type GenerateInput } from '../ai/gemini/clien
 import type { Schema } from '../ai/gemini/schema.ts';
 import { sanitizeText, validateSchema } from '../ai/validate.ts';
 import type { Db } from '../db/index.ts';
+import { log as processLog } from '../log.ts';
 import { GmailApiError, decodeBase64Url, type GmailClient, type GmailPart } from './gmail/client.ts';
 
 export const MAX_BODY_CHARS = 20_000;
@@ -178,7 +179,7 @@ function markExtracted(db: Db, mailMessageId: string, accountId: string, hint: M
 
 // 1 通の手がかりを抜き出して記録する。投げない（失敗は 'failed' を返し、hint_extracted_at は空のまま）。
 export async function extractMailHint(db: Db, deps: HintDeps, mailMessageId: string, body: string | null, now: () => Date): Promise<HintOutcome> {
-  const log = deps.log ?? ((s: string) => console.error(s));
+  const log = deps.log ?? ((s: string) => processLog.warn(s));
   const cur = db.prepare('SELECT account_id, state, hint_extracted_at FROM mail_messages WHERE id = ?').get(mailMessageId) as
     | { account_id: string; state: string; hint_extracted_at: string | null }
     | undefined;
@@ -225,7 +226,7 @@ export async function retryPendingHints(db: Db, deps: HintDeps, client: GmailCli
     deps.gemini();
   } catch (e) {
     // 設定が無い（ConfigError）。それ以外でも作れなければ取り込みを止めずに飛ばす。
-    (deps.log ?? ((s: string) => console.error(s)))(`メールの手がかりの取り直しを飛ばす（Gemini を使えない: ${e instanceof ConfigError ? 'config_error' : errorSummary(e)}）`);
+    (deps.log ?? ((s: string) => processLog.warn(s)))(`メールの手がかりの取り直しを飛ばす（Gemini を使えない: ${e instanceof ConfigError ? 'config_error' : errorSummary(e)}）`);
     return 0;
   }
   const pending = db
