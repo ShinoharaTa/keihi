@@ -8,6 +8,13 @@
 import type { Context, MiddlewareHandler } from 'hono';
 import type { Config } from '../config.ts';
 
+// 認証を通った利用者（監査ログの user）。ルートは userOf(c) で読む。
+declare module 'hono' {
+  interface ContextVariableMap {
+    user: string;
+  }
+}
+
 export const USER_HEADER = 'Tailscale-User-Login';
 export const HEALTHZ_PATH = '/healthz';
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -37,6 +44,12 @@ export function createAuth(web: Pick<Config['web'], 'allowedUsers' | 'allowedHos
     const user = c.req.header(USER_HEADER);
     if (user === undefined || user === '') return c.json({ reason: 'unauthenticated' }, 401);
     if (!users.has(user)) return c.json({ reason: 'forbidden' }, 403);
+    c.set('user', user);
     return next();
   };
+}
+
+// ルートが監査ログに書く利用者。ヘッダへのフォールバックは認証を素通しにしているテスト用。
+export function userOf(c: Context): string | null {
+  return c.get('user') ?? c.req.header(USER_HEADER) ?? null;
 }
