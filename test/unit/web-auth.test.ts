@@ -219,12 +219,14 @@ describe('設定（[web]・[mcp]）', () => {
 });
 
 describe('main.ts', () => {
-  test('127.0.0.1 にだけバインドする（0.0.0.0 を書かない）', async () => {
+  test('バインド先は cfg.web.host だけ（既定 127.0.0.1。0.0.0.0 は KEIHI_BIND_HOST でだけ。ヘッダの認証では起動時に止める）', async () => {
     const src = await readFile('src/web/main.ts', 'utf8');
-    assert.doesNotMatch(src, /0\.0\.0\.0|'::'|hostname:\s*['"]/);
-    assert.match(src, /hostname: WEB_HOST/);
+    assert.doesNotMatch(src, /'::'|hostname:\s*['"]/);
+    assert.match(src, /hostname: cfg\.web\.host/);
+    assert.match(src, /checkBindAuth\(cfg\.web, env, log\);[\s\S]*openDb\(/);
     const cfg = await readFile('src/config.ts', 'utf8');
     assert.match(cfg, /export const WEB_HOST = '127\.0\.0\.1';/);
+    assert.match(cfg, /const bindHost = env\.KEIHI_BIND_HOST \|\| WEB_HOST;/);
   });
 });
 
