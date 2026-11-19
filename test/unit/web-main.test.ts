@@ -119,4 +119,55 @@ describe('startWeb と停止', () => {
       db.close();
     }
   });
+  test('停止は worker の stop を待ってから DB を閉じる（stop が失敗しても 0 で終わる）', async () => {
+    for (const failing of [false, true]) {
+      const { configDir, dataDir } = await dirs(TOML);
+      const { log, err } = capture();
+      const { server, db } = startWeb([], { env: { KEIHI_CONFIG_DIR: configDir, KEIHI_DATA_DIR: dataDir, KEIHI_MIGRATE_ON_START: '1' }, log, port: 0 });
+      await listening(server);
+      const events: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const control = {
+        trigger: () => {},
+        stop: async () => {
+          events.push('stop');
+          await gate;
+          // この時点ではまだ DB は開いている
+          db.prepare('SELECT 1').get();
+          events.push('stopped');
+          if (failing) throw new Error('boom');
+        },
+      };
+      const exited = new Promise<number>((resolve) => {
+        createShutdown(server, db, { log, control, exit: (c) => resolve(c) })();
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      assert.deepEqual(events, ['stop']);
+      assert.equal(server.listening, false);
+      release();
+      assert.equal(await exited, 0);
+      assert.deepEqual(events, ['stop', 'stopped']);
+      assert.throws(() => db.prepare('SELECT 1').get());
+      assert.equal(err.some((l) => l.includes('worker を止められない')), failing);
+    }
+  });
+  test('[worker] mode = "spawn" なら control を作る（補填なし・子プロセスは起動しない）。stop で片付く', async () => {
+    const { configDir, dataDir } = await dirs(TOML);
+    const { log, out } = capture();
+    const { server, db, cfg, control } = startWeb([], {
+      env: { KEIHI_CONFIG_DIR: configDir, KEIHI_DATA_DIR: dataDir, KEIHI_MIGRATE_ON_START: '1', KEIHI_WORKER_MODE: 'spawn' },
+      log,
+      port: 0,
+    });
+    try {
+      await listening(server);
+      assert.equal(cfg.worker.mode, 'spawn');
+      assert.ok(out.includes('web: worker の起動は spawn'));
+    } finally {
+      await control.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
 });

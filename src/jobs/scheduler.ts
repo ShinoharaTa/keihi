@@ -14,6 +14,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import path from 'node:path';
 import type { Db } from '../db/index.ts';
+import { log as processLog } from '../log.ts';
 import { enqueueDaily, triggerWorker, type SpawnLike } from './trigger.ts';
 
 export type WorkerMode = 'systemd' | 'spawn' | 'none';
@@ -39,6 +40,8 @@ export type ClearTimer = (t: unknown) => void;
 export const DAILY_UTC_HOUR = 18; // JST 03:30
 export const DAILY_UTC_MINUTE = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// SIGKILL を送ってから終了の通知を待つ上限。
+const KILL_WAIT_MS = 2_000;
 
 // now 以前で最も新しい daily の予定時刻（ちょうど 18:30:00 UTC なら now そのもの）。
 export function latestDailyAt(now: Date): Date {
@@ -50,12 +53,6 @@ export function latestDailyAt(now: Date): Date {
 export function nextDailyAt(now: Date): Date {
   return new Date(latestDailyAt(now).getTime() + DAY_MS);
 }
-
-const consoleLog: ControlLog = {
-  info: (msg) => console.log(msg),
-  warn: (msg) => console.error(msg),
-  error: (msg) => console.error(msg),
-};
 
 export function createWorkerControl(opts: {
   mode: WorkerMode;
@@ -83,7 +80,7 @@ export function createWorkerControl(opts: {
   const now = opts.now ?? (() => new Date());
   const setTimer: SetTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer: ClearTimer = opts.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
-  const log = opts.log ?? consoleLog;
+  const log = opts.log ?? processLog;
   const workerEntry = opts.workerEntry ?? path.resolve(import.meta.dirname, '../worker/main.ts');
   const bootDelayMs = opts.bootDelayMs ?? 60_000;
   const idleIntervalMs = opts.idleIntervalMs ?? 120_000;
@@ -190,7 +187,7 @@ export function createWorkerControl(opts: {
     const wait = exited;
     if (!c || !wait) return;
     c.kill('SIGTERM');
-    // SIGKILL の後も終わりを知らせて来なければ、もう stopTimeoutMs だけ待って諦める（web の停止を止めない）。
+    // SIGKILL の後も終わりを知らせて来なければ、少しだけ（KILL_WAIT_MS まで）待って諦める（web の停止を止めない）。
     const timeout = (ms: number) =>
       new Promise<'timeout'>((r) => {
         arm(() => r('timeout'), ms);
@@ -198,7 +195,7 @@ export function createWorkerControl(opts: {
     if ((await Promise.race([wait.then(() => 'exited' as const), timeout(stopTimeoutMs)])) === 'exited') return;
     log.warn('worker: SIGTERM で止まらないので SIGKILL を送る');
     c.kill('SIGKILL');
-    await Promise.race([wait, timeout(stopTimeoutMs)]);
+    await Promise.race([wait, timeout(Math.min(stopTimeoutMs, KILL_WAIT_MS))]);
   }
 
   return { trigger, stop };
