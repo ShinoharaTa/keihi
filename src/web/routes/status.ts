@@ -20,7 +20,7 @@ import { REAUTH_KEY } from '../../providers/freee/state.ts';
 import { DISABLED_MAIL } from './mail.ts';
 import type { AppDeps } from '../app.ts';
 import { retainUntil } from '../../retention.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 export function statusRoutes(deps: Pick<AppDeps, 'db' | 'config'>): Hono {
   const r = new Hono();
@@ -48,7 +48,7 @@ export function statusRoutes(deps: Pick<AppDeps, 'db' | 'config'>): Hono {
     const retention = { earliest_retain_until: earliest === null ? null : retainUntil({ received_on: earliest }, deps.config), documents: total };
     return c.json({
       ok: true,
-      user: c.req.header(USER_HEADER) ?? null,
+      user: userOf(c),
       documents: { total, needs_attention: needsAttention },
       jobs,
       backup,

@@ -20,6 +20,7 @@
 import { appendAudit } from '../audit.ts';
 import { DEFAULT_MATCH_CARD_DATE_WINDOW_DAYS, DEFAULT_MATCH_DATE_WINDOW_DAYS } from '../config.ts';
 import { tx, type Db } from '../db/index.ts';
+import { log } from '../log.ts';
 import { normalizeVendor } from '../vendors/normalize.ts';
 import { resolveTagsBulk, type ResolvedTag } from './tags.ts';
 import { excludedFromCashflow } from './transfers.ts';
@@ -395,7 +396,7 @@ export function runMatchingSafe(
     return { created: runMatching(db, now, opts).length };
   } catch (e) {
     const error = (e instanceof Error ? e.message : String(e)).slice(0, 500);
-    (opts.log ?? ((s: string) => console.error(s)))(`照合に失敗: ${error}`);
+    (opts.log ?? ((s: string) => log.warn(s)))(`照合に失敗: ${error}`);
     try {
       appendAudit(db, { actor: 'system', action: 'txn_match.failed', entity: 'bank_txn', payload: { error } }, now);
     } catch {

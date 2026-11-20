@@ -13,7 +13,7 @@ import { Hono, type Context } from 'hono';
 import { markPaperDiscarded } from '../../deals/paper.ts';
 import { ATTENTION_ACTIONS, AttentionError, listAttention, resolveAttention, type Attention, type AttentionAction } from '../../review/attention.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 const NOTE_MAX = 500;
 
@@ -50,7 +50,7 @@ export function attentionRoutes(deps: Pick<AppDeps, 'db' | 'now' | 'triggerWorke
     const action = body.action ?? 'retry';
     if (!(ATTENTION_ACTIONS as readonly unknown[]).includes(action)) return c.json({ error: 'invalid_action' }, 400);
     try {
-      const res = resolveAttention(deps.db, documentId, { action: action as AttentionAction, note: note as string | null, user: c.req.header(USER_HEADER) ?? null, now: now() });
+      const res = resolveAttention(deps.db, documentId, { action: action as AttentionAction, note: note as string | null, user: userOf(c), now: now() });
       if (res.action === 'retry') deps.triggerWorker();
       return c.json({ ...extra, ...res });
     } catch (e) {
@@ -72,7 +72,7 @@ export function attentionRoutes(deps: Pick<AppDeps, 'db' | 'now' | 'triggerWorke
     const body = await jsonBody(c.req.raw);
     if (!body || body.status !== 'discarded') return c.json({ error: 'invalid_status' }, 400);
     const id = c.req.param('id');
-    const res = markPaperDiscarded(deps.db, id, { actor: 'user', user: c.req.header(USER_HEADER) ?? null }, now());
+    const res = markPaperDiscarded(deps.db, id, { actor: 'user', user: userOf(c) }, now());
     if (res.ok) return c.json({ id, paper_status: 'discarded' });
     if (res.status === null) return c.json({ error: 'not_found' }, 404);
     return c.json({ error: 'not_discard_ok', paper_status: res.status, reasons: res.reasons }, 409);

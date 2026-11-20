@@ -48,7 +48,7 @@ import {
 import type { RuleMatch } from '../../bank/tagRepo.ts';
 import type { Tag } from '../../bank/repo.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   const text = await req.text();
@@ -86,7 +86,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
         category: (body.category ?? null) as string | null,
         actor: 'user',
         source: 'human',
-        user: c.req.header(USER_HEADER) ?? null,
+        user: userOf(c),
         now: now(),
       });
       return c.json({
@@ -115,7 +115,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
           tag: 'tag' in body ? (body.tag as Tag) : undefined,
           category: 'category' in body ? (body.category as string | null) : undefined,
           actor: 'user',
-          user: c.req.header(USER_HEADER) ?? null,
+          user: userOf(c),
           now: now(),
         }),
       );
@@ -126,7 +126,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
 
   r.post('/bank_txns/bulk_tag/:batch_id/revert', (c) => {
     try {
-      return c.json(revertTagBatch(deps.db, c.req.param('batch_id'), { actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() }));
+      return c.json(revertTagBatch(deps.db, c.req.param('batch_id'), { actor: 'user', user: userOf(c), now: now() }));
     } catch (e) {
       return tagError(c, e);
     }
@@ -147,7 +147,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
         tag: body.tag as Tag,
         category: (body.category ?? null) as string | null,
         actor: 'user',
-        user: c.req.header(USER_HEADER) ?? null,
+        user: userOf(c),
         now: now(),
       });
       return c.json(rule, 201);
@@ -158,7 +158,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
 
   r.delete('/tag_rules/:id', (c) => {
     const id = c.req.param('id');
-    const ok = deleteRule(deps.db, id, { actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() });
+    const ok = deleteRule(deps.db, id, { actor: 'user', user: userOf(c), now: now() });
     return ok ? c.json({ id, deleted: true }) : c.json({ error: 'not_found' }, 404);
   });
 
@@ -173,7 +173,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     if (Object.keys(body).some((k) => !CATEGORY_CREATE_FIELDS.has(k))) return c.json({ error: 'invalid_field' }, 400);
     try {
-      const row = createCategory(deps.db, { label: body.label, color: body.color, actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() });
+      const row = createCategory(deps.db, { label: body.label, color: body.color, actor: 'user', user: userOf(c), now: now() });
       return c.json({ item: toView(row) }, 201);
     } catch (e) {
       return tagError(c, e);
@@ -185,7 +185,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     if (Object.keys(body).some((k) => !CATEGORY_PATCH_FIELDS.has(k))) return c.json({ error: 'invalid_field' }, 400);
     try {
-      const row = updateCategory(deps.db, c.req.param('id'), body, { actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() });
+      const row = updateCategory(deps.db, c.req.param('id'), body, { actor: 'user', user: userOf(c), now: now() });
       return c.json({ item: toView(row) });
     } catch (e) {
       return tagError(c, e);
@@ -194,7 +194,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
 
   r.post('/categories/:id/archive', (c) => {
     try {
-      return c.json({ item: toView(archiveCategory(deps.db, c.req.param('id'), { actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() })) });
+      return c.json({ item: toView(archiveCategory(deps.db, c.req.param('id'), { actor: 'user', user: userOf(c), now: now() })) });
     } catch (e) {
       return tagError(c, e);
     }
@@ -202,7 +202,7 @@ export function tagRoutes(deps: Pick<AppDeps, 'db' | 'now'>): Hono {
 
   r.post('/categories/:id/unarchive', (c) => {
     try {
-      return c.json({ item: toView(unarchiveCategory(deps.db, c.req.param('id'), { actor: 'user', user: c.req.header(USER_HEADER) ?? null, now: now() })) });
+      return c.json({ item: toView(unarchiveCategory(deps.db, c.req.param('id'), { actor: 'user', user: userOf(c), now: now() })) });
     } catch (e) {
       return tagError(c, e);
     }

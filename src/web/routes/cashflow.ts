@@ -36,7 +36,7 @@ import { CANDIDATE_STATES, listRecurrenceCandidateViews, type CandidateState } f
 import { dismissLargeExpense, listLargeExpenses, scheduleLargeExpense, type ScheduleLargeInput } from '../../cashflow/large.ts';
 import { cashflowTaxWarnings } from '../../cashflow/tax/sync.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 export const UPCOMING_DEFAULT_DAYS = 30;
 export const UPCOMING_MAX_DAYS = 1096;
@@ -57,7 +57,7 @@ export type CashflowRouteDeps = Pick<AppDeps, 'db' | 'now'> & { config: Pick<Con
 export function cashflowRoutes(deps: CashflowRouteDeps): Hono {
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
-  const by = (c: Context) => ({ actor: 'user', user: c.req.header(USER_HEADER) ?? null });
+  const by = (c: Context) => ({ actor: 'user', user: userOf(c) });
   const fail = (c: Context, e: unknown) => {
     if (e instanceof ScheduleError) return c.json({ error: e.code }, e.status);
     throw e;

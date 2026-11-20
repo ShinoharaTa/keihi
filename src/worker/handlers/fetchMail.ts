@@ -13,6 +13,7 @@ import { appendAudit } from '../../audit.ts';
 import type { Gemini } from '../../ai/gemini/client.ts';
 import { ConfigError, type Config } from '../../config.ts';
 import type { Handler } from '../../jobs/worker.ts';
+import { log as processLog } from '../../log.ts';
 import { GmailAuthError, GmailRetryableError, isGmailReauthRequired, setGmailReauthRequired } from '../../mail/gmail/auth.ts';
 import { GmailApiError, type GmailClient } from '../../mail/gmail/client.ts';
 import { fetchMailForAccount, lastInternalAt } from '../../mail/gmail/fetch.ts';
@@ -51,7 +52,7 @@ export function createFetchMailHandler(getDeps: () => FetchMailDeps): Handler {
   return async (job, ctx) => {
     const { db } = ctx;
     const deps = getDeps();
-    const log = deps.log ?? ((s: string) => console.error(s));
+    const log = deps.log ?? ((s: string) => processLog.warn(s));
     const accountId = job.ref_id ?? '';
     const account = deps.mail.accounts.find((a) => a.id === accountId);
     if (!deps.mail.enabled || !account) {

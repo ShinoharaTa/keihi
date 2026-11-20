@@ -18,6 +18,7 @@ import { detectTransfers } from '../../bank/transfers.ts';
 import { addDays, todayInTokyo } from '../../calendar/businessDays.ts';
 import type { Db } from '../../db/index.ts';
 import { DeferJob, type Handler } from '../../jobs/worker.ts';
+import { log as processLog } from '../../log.ts';
 import { isReauthRequired } from '../../providers/freee/state.ts';
 import { ProviderError } from '../../providers/types.ts';
 import { REAUTH_PENDING, REAUTH_RETRY_MS, reauthSince } from './uploadReceipt.ts';
@@ -42,7 +43,7 @@ export function detectTransfersAfterSync(
   r: SyncBankResult,
   windowDays: number,
   now: Date,
-  log: (s: string) => void = (s) => console.error(s),
+  log: (s: string) => void = (s) => processLog.warn(s),
 ): DetectAfterSyncResult | null {
   if (r.accounts.reduce((n, a) => n + a.fetched, 0) === 0) return null;
   try {

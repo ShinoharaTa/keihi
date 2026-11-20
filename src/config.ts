@@ -3,6 +3,9 @@
 // - 形式は PoC（tools/poc/*.ts）と互換: [gemini] model / paid_tier_confirmed、[freee] poc_company_id / prod_company_id、
 //   secrets.env の GEMINI_API_KEY / FREEE_CLIENT_ID / FREEE_CLIENT_SECRET。
 // - 知らないセクション・キーはエラーにする（綴り違いで安全側の設定が効かないのを防ぐ）。
+// - コンテナ用に環境変数でも渡せる（KEIHI_CONFIG_DIR・KEIHI_DATA_DIR・DATABASE_URL・KEIHI_BIND_HOST、
+//   設定キーの上書き KEIHI_<SECTION>_<KEY>）。KEIHI_ で始まる知らない名前もエラーにする。
+//   secrets.env が無いときだけ、シークレットを環境変数から読む。
 // - ディレクトリは作らない。シークレットの値はエラーメッセージに含めない。dumpConfig はシークレットを *** にする。
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -19,7 +22,8 @@ export const DEFAULT_MEDIA_RESOLUTION = 'medium';
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 // T1-6: 取り込みのサイズ上限の初期値（freee は 64MB。mvp-plan.md T1-6 の変更）。
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-// T1-14（D4）: web は 127.0.0.1 の固定ポート。バインド先は設定にしない（0.0.0.0 にできないようにする）。
+// T1-14（D4）: web は既定で 127.0.0.1 にだけバインドする。config.toml には置かない。
+// 0.0.0.0 は環境変数 KEIHI_BIND_HOST でだけ指定できる（コンテナ用。[web] auth = "cloudflare_access" が要る。src/web/main.ts）。
 export const WEB_HOST = '127.0.0.1';
 export const DEFAULT_WEB_PORT = 8795;
 // M7（keihi MCP）用に予約するだけ。M7 までは何も開かない。
@@ -78,6 +82,11 @@ export type RetentionStart = 'next_year_0316';
 export type MailProvider = 'gmail_api';
 // since: 取り始める日。null なら初回実行日の 30 日前（src/mail/fetch.ts）。
 export type MailAccount = { id: string; label: string; query: string; since: string | null };
+// web の認証の方式（src/web/auth.ts）。tailscale = Tailscale-User-Login のヘッダ、cloudflare_access = Cf-Access-Jwt-Assertion の JWT。
+export type WebAuth = 'tailscale' | 'cloudflare_access';
+export type BindHost = '127.0.0.1' | '0.0.0.0';
+// worker の起動のしかた（src/jobs/scheduler.ts）。systemd = systemctl --user と timer、spawn = web の子プロセス（コンテナ用）、none = 起動しない。
+export type WorkerMode = 'systemd' | 'spawn' | 'none';
 
 export type Secrets = {
   geminiApiKey: string | null;
@@ -105,7 +114,17 @@ export type Config = {
   deadline: { countFrom: CountFrom };
   // T1-14。allowedUsers は Tailscale-User-Login の許可リスト（空なら誰も通さない）。
   // allowedHosts は Host ヘッダの許可リスト（`127.0.0.1:<port>` は常に含む。tailscale serve のホスト名は設定で足す）。
-  web: { port: number; allowedUsers: string[]; allowedHosts: string[] };
+  // host はバインド先（KEIHI_BIND_HOST）。access* は auth = cloudflare_access のときに使う（accessServiceTokens はサービストークンの common_name）。
+  web: {
+    port: number;
+    host: BindHost;
+    allowedUsers: string[];
+    allowedHosts: string[];
+    auth: WebAuth;
+    accessTeamDomain: string | null;
+    accessAud: string | null;
+    accessServiceTokens: string[];
+  };
   mcp: { port: number };
   // repository は restic の保存先（無ければ secrets.env の RESTIC_REPOSITORY。src/backup/settings.ts）。
   // drillDir はリストア訓練の復元先の親ディレクトリ（既定 <data_dir>/drill）。
@@ -120,7 +139,8 @@ export type Config = {
   retention: { years: number; extraYears: number; start: RetentionStart };
   // lingerMs: キューが空と判断した後に待ってもう一度 claim する時間（start --no-block が動作中の oneshot に畳まれる対策）。
   // reauthWaitDays: 再認可待ちのアップロードを待つ上限の日数（src/worker/handlers/uploadReceipt.ts）。
-  worker: { lingerMs: number; reauthWaitDays: number };
+  // mode: worker の起動のしかた（既定 systemd）。
+  worker: { lingerMs: number; reauthWaitDays: number; mode: WorkerMode };
   // 日次照合（src/worker/handlers/reconcile.ts → src/deals/reconcile.ts）。
   reconcile: { verifiedLookbackDays: number; maxListPages: number };
   // 明細（R-A）。backfillFrom: 過去の明細を取り始める日（YYYY-MM-DD）。
@@ -135,7 +155,8 @@ export type Config = {
   secrets: Secrets;
 };
 
-export type LoadOptions = { configDir?: string; dataDir?: string };
+// env の既定は process.env（テストは {} を渡して環境に左右されないようにする）。
+export type LoadOptions = { configDir?: string; dataDir?: string; env?: NodeJS.ProcessEnv };
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -161,24 +182,43 @@ export function parseEnv(src: string): Record<string, string> {
 
 type Table = Record<string, unknown>;
 
+// 設定キーと、環境変数で上書きするときの値の型（KEIHI_<SECTION>_<KEY>。推測しない）。
+// strings はカンマ区切り（前後の空白を取り、空要素は捨てる）、toml は TOML のインライン配列。
+type EnvType = 'string' | 'int' | 'bool' | 'strings' | 'toml';
+const KEY_TYPES: Record<string, Record<string, EnvType>> = {
+  gemini: { model: 'string', paid_tier_confirmed: 'bool', thinking_level: 'string', media_resolution: 'string', max_output_tokens: 'int' },
+  freee: { poc_company_id: 'int', prod_company_id: 'int', target: 'string', day_boundary: 'string' },
+  provider: { kind: 'string' },
+  ingest: { max_upload_bytes: 'int' },
+  calendar: { deadline_mode: 'string', year_end_holidays: 'bool' },
+  deadline: { count_from: 'string' },
+  web: {
+    port: 'int',
+    allowed_users: 'strings',
+    allowed_hosts: 'strings',
+    auth: 'string',
+    access_team_domain: 'string',
+    access_aud: 'string',
+    access_service_tokens: 'strings',
+  },
+  mcp: { port: 'int' },
+  backup: { repository: 'string', keep_snapshots: 'int', check_interval_days: 'int', read_data_subset: 'string', drill_dir: 'string', remote_verify_mode: 'string' },
+  retention: { years: 'int', extra_years: 'int', start: 'string' },
+  worker: { linger_ms: 'int', reauth_wait_days: 'int', mode: 'string' },
+  reconcile: { verified_lookback_days: 'int', max_list_pages: 'int' },
+  bank: { backfill_from: 'string', dedup_date_window_days: 'int', transfer_window_days: 'int', match_date_window_days: 'int', match_card_date_window_days: 'int' },
+  cashflow: { unplanned_lookback_months: 'int', reserve_months: 'int', include_unplanned_income: 'bool' },
+  mail: { enabled: 'bool', provider: 'string', max_messages_per_run: 'int', extract_hints: 'bool', accounts: 'toml' },
+};
+// [paths] は環境変数では上書きしない（KEIHI_DATA_DIR を使う）。
 const KNOWN: Record<string, string[]> = {
   paths: ['data_dir'],
-  gemini: ['model', 'paid_tier_confirmed', 'thinking_level', 'media_resolution', 'max_output_tokens'],
-  freee: ['poc_company_id', 'prod_company_id', 'target', 'day_boundary'],
-  provider: ['kind'],
-  ingest: ['max_upload_bytes'],
-  calendar: ['deadline_mode', 'year_end_holidays'],
-  deadline: ['count_from'],
-  web: ['port', 'allowed_users', 'allowed_hosts'],
-  mcp: ['port'],
-  backup: ['repository', 'keep_snapshots', 'check_interval_days', 'read_data_subset', 'drill_dir', 'remote_verify_mode'],
-  retention: ['years', 'extra_years', 'start'],
-  worker: ['linger_ms', 'reauth_wait_days'],
-  reconcile: ['verified_lookback_days', 'max_list_pages'],
-  bank: ['backfill_from', 'dedup_date_window_days', 'transfer_window_days', 'match_date_window_days', 'match_card_date_window_days'],
-  cashflow: ['unplanned_lookback_months', 'reserve_months', 'include_unplanned_income'],
-  mail: ['enabled', 'provider', 'max_messages_per_run', 'extract_hints', 'accounts'],
+  ...Object.fromEntries(Object.entries(KEY_TYPES).map(([sec, keys]) => [sec, Object.keys(keys)])),
 };
+// 設定キーの上書き以外で知っている KEIHI_ の名前。
+const OTHER_ENV = ['KEIHI_CONFIG_DIR', 'KEIHI_DATA_DIR', 'KEIHI_BIND_HOST', 'KEIHI_INSECURE_HEADER_AUTH', 'KEIHI_MIGRATE_ON_START'];
+const SECRET_ENV = ['GEMINI_API_KEY', 'FREEE_CLIENT_ID', 'FREEE_CLIENT_SECRET', 'GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET'] as const;
+const ACCESS_TEAM_DOMAIN_RE = /^[a-z0-9-]+\.cloudflareaccess\.com$/;
 const MAIL_ACCOUNT_KEYS = ['id', 'label', 'query', 'since'];
 
 function readConfigToml(file: string): Table {
@@ -208,24 +248,87 @@ function section(t: Table, name: string): Table {
   return (t[name] as Table | undefined) ?? {};
 }
 
+// 環境変数で上書きした値の出どころ（表 → "sec.key" → 環境変数の名前。"sec.*" はその節の全部）。エラー文の言い方に使う。
+const ENV_ORIGIN = new WeakMap<Table, Map<string, string>>();
+
+function where(t: Table, sec: string, key: string): string {
+  const o = ENV_ORIGIN.get(t);
+  const name = o?.get(`${sec}.${key}`);
+  if (name) return `環境変数 ${name}`;
+  const all = o?.get(`${sec}.*`);
+  return all ? `環境変数 ${all}.${key}` : `config.toml の ${sec}.${key}`;
+}
+
+function envValue(name: string, type: EnvType, raw: string): unknown {
+  switch (type) {
+    case 'string':
+      return raw;
+    case 'int':
+      if (!/^-?\d+$/.test(raw)) throw new ConfigError(`環境変数 ${name} は整数で指定する`);
+      return Number(raw);
+    case 'bool':
+      if (raw !== 'true' && raw !== 'false') throw new ConfigError(`環境変数 ${name} は true / false で指定する`);
+      return raw === 'true';
+    case 'strings':
+      return raw
+        .split(',')
+        .map((x) => x.trim())
+        .filter((x) => x !== '');
+    case 'toml':
+      try {
+        return (parseToml(`v = ${raw}`) as Table).v;
+      } catch {
+        throw new ConfigError(`環境変数 ${name} は TOML のインライン配列（[{ id = "main", label = "keihi" }]）で指定する`);
+      }
+  }
+}
+
+// KEIHI_<SECTION>_<KEY> を config.toml の表に重ねる（空文字は未設定）。KEIHI_ で始まる知らない名前はエラー。
+function applyEnv(t: Table, env: NodeJS.ProcessEnv): void {
+  const names = new Map<string, [string, string, EnvType]>();
+  for (const [sec, keys] of Object.entries(KEY_TYPES)) for (const [key, type] of Object.entries(keys)) names.set(`KEIHI_${sec}_${key}`.toUpperCase(), [sec, key, type]);
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('KEIHI_') && !names.has(name) && !OTHER_ENV.includes(name)) {
+      throw new ConfigError(`環境変数 ${name} は知らない名前（KEIHI_<SECTION>_<KEY> の綴りを確かめる）`);
+    }
+  }
+  const origin = new Map<string, string>();
+  for (const [name, [sec, key, type]] of names) {
+    const raw = env[name];
+    if (raw === undefined || raw === '') continue;
+    const s = (t[sec] ??= {}) as Table;
+    s[key] = envValue(name, type, raw);
+    origin.set(`${sec}.${key}`, name);
+  }
+  ENV_ORIGIN.set(t, origin);
+}
+
+// DATABASE_URL は sqlite:///絶対パス だけ（sqlite: の後ろの // は任意）。値はエラーに含めない（パスワード入りの URL が来うる）。
+function dbPathFromUrl(url: string): string {
+  const m = /^sqlite:(?:\/\/)?(.*)$/.exec(url);
+  // `?mode=ro` のようなクエリは解釈しない（そのままファイル名になってしまう）ので、受け付けない。
+  if (!m || !path.isAbsolute(m[1]) || /[?#]/.test(m[1])) throw new ConfigError('DATABASE_URL は sqlite:///絶対パス だけ（クエリは付けられない。keihi は SQLite だけに対応）');
+  return m[1];
+}
+
 function optString(t: Table, sec: string, key: string): string | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
-  if (typeof v !== 'string' || !v) throw new ConfigError(`config.toml の ${sec}.${key} は空でない文字列で指定する`);
+  if (typeof v !== 'string' || !v) throw new ConfigError(`${where(t, sec, key)} は空でない文字列で指定する`);
   return v;
 }
 
 function optEnum<T extends string>(t: Table, sec: string, key: string, values: readonly T[]): T | null {
   const v = optString(t, sec, key);
   if (v === null) return null;
-  if (!(values as readonly string[]).includes(v)) throw new ConfigError(`config.toml の ${sec}.${key} は ${values.map((x) => `"${x}"`).join(' / ')} のどれか`);
+  if (!(values as readonly string[]).includes(v)) throw new ConfigError(`${where(t, sec, key)} は ${values.map((x) => `"${x}"`).join(' / ')} のどれか`);
   return v as T;
 }
 
 function optBool(t: Table, sec: string, key: string): boolean | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
-  if (typeof v !== 'boolean') throw new ConfigError(`config.toml の ${sec}.${key} は true / false で指定する`);
+  if (typeof v !== 'boolean') throw new ConfigError(`${where(t, sec, key)} は true / false で指定する`);
   return v;
 }
 
@@ -233,13 +336,13 @@ function optPositiveInt(t: Table, sec: string, key: string): number | null {
   let v = section(t, sec)[key];
   if (v === undefined) return null;
   if (typeof v === 'bigint') v = Number(v);
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1) throw new ConfigError(`config.toml の ${sec}.${key} は正の整数で指定する`);
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1) throw new ConfigError(`${where(t, sec, key)} は正の整数で指定する`);
   return v;
 }
 
 function optIntUpTo(t: Table, sec: string, key: string, max: number): number | null {
   const v = optPositiveInt(t, sec, key);
-  if (v !== null && v > max) throw new ConfigError(`config.toml の ${sec}.${key} は 1〜${max} で指定する`);
+  if (v !== null && v > max) throw new ConfigError(`${where(t, sec, key)} は 1〜${max} で指定する`);
   return v;
 }
 
@@ -247,13 +350,13 @@ function optNonNegativeInt(t: Table, sec: string, key: string): number | null {
   let v = section(t, sec)[key];
   if (v === undefined) return null;
   if (typeof v === 'bigint') v = Number(v);
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new ConfigError(`config.toml の ${sec}.${key} は 0 以上の整数で指定する`);
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new ConfigError(`${where(t, sec, key)} は 0 以上の整数で指定する`);
   return v;
 }
 
 function optNonNegativeIntUpTo(t: Table, sec: string, key: string, max: number): number | null {
   const v = optNonNegativeInt(t, sec, key);
-  if (v !== null && v > max) throw new ConfigError(`config.toml の ${sec}.${key} は 0〜${max} で指定する`);
+  if (v !== null && v > max) throw new ConfigError(`${where(t, sec, key)} は 0〜${max} で指定する`);
   return v;
 }
 
@@ -261,14 +364,14 @@ function optStringArray(t: Table, sec: string, key: string): string[] | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
   if (!Array.isArray(v) || !v.every((x) => typeof x === 'string' && x !== '')) {
-    throw new ConfigError(`config.toml の ${sec}.${key} は空でない文字列の配列で指定する`);
+    throw new ConfigError(`${where(t, sec, key)} は空でない文字列の配列で指定する`);
   }
   return v as string[];
 }
 
 function optPort(t: Table, sec: string, key: string): number | null {
   const v = optPositiveInt(t, sec, key);
-  if (v !== null && v > 65535) throw new ConfigError(`config.toml の ${sec}.${key} は 1〜65535 で指定する`);
+  if (v !== null && v > 65535) throw new ConfigError(`${where(t, sec, key)} は 1〜65535 で指定する`);
   return v;
 }
 
@@ -276,7 +379,7 @@ function optPort(t: Table, sec: string, key: string): number | null {
 function optDate(t: Table, sec: string, key: string): string | null {
   const v = section(t, sec)[key];
   if (v === undefined) return null;
-  const msg = `config.toml の ${sec}.${key} は "YYYY-MM-DD" の文字列で指定する`;
+  const msg = `${where(t, sec, key)} は "YYYY-MM-DD" の文字列で指定する`;
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new ConfigError(msg);
   const d = new Date(`${v}T00:00:00Z`);
   if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) throw new ConfigError(msg);
@@ -286,25 +389,28 @@ function optDate(t: Table, sec: string, key: string): string | null {
 // [mail] と [[mail.accounts]]。
 function readMail(t: Table): Config['mail'] {
   const provider = optString(t, 'mail', 'provider') ?? 'gmail_api';
-  if (provider === 'imap') throw new ConfigError('config.toml の mail.provider = "imap" はまだ実装していない（mail_provider_not_implemented）。"gmail_api" を使う');
-  if (provider !== 'gmail_api') throw new ConfigError('config.toml の mail.provider は "gmail_api"');
+  const p = where(t, 'mail', 'provider');
+  if (provider === 'imap') throw new ConfigError(`${p} = "imap" はまだ実装していない（mail_provider_not_implemented）。"gmail_api" を使う`);
+  if (provider !== 'gmail_api') throw new ConfigError(`${p} は "gmail_api"`);
   const raw = section(t, 'mail').accounts;
+  const fromEnv = ENV_ORIGIN.get(t)?.get('mail.accounts');
   if (raw !== undefined && (!Array.isArray(raw) || !raw.every((a) => typeof a === 'object' && a !== null && !Array.isArray(a)))) {
-    throw new ConfigError('config.toml の mail.accounts は [[mail.accounts]] の表の配列で書く');
+    throw new ConfigError(fromEnv ? `環境変数 ${fromEnv} は表の配列（[{ id = "main" }]）で指定する` : 'config.toml の mail.accounts は [[mail.accounts]] の表の配列で書く');
   }
   const accounts: MailAccount[] = [];
   for (const [i, a] of ((raw ?? []) as Table[]).entries()) {
-    const where = `mail.accounts[${i}]`;
-    for (const k of Object.keys(a)) if (!MAIL_ACCOUNT_KEYS.includes(k)) throw new ConfigError(`config.toml の ${where}.${k} は知らないキー`);
-    const sub: Table = { [where]: a };
-    const id = optString(sub, where, 'id');
-    if (id === null || !MAIL_ACCOUNT_ID_RE.test(id)) throw new ConfigError(`config.toml の ${where}.id は英数字と - の 1〜32 字で指定する`);
-    if (accounts.some((x) => x.id === id)) throw new ConfigError(`config.toml の mail.accounts の id "${id}" が重複している`);
-    const label = optString(sub, where, 'label') ?? DEFAULT_MAIL_LABEL;
-    if (label.length > MAX_MAIL_LABEL_LENGTH) throw new ConfigError(`config.toml の ${where}.label は 1〜${MAX_MAIL_LABEL_LENGTH} 字で指定する`);
+    const at = `mail.accounts[${i}]`;
+    const sub: Table = { [at]: a };
+    if (fromEnv) ENV_ORIGIN.set(sub, new Map([[`${at}.*`, `${fromEnv} の ${at}`]]));
+    for (const k of Object.keys(a)) if (!MAIL_ACCOUNT_KEYS.includes(k)) throw new ConfigError(`${where(sub, at, k)} は知らないキー`);
+    const id = optString(sub, at, 'id');
+    if (id === null || !MAIL_ACCOUNT_ID_RE.test(id)) throw new ConfigError(`${where(sub, at, 'id')} は英数字と - の 1〜32 字で指定する`);
+    if (accounts.some((x) => x.id === id)) throw new ConfigError(`${fromEnv ? `環境変数 ${fromEnv}` : 'config.toml の mail.accounts'} の id "${id}" が重複している`);
+    const label = optString(sub, at, 'label') ?? DEFAULT_MAIL_LABEL;
+    if (label.length > MAX_MAIL_LABEL_LENGTH) throw new ConfigError(`${where(sub, at, 'label')} は 1〜${MAX_MAIL_LABEL_LENGTH} 字で指定する`);
     const query = a.query ?? '';
-    if (typeof query !== 'string' || query.length > MAX_MAIL_QUERY_LENGTH) throw new ConfigError(`config.toml の ${where}.query は 0〜${MAX_MAIL_QUERY_LENGTH} 字の文字列で指定する`);
-    accounts.push({ id, label, query, since: optDate(sub, where, 'since') });
+    if (typeof query !== 'string' || query.length > MAX_MAIL_QUERY_LENGTH) throw new ConfigError(`${where(sub, at, 'query')} は 0〜${MAX_MAIL_QUERY_LENGTH} 字の文字列で指定する`);
+    accounts.push({ id, label, query, since: optDate(sub, at, 'since') });
   }
   return {
     enabled: optBool(t, 'mail', 'enabled') ?? false,
@@ -315,18 +421,7 @@ function readMail(t: Table): Config['mail'] {
   };
 }
 
-function readSecrets(file: string): Secrets {
-  let st;
-  try {
-    st = statSync(file);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { geminiApiKey: null, freeeClientId: null, freeeClientSecret: null, gmailClientId: null, gmailClientSecret: null };
-    throw e;
-  }
-  if (!st.isFile()) throw new ConfigError(`${file} が通常のファイルではない`);
-  const mode = st.mode & 0o777;
-  if (mode !== 0o600) throw new ConfigError(`${file} のパーミッションが 0600 ではない（現在 0${mode.toString(8)}）。chmod 600 してから起動する`);
-  const env = parseEnv(readFileSync(file, 'utf8'));
+function secretsFrom(env: Record<string, string | undefined>): Secrets {
   return {
     geminiApiKey: env.GEMINI_API_KEY || null,
     freeeClientId: env.FREEE_CLIENT_ID || null,
@@ -336,15 +431,38 @@ function readSecrets(file: string): Secrets {
   };
 }
 
+// secrets.env があればそのファイルだけを読む。無いときだけ環境変数（SECRET_ENV）から読む（コンテナ用）。
+function readSecrets(file: string, processEnv: NodeJS.ProcessEnv): Secrets {
+  let st;
+  try {
+    st = statSync(file);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return secretsFrom(Object.fromEntries(SECRET_ENV.map((k) => [k, processEnv[k]])));
+    throw e;
+  }
+  if (!st.isFile()) throw new ConfigError(`${file} が通常のファイルではない`);
+  const mode = st.mode & 0o777;
+  if (mode !== 0o600) throw new ConfigError(`${file} のパーミッションが 0600 ではない（現在 0${mode.toString(8)}）。chmod 600 してから起動する`);
+  return secretsFrom(parseEnv(readFileSync(file, 'utf8')));
+}
+
 export function loadConfig(opts: LoadOptions = {}): Config {
-  const configDir = opts.configDir ?? DEFAULT_CONFIG_DIR;
+  const env = opts.env ?? process.env;
+  const configDir = opts.configDir ?? (env.KEIHI_CONFIG_DIR || undefined) ?? DEFAULT_CONFIG_DIR;
   const t = readConfigToml(path.join(configDir, 'config.toml'));
-  const dataDir = opts.dataDir ?? optString(t, 'paths', 'data_dir') ?? DEFAULT_DATA_DIR;
+  applyEnv(t, env);
+  const envDataDir = env.KEIHI_DATA_DIR || undefined;
+  if (opts.dataDir === undefined && envDataDir !== undefined && !path.isAbsolute(envDataDir)) throw new ConfigError('環境変数 KEIHI_DATA_DIR は絶対パスで指定する');
+  const dataDir = opts.dataDir ?? envDataDir ?? optString(t, 'paths', 'data_dir') ?? DEFAULT_DATA_DIR;
   if (!path.isAbsolute(dataDir)) throw new ConfigError('config.toml の paths.data_dir は絶対パスで指定する');
+  const databaseUrl = env.DATABASE_URL || undefined;
+  const dbPath = databaseUrl !== undefined ? dbPathFromUrl(databaseUrl) : path.join(dataDir, 'keihi.db');
+  const bindHost = env.KEIHI_BIND_HOST || WEB_HOST;
+  if (bindHost !== '127.0.0.1' && bindHost !== '0.0.0.0') throw new ConfigError('環境変数 KEIHI_BIND_HOST は "127.0.0.1" か "0.0.0.0"');
   const mode = optString(t, 'calendar', 'deadline_mode') ?? 'early';
-  if (mode !== 'early' && mode !== 'cycle') throw new ConfigError('config.toml の calendar.deadline_mode は "early" か "cycle"');
+  if (mode !== 'early' && mode !== 'cycle') throw new ConfigError(`${where(t, 'calendar', 'deadline_mode')} は "early" か "cycle"`);
   const countFrom = optString(t, 'deadline', 'count_from') ?? 'receipt_day';
-  if (countFrom !== 'receipt_day' && countFrom !== 'next_day') throw new ConfigError('config.toml の deadline.count_from は "receipt_day" か "next_day"');
+  if (countFrom !== 'receipt_day' && countFrom !== 'next_day') throw new ConfigError(`${where(t, 'deadline', 'count_from')} は "receipt_day" か "next_day"`);
   const pocCompanyId = optPositiveInt(t, 'freee', 'poc_company_id');
   const prodCompanyId = optPositiveInt(t, 'freee', 'prod_company_id');
   if (pocCompanyId !== null && pocCompanyId === prodCompanyId) throw new ConfigError('config.toml の freee.poc_company_id と prod_company_id が同じ');
@@ -356,16 +474,25 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     const v = h.toLowerCase();
     if (!allowedHosts.includes(v)) allowedHosts.push(v);
   }
+  const auth = optEnum(t, 'web', 'auth', ['tailscale', 'cloudflare_access'] as const) ?? 'tailscale';
+  const accessTeamDomain = optString(t, 'web', 'access_team_domain');
+  if (accessTeamDomain !== null && !ACCESS_TEAM_DOMAIN_RE.test(accessTeamDomain)) {
+    throw new ConfigError(`${where(t, 'web', 'access_team_domain')} は "example.cloudflareaccess.com" の形（小文字）で指定する`);
+  }
+  const accessAud = optString(t, 'web', 'access_aud');
+  if (auth === 'cloudflare_access' && (accessTeamDomain === null || accessAud === null)) {
+    throw new ConfigError('[web] auth = "cloudflare_access" には web.access_team_domain と web.access_aud が要る（config.toml か環境変数 KEIHI_WEB_ACCESS_TEAM_DOMAIN / KEIHI_WEB_ACCESS_AUD）');
+  }
   const drillDir = optString(t, 'backup', 'drill_dir') ?? path.join(dataDir, 'drill');
-  if (!path.isAbsolute(drillDir)) throw new ConfigError('config.toml の backup.drill_dir は絶対パスで指定する');
+  if (!path.isAbsolute(drillDir)) throw new ConfigError(`${where(t, 'backup', 'drill_dir')} は絶対パスで指定する`);
   const remoteVerifyMode = optString(t, 'backup', 'remote_verify_mode') ?? DEFAULT_REMOTE_VERIFY_MODE;
-  if (remoteVerifyMode !== 'sha256' && remoteVerifyMode !== 'download_only') throw new ConfigError('config.toml の backup.remote_verify_mode は "sha256" か "download_only"');
+  if (remoteVerifyMode !== 'sha256' && remoteVerifyMode !== 'download_only') throw new ConfigError(`${where(t, 'backup', 'remote_verify_mode')} は "sha256" か "download_only"`);
   const readDataSubset = optString(t, 'backup', 'read_data_subset') ?? DEFAULT_READ_DATA_SUBSET;
-  if (!/^(?:\d{1,2}(?:\.\d+)?%|100%)$/.test(readDataSubset)) throw new ConfigError('config.toml の backup.read_data_subset は "5%" のような割合で指定する');
+  if (!/^(?:\d{1,2}(?:\.\d+)?%|100%)$/.test(readDataSubset)) throw new ConfigError(`${where(t, 'backup', 'read_data_subset')} は "5%" のような割合で指定する`);
   return {
     configDir,
     dataDir,
-    dbPath: path.join(dataDir, 'keihi.db'),
+    dbPath,
     objectsDir: path.join(dataDir, 'objects'),
     freeeTokenPath: path.join(dataDir, 'freee-token.json'),
     gemini: {
@@ -385,7 +512,16 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     ingest: { maxBytes: optPositiveInt(t, 'ingest', 'max_upload_bytes') ?? DEFAULT_MAX_UPLOAD_BYTES },
     calendar: { deadlineMode: mode, yearEndHolidays: optBool(t, 'calendar', 'year_end_holidays') ?? false },
     deadline: { countFrom },
-    web: { port: webPort, allowedUsers: optStringArray(t, 'web', 'allowed_users') ?? [], allowedHosts },
+    web: {
+      port: webPort,
+      host: bindHost,
+      allowedUsers: optStringArray(t, 'web', 'allowed_users') ?? [],
+      allowedHosts,
+      auth,
+      accessTeamDomain,
+      accessAud,
+      accessServiceTokens: optStringArray(t, 'web', 'access_service_tokens') ?? [],
+    },
     mcp: { port: mcpPort },
     backup: {
       repository: optString(t, 'backup', 'repository'),
@@ -403,6 +539,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     worker: {
       lingerMs: optNonNegativeInt(t, 'worker', 'linger_ms') ?? DEFAULT_WORKER_LINGER_MS,
       reauthWaitDays: optPositiveInt(t, 'worker', 'reauth_wait_days') ?? DEFAULT_REAUTH_WAIT_DAYS,
+      mode: optEnum(t, 'worker', 'mode', ['systemd', 'spawn', 'none'] as const) ?? 'systemd',
     },
     reconcile: {
       verifiedLookbackDays: optPositiveInt(t, 'reconcile', 'verified_lookback_days') ?? DEFAULT_VERIFIED_LOOKBACK_DAYS,
@@ -421,7 +558,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
       includeUnplannedIncome: optBool(t, 'cashflow', 'include_unplanned_income') ?? false,
     },
     mail: readMail(t),
-    secrets: readSecrets(path.join(configDir, 'secrets.env')),
+    secrets: readSecrets(path.join(configDir, 'secrets.env'), env),
   };
 }
 
@@ -433,7 +570,7 @@ export function requireGemini(cfg: Config): { model: string; apiKey: string } {
         '無料枠のキーは使わない（Cloud Billing を有効にした keihi 専用プロジェクトのキーだけを使う）',
     );
   }
-  if (!cfg.secrets.geminiApiKey) throw new ConfigError(`${path.join(cfg.configDir, 'secrets.env')} に GEMINI_API_KEY が無い`);
+  if (!cfg.secrets.geminiApiKey) throw new ConfigError(`${path.join(cfg.configDir, 'secrets.env')} か環境変数に GEMINI_API_KEY が無い`);
   return { model: cfg.gemini.model, apiKey: cfg.secrets.geminiApiKey };
 }
 
@@ -443,16 +580,16 @@ export function requireFreee(cfg: Config, target: FreeeTarget): { companyId: num
   const companyId = target === 'prod' ? cfg.freee.prodCompanyId : cfg.freee.pocCompanyId;
   if (companyId === null) throw new ConfigError(`${path.join(cfg.configDir, 'config.toml')} に [freee] ${key} が無い`);
   const secretsPath = path.join(cfg.configDir, 'secrets.env');
-  if (!cfg.secrets.freeeClientId) throw new ConfigError(`${secretsPath} に FREEE_CLIENT_ID が無い`);
-  if (!cfg.secrets.freeeClientSecret) throw new ConfigError(`${secretsPath} に FREEE_CLIENT_SECRET が無い`);
+  if (!cfg.secrets.freeeClientId) throw new ConfigError(`${secretsPath} か環境変数に FREEE_CLIENT_ID が無い`);
+  if (!cfg.secrets.freeeClientSecret) throw new ConfigError(`${secretsPath} か環境変数に FREEE_CLIENT_SECRET が無い`);
   return { companyId, clientId: cfg.secrets.freeeClientId, clientSecret: cfg.secrets.freeeClientSecret };
 }
 
 // Gmail を呼ぶ処理の起動時に呼ぶ（client_id / secret は全アカウントで 1 組）。
 export function requireGmail(cfg: Config): { clientId: string; clientSecret: string } {
   const secretsPath = path.join(cfg.configDir, 'secrets.env');
-  if (!cfg.secrets.gmailClientId) throw new ConfigError(`${secretsPath} に GMAIL_CLIENT_ID が無い`);
-  if (!cfg.secrets.gmailClientSecret) throw new ConfigError(`${secretsPath} に GMAIL_CLIENT_SECRET が無い`);
+  if (!cfg.secrets.gmailClientId) throw new ConfigError(`${secretsPath} か環境変数に GMAIL_CLIENT_ID が無い`);
+  if (!cfg.secrets.gmailClientSecret) throw new ConfigError(`${secretsPath} か環境変数に GMAIL_CLIENT_SECRET が無い`);
   return { clientId: cfg.secrets.gmailClientId, clientSecret: cfg.secrets.gmailClientSecret };
 }
 

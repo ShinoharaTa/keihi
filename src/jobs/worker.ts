@@ -21,7 +21,9 @@ export class DeferJob extends Error {
 
 export type RunSummary = { done: number; failed: number };
 
-export type RunOptions = { now?: () => Date; log?: (s: string) => void; lingerMs?: number; sleep?: (ms: number) => Promise<void> };
+// shouldStop: claim の前（linger の待ちの後も）に見て、true なら返る。実行中のジョブは最後まで処理して記録してから見る
+// （src/worker/main.ts の SIGTERM / SIGINT）。
+export type RunOptions = { now?: () => Date; log?: (s: string) => void; lingerMs?: number; sleep?: (ms: number) => Promise<void>; shouldStop?: () => boolean };
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -30,9 +32,11 @@ export async function runUntilEmpty(db: Db, handlers: Handlers, opts: RunOptions
   const log = opts.log ?? (() => {});
   const lingerMs = opts.lingerMs ?? 0;
   const sleep = opts.sleep ?? defaultSleep;
+  const shouldStop = opts.shouldStop ?? (() => false);
   const summary: RunSummary = { done: 0, failed: 0 };
   let lingered = false;
   for (;;) {
+    if (shouldStop()) return summary;
     const job = claim(db, now());
     if (!job) {
       if (lingered || lingerMs <= 0) return summary;
