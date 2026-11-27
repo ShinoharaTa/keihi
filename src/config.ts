@@ -23,7 +23,7 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 // T1-6: 取り込みのサイズ上限の初期値（freee は 64MB。mvp-plan.md T1-6 の変更）。
 export const DEFAULT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 // T1-14（D4）: web は既定で 127.0.0.1 にだけバインドする。config.toml には置かない。
-// 0.0.0.0 は環境変数 KEIHI_BIND_HOST でだけ指定できる（コンテナ用。[web] auth = "cloudflare_access" が要る。src/web/main.ts）。
+// 0.0.0.0 は環境変数 KEIHI_BIND_HOST でだけ指定できる（コンテナ用。[web] auth = "cloudflare_access" か "none" が要る。src/web/main.ts）。
 export const WEB_HOST = '127.0.0.1';
 export const DEFAULT_WEB_PORT = 8795;
 // M7（keihi MCP）用に予約するだけ。M7 までは何も開かない。
@@ -82,8 +82,9 @@ export type RetentionStart = 'next_year_0316';
 export type MailProvider = 'gmail_api';
 // since: 取り始める日。null なら初回実行日の 30 日前（src/mail/fetch.ts）。
 export type MailAccount = { id: string; label: string; query: string; since: string | null };
-// web の認証の方式（src/web/auth.ts）。tailscale = Tailscale-User-Login のヘッダ、cloudflare_access = Cf-Access-Jwt-Assertion の JWT。
-export type WebAuth = 'tailscale' | 'cloudflare_access';
+// web の認証の方式（src/web/auth.ts）。tailscale = Tailscale-User-Login のヘッダ、cloudflare_access = Cf-Access-Jwt-Assertion の JWT、
+// none = 利用者を確かめない（allowed_users の 1 件を利用者とする。VPN・LAN の内側だけで届く構成向け）。
+export type WebAuth = 'tailscale' | 'cloudflare_access' | 'none';
 export type BindHost = '127.0.0.1' | '0.0.0.0';
 // worker の起動のしかた（src/jobs/scheduler.ts）。systemd = systemctl --user と timer、spawn = web の子プロセス（コンテナ用）、none = 起動しない。
 export type WorkerMode = 'systemd' | 'spawn' | 'none';
@@ -474,7 +475,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     const v = h.toLowerCase();
     if (!allowedHosts.includes(v)) allowedHosts.push(v);
   }
-  const auth = optEnum(t, 'web', 'auth', ['tailscale', 'cloudflare_access'] as const) ?? 'tailscale';
+  const auth = optEnum(t, 'web', 'auth', ['tailscale', 'cloudflare_access', 'none'] as const) ?? 'tailscale';
   const accessTeamDomain = optString(t, 'web', 'access_team_domain');
   if (accessTeamDomain !== null && !ACCESS_TEAM_DOMAIN_RE.test(accessTeamDomain)) {
     throw new ConfigError(`${where(t, 'web', 'access_team_domain')} は "example.cloudflareaccess.com" の形（小文字）で指定する`);
@@ -482,6 +483,10 @@ export function loadConfig(opts: LoadOptions = {}): Config {
   const accessAud = optString(t, 'web', 'access_aud');
   if (auth === 'cloudflare_access' && (accessTeamDomain === null || accessAud === null)) {
     throw new ConfigError('[web] auth = "cloudflare_access" には web.access_team_domain と web.access_aud が要る（config.toml か環境変数 KEIHI_WEB_ACCESS_TEAM_DOMAIN / KEIHI_WEB_ACCESS_AUD）');
+  }
+  const allowedUsers = optStringArray(t, 'web', 'allowed_users') ?? [];
+  if (auth === 'none' && allowedUsers.length !== 1) {
+    throw new ConfigError('[web] auth = "none" には web.allowed_users がちょうど 1 件要る（監査ログに残す利用者）');
   }
   const drillDir = optString(t, 'backup', 'drill_dir') ?? path.join(dataDir, 'drill');
   if (!path.isAbsolute(drillDir)) throw new ConfigError(`${where(t, 'backup', 'drill_dir')} は絶対パスで指定する`);
@@ -515,7 +520,7 @@ export function loadConfig(opts: LoadOptions = {}): Config {
     web: {
       port: webPort,
       host: bindHost,
-      allowedUsers: optStringArray(t, 'web', 'allowed_users') ?? [],
+      allowedUsers,
       allowedHosts,
       auth,
       accessTeamDomain,

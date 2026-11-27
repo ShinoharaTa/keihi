@@ -460,6 +460,19 @@ describe('環境変数（コンテナ用）', () => {
     }
     assert.match(msgOf(() => load('', { KEIHI_WEB_ACCESS_TEAM_DOMAIN: 'evil.example.com' })), /環境変数 KEIHI_WEB_ACCESS_TEAM_DOMAIN は "example.cloudflareaccess.com" の形/);
   });
+  test('[web] auth = "none"。allowed_users がちょうど 1 件でなければエラー', () => {
+    const ok = load('[web]\nauth = "none"\nallowed_users = ["you@example.com"]\n', {});
+    assert.equal(ok.web.auth, 'none');
+    assert.deepEqual(ok.web.allowedUsers, ['you@example.com']);
+    const viaEnv = load('', { KEIHI_WEB_AUTH: 'none', KEIHI_WEB_ALLOWED_USERS: 'you@example.com' });
+    assert.equal(viaEnv.web.auth, 'none');
+    assert.deepEqual(viaEnv.web.allowedUsers, ['you@example.com']);
+    for (const users of ['[]', '["you@example.com", "other@example.com"]']) {
+      assert.match(msgOf(() => load(`[web]\nauth = "none"\nallowed_users = ${users}\n`, {})), /\[web\] auth = "none" には web.allowed_users がちょうど 1 件要る/, users);
+    }
+    assert.throws(() => load('[web]\nauth = "none"\n', {}), ConfigError);
+    assert.throws(() => load('', { KEIHI_WEB_AUTH: 'none', KEIHI_WEB_ALLOWED_USERS: 'a@example.com,b@example.com' }), ConfigError);
+  });
   test('[worker] mode', () => {
     for (const m of ['systemd', 'spawn', 'none'] as const) assert.equal(load(`[worker]\nmode = "${m}"\n`, {}).worker.mode, m);
     assert.equal(load('', { KEIHI_WORKER_MODE: 'spawn' }).worker.mode, 'spawn');

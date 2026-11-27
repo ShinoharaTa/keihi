@@ -3,6 +3,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -46,6 +47,20 @@ function listening(server: ServerType): Promise<number> {
   });
 }
 
+// fetch は Host を差し替えられないので node:http で送る。
+function getWithHost(port: number, p: string, host: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: p, headers: { Host: host } }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d: string) => (body += d));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 describe('起動時の検査', () => {
   test('127.0.0.1 なら tailscale のまま通す。0.0.0.0 で tailscale なら ConfigError', () => {
     const { log, err } = capture();
@@ -63,6 +78,14 @@ describe('起動時の検査', () => {
     checkBindAuth({ host: '0.0.0.0', auth: 'tailscale' }, { KEIHI_INSECURE_HEADER_AUTH: '1' }, log);
     assert.equal(err.length, 1);
     assert.match(err[0], /KEIHI_INSECURE_HEADER_AUTH=1/);
+  });
+  test('none は 0.0.0.0 でも 127.0.0.1 でも通し、warn を 1 行出す', () => {
+    for (const host of ['0.0.0.0', '127.0.0.1'] as const) {
+      const { log, err } = capture();
+      checkBindAuth({ host, auth: 'none' }, {}, log);
+      assert.equal(err.length, 1, host);
+      assert.match(err[0], /web: 認証なし（\[web\] auth = "none"）で起動する。届く範囲はネットワーク側（VPN・LAN）で絞ること/);
+    }
   });
   test('startWeb は listen も DB を開くこともせずに止まる', async () => {
     const { configDir, dataDir } = await dirs(TOML);
@@ -172,6 +195,27 @@ describe('startWeb と停止', () => {
       assert.match(calls[0].args[0], /src\/worker\/main\.ts$/);
       assert.deepEqual(calls[0].args.slice(1), ['--db', path.join(dataDir, 'keihi.db')]);
       assert.deepEqual(calls[0].env, { KEIHI_WORKER_MODE: 'spawn', KEIHI_MIGRATE_ON_START: '1', OTHER: 'x', KEIHI_CONFIG_DIR: configDir, KEIHI_DATA_DIR: dataDir });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+    }
+  });
+  test('KEIHI_WEB_AUTH=none なら、ヘッダなしの /api/status が 200 で user は allowed_users の値', async () => {
+    const { configDir, dataDir } = await dirs(TOML);
+    const { log, err } = capture();
+    const { server, db, cfg } = startWeb([], {
+      env: { KEIHI_CONFIG_DIR: configDir, KEIHI_DATA_DIR: dataDir, KEIHI_MIGRATE_ON_START: '1', KEIHI_WORKER_MODE: 'none', KEIHI_WEB_AUTH: 'none' },
+      log,
+      port: 0,
+    });
+    try {
+      const port = await listening(server);
+      assert.equal(cfg.web.auth, 'none');
+      assert.equal(err.filter((l) => l.includes('認証なし')).length, 1);
+      // listen は空いているポートなので、Host は設定のポート（許可リストにある 127.0.0.1:<web.port>）で送る
+      const r = await getWithHost(port, '/api/status', cfg.web.allowedHosts[0]);
+      assert.equal(r.status, 200);
+      assert.equal((JSON.parse(r.body) as { user: unknown }).user, 'you@example.com');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       db.close();

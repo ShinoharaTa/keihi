@@ -16,7 +16,7 @@ BASE='http://127.0.0.1:8795'
 pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1" >&2; "$DOCKER" logs "$NAME" 2>&1 | tail -n 40 >&2 || true; exit 1; }
 cleanup() {
-  "$DOCKER" rm -f "$BASE_NAME" "$BASE_NAME-neg" "$BASE_NAME-access" >/dev/null 2>&1 || true
+  "$DOCKER" rm -f "$BASE_NAME" "$BASE_NAME-neg" "$BASE_NAME-access" "$BASE_NAME-none" >/dev/null 2>&1 || true
   "$DOCKER" volume rm -f "$VOLUME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -123,5 +123,14 @@ wait_ready
 [ "$(cx -H "$USER_HDR" "$BASE/api/status")" = "401" ] || fail "Access の方式で、JWT が無いのに通った"
 [ "$(cx -H 'Cf-Access-Jwt-Assertion: a.b.c' "$BASE/api/status")" = "401" ] || fail "壊れた JWT が通った"
 pass "Access の方式: JWT が無ければ 401（Tailscale のヘッダは無視）"
+"$DOCKER" rm -f "$NAME" >/dev/null
+
+# 8. 認証なしの方式: ヘッダ無しで通り、Host の検査は残る
+NAME="$BASE_NAME-none"
+run_app "$NAME" -e KEIHI_WEB_AUTH=none
+wait_ready
+[ "$(cx "$BASE/api/status")" = "200" ] || fail "認証なしの方式で、ヘッダ無しの /api/status が 200 にならない"
+[ "$(cx -H 'Host: evil.example.com' "$BASE/api/status")" = "400" ] || fail "認証なしの方式で、許可していない Host を拒否しない"
+pass "認証なしの方式: ヘッダ無しで 200、許可していない Host は 400"
 
 echo "smoke: すべて通った"

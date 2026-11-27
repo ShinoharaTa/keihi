@@ -31,7 +31,12 @@ export const SHUTDOWN_GRACE_MS = 8000;
 export const WORKER_STOP_TIMEOUT_MS = 20_000;
 
 // 起動時の検査。ヘッダ（Tailscale-User-Login）だけの認証は、127.0.0.1 に来た接続を信用する前提（D7）なので、それ以外では使わない。
+// none（認証なし）はバインド先に関わらず通し、warn を 1 行出す（届く範囲はネットワーク側で絞る前提）。
 export function checkBindAuth(web: Pick<Config['web'], 'host' | 'auth'>, env: NodeJS.ProcessEnv, log: Logger = processLog): void {
+  if (web.auth === 'none') {
+    log.warn('web: 認証なし（[web] auth = "none"）で起動する。届く範囲はネットワーク側（VPN・LAN）で絞ること');
+    return;
+  }
   if (web.host === WEB_HOST || web.auth !== 'tailscale') return;
   if (env.KEIHI_INSECURE_HEADER_AUTH === '1') {
     log.warn(`web: KEIHI_INSECURE_HEADER_AUTH=1 なので、${web.host} にヘッダだけの認証のまま起動する（手元の検証用。公開しない）`);

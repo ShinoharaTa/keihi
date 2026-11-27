@@ -7,6 +7,8 @@
 //      cloudflare_access（#102）: Tailscale-User-Login は見ない。Cf-Access-Jwt-Assertion が無ければ 401 unauthenticated、
 //      検証に失敗したら 401 invalid_token、JWKS が取れず検証できなければ 503 auth_unavailable。
 //      email が allowed_users に（小文字で比べる）、email が無く common_name が access_service_tokens にあれば通す。それ以外は 403。
+//      none: 利用者を確かめない。Tailscale-User-Login も Cf-Access-Jwt-Assertion も見ず、allowed_users の 1 件を利用者として通す
+//      （VPN・LAN の内側だけで届く構成向け。1・3 の検査は残る）。
 //   通したら c.set('user', …)。ルートは userOf(c) で読む。
 // D7: 同じ uid のローカルプロセスは信頼境界の内側とみなすので、127.0.0.1 に直接来たヘッダも信用する。WebAuthn は MVP 外。
 import type { Context, MiddlewareHandler } from 'hono';
@@ -34,7 +36,7 @@ function originHost(origin: string): string | null {
 export type AuthConfig = {
   allowedUsers: string[];
   allowedHosts: string[];
-  auth?: 'tailscale' | 'cloudflare_access';
+  auth?: 'tailscale' | 'cloudflare_access' | 'none';
   accessTeamDomain?: string | null;
   accessAud?: string | null;
   accessServiceTokens?: string[];
@@ -51,6 +53,8 @@ export function createAuth(web: AuthConfig, deps: AuthDeps = {}): MiddlewareHand
   const users = new Set(web.allowedUsers);
   const log = deps.log ?? silent;
   let access: ((c: Context) => Promise<Response | string>) | null = null;
+  if (web.auth === 'none' && web.allowedUsers.length !== 1) throw new Error('none には allowed_users がちょうど 1 件要る');
+  const fixedUser = web.auth === 'none' ? web.allowedUsers[0] : null;
   if (web.auth === 'cloudflare_access') {
     if (!web.accessTeamDomain || !web.accessAud) throw new Error('cloudflare_access には access_team_domain と access_aud が要る');
     const verifier = createAccessVerifier({ teamDomain: web.accessTeamDomain, aud: web.accessAud, fetch: deps.fetch, now: deps.now });
@@ -79,6 +83,11 @@ export function createAuth(web: AuthConfig, deps: AuthDeps = {}): MiddlewareHand
     if (origin !== undefined && !SAFE_METHODS.has(c.req.method)) {
       const oh = originHost(origin);
       if (oh === null || !hosts.has(oh)) return c.json({ reason: 'invalid_origin' }, 403);
+    }
+
+    if (fixedUser !== null) {
+      c.set('user', fixedUser);
+      return next();
     }
 
     if (access !== null) {
