@@ -13,7 +13,7 @@ import { openCard } from '../../review/card.ts';
 import { decide, ReviewError, type Decision } from '../../review/confirm.ts';
 import { readObject } from '../../storage/objects.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 export const THUMB_MAX_EDGE = 640;
 const ACTIONS: Record<string, Decision> = { approve: 'approve', reject: 'reject', mark_private: 'personal', mark_duplicate: 'duplicate' };
@@ -57,7 +57,7 @@ export function reviewRoutes(deps: Pick<AppDeps, 'db' | 'objectsDir' | 'config' 
       }
       try {
         const res = decide(deps.db, {
-          documentId: c.req.param('id'), decision, body, user: c.req.header(USER_HEADER) ?? null, now: now(), matchWindows: matchWindowsOf(deps.config.bank),
+          documentId: c.req.param('id'), decision, body, user: userOf(c), now: now(), matchWindows: matchWindowsOf(deps.config.bank),
         });
         // 確定で積んだジョブ（検索項目・取引）を動かす。起動に失敗しても確定は済んでいる（keihi-worker.timer が拾う）。
         if (decision === 'approve') {

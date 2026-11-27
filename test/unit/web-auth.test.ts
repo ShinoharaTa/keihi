@@ -194,14 +194,14 @@ describe('設定（[web]・[mcp]）', () => {
     return d;
   }
   test('既定: 8795、MCP は 8796 を予約、Host は 127.0.0.1:8795、許可ユーザーは空', async () => {
-    const c = loadConfig({ configDir: await cfgDir(''), dataDir: '/nonexistent/keihi' });
-    assert.deepEqual(c.web, { port: 8795, allowedUsers: [], allowedHosts: ['127.0.0.1:8795'] });
+    const c = loadConfig({ env: {}, configDir: await cfgDir(''), dataDir: '/nonexistent/keihi' });
+    assert.deepEqual(c.web, { port: 8795, host: '127.0.0.1', allowedUsers: [], allowedHosts: ['127.0.0.1:8795'], auth: 'tailscale', accessTeamDomain: null, accessAud: null, accessServiceTokens: [] });
     assert.deepEqual(c.mcp, { port: 8796 });
   });
   test('許可ユーザーと tailscale serve のホスト名を足せる', async () => {
     const d = await cfgDir(`[web]\nport = 18795\nallowed_users = ["${USER}"]\nallowed_hosts = ["Keihi.Example.ts.net:8444", "127.0.0.1:18795"]\n`);
-    const c = loadConfig({ configDir: d, dataDir: '/nonexistent/keihi' });
-    assert.deepEqual(c.web, { port: 18795, allowedUsers: [USER], allowedHosts: ['127.0.0.1:18795', 'keihi.example.ts.net:8444'] });
+    const c = loadConfig({ env: {}, configDir: d, dataDir: '/nonexistent/keihi' });
+    assert.deepEqual(c.web, { port: 18795, host: '127.0.0.1', allowedUsers: [USER], allowedHosts: ['127.0.0.1:18795', 'keihi.example.ts.net:8444'], auth: 'tailscale', accessTeamDomain: null, accessAud: null, accessServiceTokens: [] });
   });
   test('不正な値・知らないキー（bind など）は拒否', async () => {
     for (const toml of [
@@ -213,18 +213,20 @@ describe('設定（[web]・[mcp]）', () => {
       '[mcp]\nenabled = true\n',
     ]) {
       const d = await cfgDir(toml);
-      assert.throws(() => loadConfig({ configDir: d, dataDir: '/nonexistent/keihi' }), ConfigError, toml);
+      assert.throws(() => loadConfig({ env: {}, configDir: d, dataDir: '/nonexistent/keihi' }), ConfigError, toml);
     }
   });
 });
 
 describe('main.ts', () => {
-  test('127.0.0.1 にだけバインドする（0.0.0.0 を書かない）', async () => {
+  test('バインド先は cfg.web.host だけ（既定 127.0.0.1。0.0.0.0 は KEIHI_BIND_HOST でだけ。ヘッダの認証では起動時に止める）', async () => {
     const src = await readFile('src/web/main.ts', 'utf8');
-    assert.doesNotMatch(src, /0\.0\.0\.0|'::'|hostname:\s*['"]/);
-    assert.match(src, /hostname: WEB_HOST/);
+    assert.doesNotMatch(src, /'::'|hostname:\s*['"]/);
+    assert.match(src, /hostname: cfg\.web\.host/);
+    assert.match(src, /checkBindAuth\(cfg\.web, env, log\);[\s\S]*openDb\(/);
     const cfg = await readFile('src/config.ts', 'utf8');
     assert.match(cfg, /export const WEB_HOST = '127\.0\.0\.1';/);
+    assert.match(cfg, /const bindHost = env\.KEIHI_BIND_HOST \|\| WEB_HOST;/);
   });
 });
 

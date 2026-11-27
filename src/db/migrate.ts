@@ -54,6 +54,8 @@ export function migrate(db: Db, migrations: Migration[] = listMigrations()): str
 }
 
 if (import.meta.main) {
+  const { log, setService } = await import('../log.ts');
+  setService('keihi-migrate');
   const { values } = parseArgs({ args: process.argv.slice(2), options: { db: { type: 'string' } } });
   let file = values.db;
   if (!file) {
@@ -63,8 +65,8 @@ if (import.meta.main) {
   const db = openDb(file);
   try {
     const done = migrate(db);
-    console.log(done.length ? `適用: ${done.join(', ')}` : '適用するマイグレーションは無い');
-    console.log('integrity_check: ok');
+    log.info(done.length ? `適用: ${done.join(', ')}` : '適用するマイグレーションは無い');
+    log.info('integrity_check: ok');
   } finally {
     db.close();
   }

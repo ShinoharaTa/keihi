@@ -37,7 +37,7 @@ import { bankStatus, enqueueSyncBank, MANUAL_SYNC_INTERVAL_MS } from '../../bank
 import { todayInTokyo } from '../../calendar/businessDays.ts';
 import { DEFAULT_DEDUP_DATE_WINDOW_DAYS, DEFAULT_TRANSFER_WINDOW_DAYS } from '../../config.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 // CSV の上限（docs/mvp-plan-v3.md T105）。multipart の境界の分の余裕は ingest.ts と同じ。
 export const CSV_MAX_BYTES = 5 * 1024 * 1024;
@@ -66,7 +66,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     try {
-      const a = createCsvAccount(deps.db, { provider: providerKind(), name: body.name, kind: body.kind }, { user: c.req.header(USER_HEADER) ?? null }, now());
+      const a = createCsvAccount(deps.db, { provider: providerKind(), name: body.name, kind: body.kind }, { user: userOf(c) }, now());
       return c.json(accountView(deps.db, a), 201);
     } catch (e) {
       if (e instanceof AccountError) return c.json({ error: e.reason }, e.status);
@@ -78,7 +78,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     try {
-      const a = updateAccount(deps.db, c.req.param('id'), parseAccountPatch(body), { user: c.req.header(USER_HEADER) ?? null }, now());
+      const a = updateAccount(deps.db, c.req.param('id'), parseAccountPatch(body), { user: userOf(c) }, now());
       return c.json(accountView(deps.db, a));
     } catch (e) {
       if (e instanceof AccountError) return c.json({ error: e.reason }, e.status);
@@ -106,7 +106,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
           bytes: new Uint8Array(await file.arrayBuffer()),
           fileName: file.name || null,
           objectsDir: deps.objectsDir,
-          user: c.req.header(USER_HEADER) ?? null,
+          user: userOf(c),
           dedupDateWindowDays: bank?.dedupDateWindowDays ?? DEFAULT_DEDUP_DATE_WINDOW_DAYS,
           transferWindowDays: bank?.transferWindowDays ?? DEFAULT_TRANSFER_WINDOW_DAYS,
           matchWindows: matchWindows(),
@@ -184,7 +184,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
     const body = await jsonBody(c.req.raw);
     if (!body) return c.json({ error: 'invalid_json' }, 400);
     try {
-      const res = linkDocument(deps.db, { txnId: c.req.param('id'), documentId: body.document_id, user: c.req.header(USER_HEADER) ?? null, now: now(), windows: matchWindows() });
+      const res = linkDocument(deps.db, { txnId: c.req.param('id'), documentId: body.document_id, user: userOf(c), now: now(), windows: matchWindows() });
       return c.json(res, 201);
     } catch (e) {
       if (e instanceof MatchError) return c.json({ error: e.reason }, e.status);
@@ -194,7 +194,7 @@ export function bankRoutes(deps: Pick<AppDeps, 'db' | 'config' | 'now' | 'trigge
 
   r.post('/bank_txns/:id/matches/:document_id/unlink', (c) => {
     try {
-      return c.json(unlinkDocument(deps.db, { txnId: c.req.param('id'), documentId: c.req.param('document_id'), user: c.req.header(USER_HEADER) ?? null, now: now() }));
+      return c.json(unlinkDocument(deps.db, { txnId: c.req.param('id'), documentId: c.req.param('document_id'), user: userOf(c), now: now() }));
     } catch (e) {
       if (e instanceof MatchError) return c.json({ error: e.reason }, e.status);
       throw e;

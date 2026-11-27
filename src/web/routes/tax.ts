@@ -31,7 +31,7 @@ import {
 } from '../../cashflow/tax/sync.ts';
 import { parseSimBody, simulate } from '../../cashflow/tax/simulate.ts';
 import type { AppDeps } from '../app.ts';
-import { USER_HEADER } from '../auth.ts';
+import { userOf } from '../auth.ts';
 
 async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   const text = await req.text();
@@ -49,7 +49,7 @@ export type TaxRouteDeps = Pick<AppDeps, 'db' | 'now'>;
 export function taxRoutes(deps: TaxRouteDeps): Hono {
   const r = new Hono();
   const now = () => (deps.now ?? (() => new Date()))();
-  const by = (c: Context) => ({ actor: 'user', user: c.req.header(USER_HEADER) ?? null });
+  const by = (c: Context) => ({ actor: 'user', user: userOf(c) });
   const fail = (c: Context, e: unknown) => {
     if (e instanceof TaxError || e instanceof ScheduleError) return c.json({ error: e.code }, e.status);
     throw e;

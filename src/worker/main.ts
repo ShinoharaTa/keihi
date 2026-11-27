@@ -13,6 +13,7 @@ import { matchWindowsOf } from '../bank/match.ts';
 import { loadConfig, requireFreee, requireGmail, type Config } from '../config.ts';
 import { openDb, type Db } from '../db/index.ts';
 import { runUntilEmpty, type Handlers, type RunOptions } from '../jobs/worker.ts';
+import { addSecrets, log, setService } from '../log.ts';
 import { createGmailTokenProvider, gmailTokenPaths, type GmailToken } from '../mail/gmail/auth.ts';
 import { createGmailClient, type GmailClient } from '../mail/gmail/client.ts';
 import { createFakeProvider } from '../providers/fake/index.ts';
@@ -166,19 +167,57 @@ export async function runWith(rt: WorkerRuntime, opts: RunOptions = {}) {
   }
 }
 
+// SIGTERM / SIGINT を受けたら、実行中のジョブを終えてから止まる（runUntilEmpty の shouldStop）。
+// linger の待ちは信号で切り上げる（web の stop() は待ちきれなければ SIGKILL を送るので、待ちで時間を使わない）。
+export type StopSignal = { shouldStop(): boolean; sleep(ms: number): Promise<void>; dispose(): void };
+
+export function createStopSignal(proc: Pick<NodeJS.Process, 'on' | 'off'> = process): StopSignal {
+  let stopped = false;
+  const wakers = new Set<() => void>();
+  const onSignal = () => {
+    stopped = true;
+    for (const w of wakers) w();
+    wakers.clear();
+  };
+  proc.on('SIGTERM', onSignal);
+  proc.on('SIGINT', onSignal);
+  return {
+    shouldStop: () => stopped,
+    sleep: (ms) =>
+      new Promise<void>((resolve) => {
+        if (stopped) return resolve();
+        const wake = () => {
+          clearTimeout(t);
+          wakers.delete(wake);
+          resolve();
+        };
+        const t = setTimeout(wake, ms);
+        wakers.add(wake);
+      }),
+    dispose: () => {
+      proc.off('SIGTERM', onSignal);
+      proc.off('SIGINT', onSignal);
+    },
+  };
+}
+
 export async function main(argv: string[]): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { db: { type: 'string' } } });
   const cfg = loadConfig();
+  addSecrets(Object.values(cfg.secrets));
   const db = openDb(values.db ?? cfg.dbPath);
+  const stop = createStopSignal();
   try {
-    const s = await runWith(createRuntime(cfg, db), { log: (s) => console.log(s), lingerMs: cfg.worker.lingerMs });
-    console.log(`worker: done=${s.done} failed=${s.failed}`);
+    const s = await runWith(createRuntime(cfg, db), { log: (s) => log.info(s), lingerMs: cfg.worker.lingerMs, shouldStop: stop.shouldStop, sleep: stop.sleep });
+    log.info(`worker: done=${s.done} failed=${s.failed}`);
     return 0;
   } finally {
+    stop.dispose();
     db.close();
   }
 }
 
 if (import.meta.main) {
+  setService('keihi-worker');
   process.exitCode = await main(process.argv.slice(2));
 }
