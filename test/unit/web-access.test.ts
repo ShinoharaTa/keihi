@@ -294,3 +294,39 @@ describe('createAuth（tailscale）', () => {
     assert.deepEqual(await res.json(), { user: USER });
   });
 });
+
+describe('createAuth（none）', () => {
+  const app = new Hono();
+  app.use('*', createAuth({ allowedUsers: [USER], allowedHosts: [HOST], auth: 'none' }));
+  app.get('/healthz', (c) => c.json({ ok: true }));
+  app.get('/whoami', (c) => c.json({ user: userOf(c) }));
+  app.post('/whoami', (c) => c.json({ user: userOf(c) }));
+  const call = async (p: string, headers: Record<string, string> = {}, init: RequestInit = {}) => {
+    const res = await app.request(`https://${HOST}${p}`, { ...init, headers: { Host: HOST, ...headers } });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+
+  test('ヘッダなしで通り、user は allowed_users の 1 件', async () => {
+    assert.deepEqual(await call('/whoami'), { status: 200, body: { user: USER } });
+    assert.deepEqual(await call('/whoami', {}, { method: 'POST' }), { status: 200, body: { user: USER } });
+  });
+
+  test('Tailscale-User-Login・Cf-Access-Jwt-Assertion を付けても見ない（user は固定のまま）', async () => {
+    assert.deepEqual(await call('/whoami', { 'Tailscale-User-Login': 'other@example.com' }), { status: 200, body: { user: USER } });
+    assert.deepEqual(await call('/whoami', { 'Cf-Access-Jwt-Assertion': 'garbage' }), { status: 200, body: { user: USER } });
+  });
+
+  test('Host と Origin の検査、/healthz は今のまま', async () => {
+    const res = await app.request(`https://${HOST}/whoami`, { headers: { Host: 'evil.example' } });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { reason: 'invalid_host' });
+    assert.deepEqual(await call('/whoami', { Origin: 'https://evil.example' }, { method: 'POST' }), { status: 403, body: { reason: 'invalid_origin' } });
+    assert.deepEqual(await call('/whoami', { Origin: `https://${HOST}` }, { method: 'POST' }), { status: 200, body: { user: USER } });
+    assert.deepEqual(await call('/healthz'), { status: 200, body: { ok: true } });
+  });
+
+  test('allowed_users が 1 件でなければ createAuth が投げる', () => {
+    assert.throws(() => createAuth({ allowedUsers: [], allowedHosts: [HOST], auth: 'none' }));
+    assert.throws(() => createAuth({ allowedUsers: [USER, 'other@example.com'], allowedHosts: [HOST], auth: 'none' }));
+  });
+});

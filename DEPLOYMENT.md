@@ -85,7 +85,7 @@ curl -s -H 'Tailscale-User-Login: you@example.com' http://127.0.0.1:18795/api/st
 
 | 変数 | 例 | 内容 |
 |---|---|---|
-| `KEIHI_WEB_AUTH` | `cloudflare_access` | 認証の方式。`tailscale`（既定）は 127.0.0.1 でしか使えない |
+| `KEIHI_WEB_AUTH` | `cloudflare_access` | 認証の方式。`tailscale`（既定）は 127.0.0.1 でしか使えない。`none` は認証なし（VPN・LAN の内側だけで届く構成向け。§8） |
 | `KEIHI_WEB_ACCESS_TEAM_DOMAIN` | `example.cloudflareaccess.com` | Zero Trust のチームドメイン |
 | `KEIHI_WEB_ACCESS_AUD` | 64 桁の 16 進 | Access のアプリの「Application Audience (AUD) Tag」 |
 | `KEIHI_WEB_ALLOWED_USERS` | `you@example.com` | 通してよい利用者のメールアドレス（カンマ区切り） |
@@ -312,6 +312,18 @@ Coolify の設定（Healthcheck を有効にする。画面の設定はコンテ
 4. ショートカットのリクエストに `CF-Access-Client-Id` と `CF-Access-Client-Secret` のヘッダを足す。
 
 監査ログの「だれが」は `service:<Client ID>` になる。Client Secret はアプリには届かない（Access が検証して、JWT に置き換える）。
+
+### 認証なし（`none`）
+
+VPN（Tailscale など）や LAN の内側からしか届かない構成向け。`KEIHI_WEB_AUTH=none`（config.toml なら `[web] auth = "none"`）にする。
+
+- **アプリは利用者を確かめない。** `Tailscale-User-Login` も `Cf-Access-Jwt-Assertion` も読まない（付いていても無視する）。
+  届く人は全員が、全データを読み書きできる。届く範囲はネットワーク側（VPN の ACL・LAN）で絞る。
+- **外に公開する名前（Cloudflare Tunnel・公開 DNS など）では使わない。** 公開するなら `cloudflare_access` にする。
+- `Host` の検査（`KEIHI_WEB_ALLOWED_HOSTS`、これ以外は 400）と、変更系のリクエストの `Origin` の検査（403）は残る。
+- `KEIHI_WEB_ALLOWED_USERS` はちょうど 1 件にする（0 件・2 件以上なら起動しない）。監査ログの「だれが」はその 1 件。
+- `0.0.0.0` でもそのまま起動する（`KEIHI_INSECURE_HEADER_AUTH` は要らない。あれは `tailscale` の方式のための設定）。
+  起動のたびに `web: 認証なし（[web] auth = "none"）で起動する。…` の warn を 1 行出す。
 
 ## 9. 検証
 
